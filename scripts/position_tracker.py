@@ -168,6 +168,26 @@ def _settle_one(sig: Dict, bars: List[List]) -> Optional[Dict]:
 
         # 2) 是否挂到单
         if not sig.get("filled", False):
+            # 2026-10-06 liusir 规则：未进场的挂单，如果当前价已离 entry 太远
+            #  → 标 MISSED（避免长期挂死单占 journal 空间）
+            # 用 K 线 mid 估算当前价：(h+l)/2
+            _cur_mid = (h + l) / 2.0
+            _dist_pts = abs(_cur_mid - entry)
+            _TOO_FAR_PTS = 800.0   # 同方向点位 > 800 点 → 直接 missed
+            if _dist_pts > _TOO_FAR_PTS:
+                _sig_meta = dict(sig)
+                _sig_meta.update({
+                    "status": "settled",
+                    "pos_state": "MISSED",
+                    "outcome": "MISSED",
+                    "exit_ts": ts,
+                    "exit_px": round(_cur_mid, 1),
+                    "net_usd": 0.0,
+                    "category": "skip",
+                    "note": f"未进场：当前价距 entry {_dist_pts:.0f} 点 > {_TOO_FAR_PTS:.0f} 阈值",
+                })
+                last_check_ts = ts
+                return _sig_meta
             hit = (l <= entry) if side == "long" else (h >= entry)
             if not hit:
                 last_check_ts = ts
