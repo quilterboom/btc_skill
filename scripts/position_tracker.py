@@ -158,6 +158,14 @@ def _settle_one(sig: Dict, bars: List[List]) -> Optional[Dict]:
                 "note": f"48h 未成交"
             }
 
+        # 2026-10-06 防御：成交当根不判 SL/TP/BE
+        # 原因：成交判定本身用的是 low 触 entry，下一根才能开始判 SL/TP
+        #       否则手动改 active_sl=entry 后回放会在成交当根立刻误触 BE_STOPPED
+        _fill_ts = int(sig.get("fill_ts") or 0)
+        if _fill_ts and ts <= _fill_ts:
+            last_check_ts = ts
+            continue
+
         # 2) 是否挂到单
         if not sig.get("filled", False):
             hit = (l <= entry) if side == "long" else (h >= entry)
