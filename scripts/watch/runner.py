@@ -347,7 +347,7 @@ def _dump_ticker(it: Dict) -> None:
 
 
 def fire_rsi(rw: RsiWatcher, a: Dict) -> None:
-    """RSI 越界 → emit_scan（不调度 jump）"""
+    """RSI 越界 → emit_scan + 调度 JumpTracker 60s 跳空监测"""
     icon = "🟢" if a["hit"] == "oversold" else "🔴"
     log("=" * 74)
     log(f"{icon} RSI {a['side']}  {rw.contract} {a['tf']} RSI{a['period']} "
@@ -360,7 +360,30 @@ def fire_rsi(rw: RsiWatcher, a: Dict) -> None:
     log("=" * 74)
     px_txt = f" @ {a['px']:,.1f}" if a.get("px") else ""
     hook = f"[{rw.contract}] RSI{a['period']}({a['tf']}) {a['side']} {a['val']:.1f}{px_txt}"
-    emit_scan(rw.contract, a["tf"], a["kind"], a, rw.target, rw.do_scan, rw.extra, hook)
+    out = emit_scan(rw.contract, a["tf"], a["kind"], a, rw.target, rw.do_scan, rw.extra, hook)
+
+    # 2026-10-06 恢复（liusir 要求）：RSI 越界是趋势真变的信号，调 JumpTracker 跑 60s 跳空监测
+    # - 量能触发仍不调（频率太高），周期检查也不调（每 15 分钟骚扰）
+    # - RSI 触发是最合适的入口：信号明确 + 频次可控 + 是真正的"环境变了"
+    try:
+        from .jump import JumpTracker
+        _tok = _load_tg_token()
+        _chat = _load_tg_chat()
+        scan_payload = out.get("scan", {}).get("payload", {}) if isinstance(out, dict) else {}
+        alert_price = float(a.get("px") or a.get("close") or 0)
+        if alert_price > 0 and scan_payload and _tok and _chat:
+            JumpTracker.instance().start_or_restart(
+                alert_price=alert_price,
+                alert_ts=int(time.time()),
+                scan_payload=scan_payload,
+                kind=f"rsi_{a['side']}",
+                alert_summary=hook,
+                tg_token=_tok,
+                tg_chat=_chat,
+                target_pts=rw.target,
+            )
+    except Exception as e:
+        log(f"{WARN} JumpTracker 调度失败: {e}")
 
 
 # ============================ 运行 ============================
