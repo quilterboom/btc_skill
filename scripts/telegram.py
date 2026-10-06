@@ -26,6 +26,45 @@ OK, NO, WARN = "✅", "❌", "⚠️"
 SECRETS_PATH = Path("/root/.hermes/secrets/btc_tg.json")
 DEFAULT_CHAT_ID = "7097652385"
 
+# 2026-10-06 加：所有 TG 推送留痕（应对"莫名推送"无法溯源的问题）
+# 路径：/root/data/tg_audit.log
+# 字段：ts, caller, char_len, first_line, ok
+TG_AUDIT_PATH = Path(os.environ.get("BTCTG_AUDIT", "/root/data/tg_audit.log"))
+
+
+def _audit(card: str, ok: bool, chat_id: str = "") -> None:
+    """推送留痕：谁 + 何时 + 多长 + 第一行内容 + 是否成功"""
+    try:
+        ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+        # 提取 caller（用 inspect 拿到调用栈）
+        caller = ""
+        try:
+            import inspect
+            st = inspect.stack()
+            for f in st[1:6]:
+                fn = os.path.basename(f.filename)
+                ln = f.lineno
+                if fn not in ("telegram.py", "watch/__init__.py", "watch/runner.py", "<string>"):
+                    caller = f"{fn}:{ln}"
+                    break
+        except Exception:
+            pass
+        # 第一行（卡片标题）
+        first_line = card.strip().split("\n", 1)[0][:80] if card else ""
+        line = json.dumps({
+            "ts": ts,
+            "ep": int(time.time()),
+            "caller": caller,
+            "len": len(card or ""),
+            "chat": chat_id,
+            "title": first_line,
+            "ok": ok,
+        }, ensure_ascii=False)
+        with open(TG_AUDIT_PATH, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass  # 审计失败不能影响推送
+
 
 # ============================ 凭证 ============================
 def load_token() -> Optional[str]:
@@ -122,9 +161,11 @@ def push(card: str, token: Optional[str] = None, chat_id: Optional[str] = None) 
             ok = '"ok":true' in raw
             if not ok:
                 print(f"{WARN} TG 返回非 ok: {raw[:200]}", file=sys.stderr)
+            _audit(card, ok, chat_id=chat_id)
             return ok
     except Exception as e:
         print(f"{NO} TG 推送失败: {e}", file=sys.stderr)
+        _audit(card, False, chat_id=chat_id or "")
         return False
 
 
