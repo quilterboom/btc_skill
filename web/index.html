@@ -360,8 +360,10 @@ function render(d) {
       </div>
       <div class="meta">判定：${a.verdict || "—"}</div>
       <table style="margin-top:8px">
-        <tr><th>入场</th><td>${a.entry?.toLocaleString()}</td>
-            <th>止损</th><td class="neg">${a.sl?.toLocaleString()}</td></tr>
+        <tr><th>入场（左）</th><td>${a.entry?.toLocaleString()}</td>
+            <th>突破追（右）</th><td class="pos">${a.entry_break ? a.entry_break.toLocaleString() : "—"}</td></tr>
+        <tr><th>止损</th><td class="neg">${a.sl?.toLocaleString()}</td>
+            <th>TP1</th><td>${a.tp1?.toLocaleString()}</td></tr>
         <tr><th>TP1</th><td>${a.tp1?.toLocaleString()}</td>
             <th>TP2</th><td class="pos">${a.tp2?.toLocaleString()}</td></tr>
         <tr><th>趋势</th><td>${a.tags?.trend || "—"}</td>

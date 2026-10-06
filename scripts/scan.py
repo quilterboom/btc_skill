@@ -229,7 +229,7 @@ def make_plan(side, px, atrp, sup, res, d_atrp, lev, bal, risk, quanto, mode="cr
         entry_break = (res[0][1] * (1 + 0.05 * a)) if res else px * (1 + 0.10 * a)
         sec = sup[1][1] if len(sup) > 1 else entry - 2 * a * px
         sl = max(entry - 1.50 * a * px, sec - 0.30 * a * px)
-        sl_pct = float(np.clip((entry - sl) / entry, 0.008, 0.030))
+        sl_pct = float(np.clip((entry - sl) / entry, 0.004, 0.030))
         R = entry * sl_pct
         cap = entry + tp_pts                                   # 500 点硬顶
         rr = [x[1] for x in res if entry + 1.2 * R < x[1] < cap]
@@ -243,7 +243,7 @@ def make_plan(side, px, atrp, sup, res, d_atrp, lev, bal, risk, quanto, mode="cr
         entry_break = (sup[0][1] * (1 - 0.05 * a)) if sup else px * (1 - 0.10 * a)
         sec = res[1][1] if len(res) > 1 else entry + 2 * a * px
         sl = min(entry + 1.50 * a * px, sec + 0.30 * a * px)
-        sl_pct = float(np.clip((sl - entry) / entry, 0.008, 0.030))
+        sl_pct = float(np.clip((sl - entry) / entry, 0.004, 0.030))
         R = entry * sl_pct
         cap = entry - tp_pts
         ss = sorted([x[1] for x in sup if cap < x[1] < entry - 1.2 * R], key=lambda v: -v)
@@ -255,7 +255,7 @@ def make_plan(side, px, atrp, sup, res, d_atrp, lev, bal, risk, quanto, mode="cr
 
     sl_points = entry * sl_pct                                  # 止损点数
     be_wr = sl_points / (sl_points + tp_pts)                    # 保本胜率（1:1 盈亏比口径）
-    notional = min(bal * risk / sl_pct, bal * 50)
+    notional = 50.0 * lev                                       # 固定 50U 保证金 × 杠杆 = 名义（50×100 = 5000 U）
     nx = notional / bal
     contracts = notional / (entry * quanto)
     margin = notional / lev
@@ -296,7 +296,7 @@ def main():
     ap = argparse.ArgumentParser(add_help=False)
     ap.add_argument("contract", nargs="?", default="BTC_USDT")
     ap.add_argument("--lev", type=float, default=100.0)
-    ap.add_argument("--bal", type=float, default=1000.0)
+    ap.add_argument("--bal", type=float, default=50.0)
     ap.add_argument("--risk", type=float, default=0.01)
     ap.add_argument("--target", type=float, default=1000.0,
                     help="单笔目标盈利点数（BTC 价格点，默认 1000）→ T3 硬顶，不贪；TP1=40%×target=400 点，TP2=60%×target=600 点")
@@ -814,7 +814,7 @@ def main():
     P(f"    1. 入场挂 post-only 限价（maker {MAKER_FEE*100:+.3f}% 返佣）；"
       f"taker {TAKER_FEE*100:.3f}%，往返成本差 {(TAKER_FEE+abs(MAKER_FEE))*200:.3f}%")
     P( "    2. 核心①②未满足不进场 —— 回测「见 TD9 就冲」EV 为负（4h: -0.71%/笔，p=0.876）")
-    P(f"    2b. 目标 {TARGET:,.0f} 点 + 止损 0.8% 是「小目标 / 大止损」，保本胜率 58%：")
+    P(f"    2b. 目标 {TARGET:,.0f} 点 + 止损按 ATR 自适应（1.5×ATR，通常 0.4~0.6%）：")
     P( "        → 只在核心信号成立时做；且必须配移动止损 0.5%")
     P( "        → 回测 4h：不加移动止损 EV -0.05%、PF 0.84；加 0.5% 移动止损 EV +0.05%、PF 1.23")
     P( "    3. 做空为逆势方向（回测 EV -0.28%/笔）→ 做空仓位减半，或得分门槛 +1")

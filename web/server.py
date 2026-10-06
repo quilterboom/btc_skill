@@ -14,7 +14,7 @@ BTC 策略运行状态面板（3003）
 - 文案清晰、状态机明确
 """
 from __future__ import annotations
-import os, sys, json, time, glob
+import os, sys, json, time, glob, subprocess
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
@@ -43,16 +43,39 @@ def _file_age_sec(path: Path) -> float | None:
 
 
 def _check_process(pid_path: Path) -> dict:
-    """读 pid 文件 + 检查进程是否真活着"""
+    """读 pid 文件 + 检查进程是否真活着
+
+    Fallback: pid 文件不存在时（systemd 接管后不再写），用 pgrep 找 watch.py run。
+    """
     if not pid_path.exists():
-        return {"alive": False, "reason": "no pid file", "pid": None}
+        # Fallback: pgrep -f 找 watch.py run（systemd 接管后路径唯一标识）
+        try:
+            out = subprocess.run(
+                ["pgrep", "-f", "watch.py run"],
+                capture_output=True, text=True, timeout=5,
+            )
+            pids = [int(p) for p in out.stdout.strip().split() if p.isdigit()]
+            # 过滤掉 grep 自身（一般不会，但兜底）
+            my_pid = os.getpid()
+            pids = [p for p in pids if p != my_pid]
+            if pids:
+                # 取最小 PID（最长寿的那个）
+                pid = min(pids)
+                try:
+                    os.kill(pid, 0)
+                    return {"alive": True, "pid": pid, "source": "pgrep"}
+                except ProcessLookupError:
+                    pass
+        except Exception:
+            pass
+        return {"alive": False, "reason": "no pid file + pgrep miss", "pid": None}
     try:
         pid = int(pid_path.read_text().strip())
     except Exception:
         return {"alive": False, "reason": "bad pid file", "pid": None}
     try:
         os.kill(pid, 0)   # 不真发信号，只检查可发
-        return {"alive": True, "pid": pid}
+        return {"alive": True, "pid": pid, "source": "pidfile"}
     except ProcessLookupError:
         return {"alive": False, "reason": "process not found", "pid": pid}
     except PermissionError:
