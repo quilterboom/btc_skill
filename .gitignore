@@ -1,0 +1,22 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pkl
+*.bak
+*.swp
+.DS_Store
+.env
+.venv/
+
+# 数据文件（不要推本地 cache、journal、回测样本）
+data/
+backtest_data/
+*.jsonl
+
+# 本地日志
+*.log
+watch.log
+
+# 我刚刚生成的备份（开发临时）
+config.yaml.bak-*
+config.yaml.*-bak-*

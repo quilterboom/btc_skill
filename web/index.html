@@ -1,0 +1,511 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BTC 策略状态</title>
+<style>
+  :root {
+    --bg: #f8fafc;
+    --card: #ffffff;
+    --border: #e5e7eb;
+    --text: #111827;
+    --muted: #6b7280;
+    --green: #10b981;
+    --red: #ef4444;
+    --amber: #f59e0b;
+    --blue: #3b82f6;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 24px 20px 80px; }
+  h1 { font-size: 22px; font-weight: 600; margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 24px; }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 16px;
+  }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 18px 20px;
+  }
+  .card h3 {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--muted);
+    margin: 0 0 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .big {
+    font-size: 28px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+  .meta { font-size: 12px; color: var(--muted); margin-top: 6px; }
+  .row { display: flex; justify-content: space-between; padding: 4px 0; font-size: 13px; }
+  .row .lbl { color: var(--muted); }
+  .row .val { font-variant-numeric: tabular-nums; }
+  .pill {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 500;
+  }
+  .pill.ok    { background: #d1fae5; color: #065f46; }
+  .pill.bad   { background: #fee2e2; color: #991b1b; }
+  .pill.warn  { background: #fef3c7; color: #92400e; }
+  .pill.idle  { background: #f3f4f6; color: #374151; }
+  pre {
+    background: #f9fafb;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 12px;
+    font-size: 12px;
+    margin: 8px 0 0;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .pos { color: var(--green); font-weight: 500; }
+  .neg { color: var(--red); font-weight: 500; }
+  .empty { color: var(--muted); font-style: italic; }
+  .toolbar {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 16px; gap: 12px; flex-wrap: wrap;
+  }
+  .toolbar button {
+    padding: 6px 14px; border: 1px solid var(--border); background: white;
+    border-radius: 6px; cursor: pointer; font-size: 13px;
+  }
+  .toolbar button:hover { background: #f3f4f6; }
+  .toolbar .updated { font-size: 12px; color: var(--muted); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="toolbar">
+    <div>
+      <h1>BTC 策略状态</h1>
+      <div class="sub" id="updated">加载中…</div>
+    </div>
+    <button onclick="load()">手动刷新</button>
+  </div>
+
+  <!-- 顶部 4 个小卡片：进程 / 冷却 / 数据 / BTC -->
+  <div class="grid">
+
+    <div class="card">
+      <h3>进程状态</h3>
+      <div id="proc-pill"></div>
+      <div class="row"><span class="lbl">watch pid</span><span class="val" id="proc-pid">—</span></div>
+      <div class="row"><span class="lbl">settler 心跳</span><span class="val" id="proc-hb">—</span></div>
+      <div class="meta" id="proc-meta"></div>
+    </div>
+
+    <div class="card">
+      <h3>策略冷却</h3>
+      <div id="cd-pill"></div>
+      <div class="row"><span class="lbl">距上次触发</span><span class="val" id="cd-last">—</span></div>
+      <div class="row"><span class="lbl">cooldown 阈值</span><span class="val">1800s (30min)</span></div>
+      <div class="meta" id="cd-meta"></div>
+    </div>
+
+    <div class="card">
+      <h3>BTC 现价</h3>
+      <div class="big" id="btc-price">—</div>
+      <div class="meta" id="btc-meta"></div>
+    </div>
+  </div>
+
+  <!-- 中间：策略状态 -->
+  <div class="grid" style="margin-top:16px">
+    <div class="card" style="grid-column: 1 / -1">
+      <h3>当前策略</h3>
+      <div id="strategy-body">暂无活跃策略</div>
+    </div>
+  </div>
+
+  <!-- 底部：胜率 -->
+  <div class="grid" style="margin-top:16px">
+    <div class="card">
+      <h3>累计胜率</h3>
+      <div class="big" id="wr-total">—</div>
+      <div class="row"><span class="lbl">总单数</span><span class="val" id="wr-n">—</span></div>
+      <div class="row"><span class="lbl">胜 / 负</span><span class="val" id="wr-wl">—</span></div>
+      <div class="row"><span class="lbl">累计净盈亏</span><span class="val" id="wr-pnl">—</span></div>
+    </div>
+
+    <div class="card">
+      <h3>最近 20 笔</h3>
+      <div class="big" id="wr-20">—</div>
+      <div class="row"><span class="lbl">样本</span><span class="val" id="wr-20-n">—</span></div>
+    </div>
+
+    <div class="card">
+      <h3>近 7 天</h3>
+      <div class="big" id="wr-7d">—</div>
+      <div class="row"><span class="lbl">样本</span><span class="val" id="wr-7d-n">—</span></div>
+    </div>
+  </div>
+
+  <!-- 结算明细（分页） -->
+  <div class="grid" style="margin-top:16px">
+    <div class="card" style="grid-column: 1 / -1">
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:12px">
+        <h3 style="margin:0">结算明细（已过滤测试单）</h3>
+        <div style="display:flex; align-items:center; gap:12px">
+          <label class="meta" style="cursor:pointer">
+            <input type="checkbox" id="settle-include-test" style="vertical-align:middle">
+            含测试数据
+          </label>
+          <select id="settle-size" style="font-size:13px; padding:4px 8px; border-radius:6px; border:1px solid var(--border); background:#fff">
+            <option value="10">10 / 页</option>
+            <option value="20" selected>20 / 页</option>
+            <option value="50">50 / 页</option>
+          </select>
+        </div>
+      </div>
+      <div class="meta" style="margin:6px 0 10px 0">
+        <span id="settle-summary">—</span>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th style="width:24%">id</th>
+            <th>多空</th>
+            <th>结果</th>
+            <th class="num">进场点</th>
+            <th class="num">出场点</th>
+            <th class="num">净 USD</th>
+            <th>退出时间</th>
+          </tr>
+        </thead>
+        <tbody id="recent-rows"></tbody>
+      </table>
+      <div style="display:flex; align-items:center; justify-content:space-between; margin-top:10px">
+        <button class="btn" id="settle-prev" style="font-size:13px; padding:6px 12px; border:1px solid var(--border); background:#fff; border-radius:6px; cursor:pointer">← 上一页</button>
+        <span class="meta" id="settle-page-info">第 1 页</span>
+        <button class="btn" id="settle-next" style="font-size:13px; padding:6px 12px; border:1px solid var(--border); background:#fff; border-radius:6px; cursor:pointer">下一页 →</button>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+let _t;
+function fmtTime(ts) {
+  if (!ts) return "—";
+  const d = new Date(ts * 1000);
+  const pad = n => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+function fmtAge(sec) {
+  if (sec == null) return "—";
+  if (sec < 60) return sec.toFixed(0) + "s 前";
+  if (sec < 3600) return (sec/60).toFixed(1) + "min 前";
+  if (sec < 86400) return (sec/3600).toFixed(1) + "h 前";
+  return (sec/86400).toFixed(1) + "d 前";
+}
+function fmtPct(v) { return v == null ? "—" : v.toFixed(1) + "%"; }
+function fmtUsd(v) {
+  if (v == null) return "—";
+  return (v >= 0 ? "+" : "") + v.toFixed(2) + "U";
+}
+function pillClass(ok, warn) {
+  if (ok === true) return "pill ok";
+  if (ok === false) return "pill bad";
+  return "pill warn";
+}
+
+function render(d) {
+  // 顶部时间戳
+  document.getElementById("updated").textContent = "更新时间：" + d.ts_str + "  ·  自动每 1s 刷新";
+
+  // 进程状态
+  const proc = d.process;
+  let procPill, procMeta;
+  if (!proc.alive) {
+    procPill = `<span class="pill bad">未运行</span>`;
+    procMeta = proc.reason || "检查 watch 进程";
+  } else if (!proc.settler_ok) {
+    procPill = `<span class="pill warn">运行但心跳异常</span>`;
+    procMeta = `心跳 ${fmtAge(proc.heartbeat_age_sec)}`;
+  } else {
+    procPill = `<span class="pill ok">运行中</span>`;
+    procMeta = "watch + settler 正常";
+  }
+  document.getElementById("proc-pill").innerHTML = procPill;
+  document.getElementById("proc-pid").textContent = proc.pid ?? "—";
+  document.getElementById("proc-hb").textContent = proc.heartbeat_age_sec == null ? "—" : fmtAge(proc.heartbeat_age_sec);
+  document.getElementById("proc-meta").textContent = procMeta;
+
+  // 策略冷却
+  const cd = d.watch_state;
+  const lastFire = cd.last_fire_age_sec;
+  let cdPill, cdMeta;
+  if (lastFire == null) {
+    cdPill = `<span class="pill idle">无历史</span>`;
+    cdMeta = "从未触发过量能异动";
+  } else if (cd.cooldown_ok) {
+    cdPill = `<span class="pill ok">已就绪</span>`;
+    cdMeta = "可被触发";
+  } else {
+    cdPill = `<span class="pill warn">冷却中</span>`;
+    cdMeta = `再等 ${Math.ceil(1800 - lastFire)}s`;
+  }
+  document.getElementById("cd-pill").innerHTML = cdPill;
+  document.getElementById("cd-last").textContent = lastFire == null ? "—" : fmtAge(lastFire);
+  document.getElementById("cd-meta").textContent = cdMeta;
+
+  // BTC
+  document.getElementById("btc-price").textContent = d.btc != null
+    ? d.btc.toLocaleString("en-US", {maximumFractionDigits: 1})
+    : "—";
+
+  // 2026-10-05：BTC 现价下方只展示更新时间
+  document.getElementById("btc-meta").textContent = d.ts_str ? `更新于 ${d.ts_str}` : "—";
+
+  // 策略
+  const a = d.strategy.active;
+  const strategyBody = document.getElementById("strategy-body");
+  if (!a) {
+    strategyBody.innerHTML = `<div class="empty">暂无 pending 或 filled 的活跃策略</div>
+      <div class="meta" style="margin-top:8px">累计 journal ${d.strategy.total} 条，其中 invalidated ${d.strategy.recent_invalidated} 条</div>`;
+  } else {
+    const side = a.side === "long" ? "做多" : "做空";
+    const sideClass = a.side === "long" ? "pos" : "neg";
+    // 状态判断：status=pending 表示「还在持仓跟踪中」（不一定挂单）
+    //          filled=true 表示「已成交」（pending + filled=true = 已进场）
+    //          只有 status=pending 且 filled=false 才是真挂单
+    let statusPill, statusText;
+    // 2026-10-05：TP1_PARTIAL / TP2_PARTIAL 算"已部分止盈"，不是挂单也不是"已进场"
+    const isPartial = a.tp1_hit === true || a.tp2_hit === true;
+    if (isPartial) {
+      const hit = a.tp2_hit ? "TP2" : "TP1";
+      statusPill = `<span class="pill ok">已部分止盈 ${hit}</span>`;
+      statusText = `已部分止盈 ${hit}，剩余仓位在场`;
+    } else if (a.status === "filled" || (a.status === "pending" && a.filled === true)) {
+      statusPill = `<span class="pill ok">已进场</span>`;
+      statusText = "已进场（持仓中）";
+    } else if (a.status === "pending") {
+      statusPill = `<span class="pill warn">挂单中</span>`;
+      statusText = "挂单未成交";
+    } else {
+      statusPill = `<span class="pill idle">${a.status}</span>`;
+      statusText = a.status;
+    }
+    // 持仓现状（仅当有仓位时显示）
+    const filledBlock = a.filled ? (() => {
+      const fillPx = a.fill_px;
+      const curPx = d.btc;
+      let pnlHtml = '';
+      let partialHtml = '';
+      // 已部分止盈：显示"原 N 张 → 剩 M 张"
+      if (a.tp1_hit === true || a.tp2_hit === true) {
+        const remain = a.contracts ?? 0;
+        const closed = a.partial_exits ?? 1;
+        const total = remain + closed;
+        const hit = a.tp2_hit ? "TP2" : "TP1";
+        partialHtml = `<div class="row"><span class="lbl">已部分止盈</span>
+            <span class="val pos">${hit} 命中 1/${a.tp2_hit ? 3 : 3}</span></div>
+          <div class="row"><span class="lbl">仓位</span>
+            <span class="val">剩 ${remain.toLocaleString()} / 原 ${total.toLocaleString()} 张</span></div>
+          <div class="row"><span class="lbl">止损</span>
+            <span class="val">已移至 BE（${fillPx?.toLocaleString() ?? "—"}）</span></div>`;
+      }
+      if (fillPx != null && curPx != null && a.contracts != null) {
+        // 模拟损益：剩余仓位的未实现
+        const qty = a.contracts * 0.0001;
+        const dir = a.side === "long" ? 1 : -1;
+        const gross = (curPx - fillPx) * dir * qty;
+        const net = gross - 4.85;
+        const cls = net >= 0 ? "pos" : "neg";
+        pnlHtml = `<div class="row"><span class="lbl">未实现净盈亏（剩余仓位）</span>
+            <span class="val ${cls}">${net >= 0 ? "+" : ""}${net.toFixed(2)}U</span></div>
+          <div class="meta">已扣手续费 4.85U ｜ 未扣资金费率</div>`;
+      }
+      return `
+        <div style="margin-top:14px; padding-top:12px; border-top:1px dashed var(--border)">
+          <div class="meta" style="margin-bottom:6px"><b>已进场</b></div>
+          <div class="row"><span class="lbl">成交价</span><span class="val">${fillPx?.toLocaleString() ?? "—"}</span></div>
+          <div class="row"><span class="lbl">成交时间</span><span class="val">${a.fill_ts ? new Date(a.fill_ts*1000).toLocaleTimeString("zh-CN") : "—"}</span></div>
+          <div class="row"><span class="lbl">当前价</span><span class="val">${curPx?.toLocaleString() ?? "—"}</span></div>
+          ${partialHtml}
+          ${pnlHtml}
+        </div>`;
+    })() : '';
+    strategyBody.innerHTML = `
+      <div style="display:flex; align-items:center; gap:12px; margin-bottom:8px">
+        ${statusPill}
+        <span class="${sideClass}" style="font-size:16px; font-weight:600">${side} ${a.side.toUpperCase()}</span>
+        <span class="meta">score=${a.score} / ${a.core_ok ? "核心成立" : "未成立"}</span>
+      </div>
+      <div class="meta">判定：${a.verdict || "—"}</div>
+      <table style="margin-top:8px">
+        <tr><th>入场</th><td>${a.entry?.toLocaleString()}</td>
+            <th>止损</th><td class="neg">${a.sl?.toLocaleString()}</td></tr>
+        <tr><th>TP1</th><td>${a.tp1?.toLocaleString()}</td>
+            <th>TP2</th><td class="pos">${a.tp2?.toLocaleString()}</td></tr>
+        <tr><th>趋势</th><td>${a.tags?.trend || "—"}</td>
+            <th>量能</th><td>${a.tags?.vol || "—"}</td></tr>
+      </table>
+      ${filledBlock}
+    `;
+  }
+
+  // 胜率
+  const wr = d.winrate;
+  document.getElementById("wr-total").textContent = fmtPct(wr.winrate_pct);
+  document.getElementById("wr-n").textContent = wr.total;
+  document.getElementById("wr-wl").textContent = (wr.wins || 0) + " / " + (wr.losses || 0);
+  const pnlEl = document.getElementById("wr-pnl");
+  pnlEl.textContent = fmtUsd(wr.net_usd_total);
+  pnlEl.className = "val " + (wr.net_usd_total >= 0 ? "pos" : "neg");
+
+  document.getElementById("wr-20").textContent = fmtPct(wr.recent_20.winrate_pct);
+  document.getElementById("wr-20-n").textContent = wr.recent_20.total;
+
+  document.getElementById("wr-7d").textContent = fmtPct(wr.last_7d.winrate_pct);
+  document.getElementById("wr-7d-n").textContent = wr.last_7d.total;
+
+  // 最近的 5 笔（兜底渲染，主列表由分页 fetchSettlements() 接管）
+  const recent = wr.latest_5 || [];
+  const recentRows = recent.map(r => {
+    const cls = r.net_usd >= 0 ? "pos" : "neg";
+    const idShort = (r.id || "").length > 26 ? r.id.slice(0, 26) + "…" : r.id;
+    return `<tr>
+      <td><code style="font-size:11px" title="${r.id}">${idShort}</code></td>
+      <td style="color:var(--muted)">—</td>
+      <td>${r.outcome}</td>
+      <td class="num">—</td>
+      <td class="num">—</td>
+      <td class="num ${cls}">${fmtUsd(r.net_usd)}</td>
+      <td>${fmtTime(r.ts)}</td>
+    </tr>`;
+  }).join("");
+  // ★ recent-rows 现在由分页 fetchSettlements() 接管，这里只兜底
+  if (!document.getElementById("recent-rows").dataset.ready) {
+    document.getElementById("recent-rows").innerHTML = recentRows ||
+      `<tr><td colspan="7" class="empty">无结算记录</td></tr>`;
+  }
+}
+
+// ============================ 结算明细分页 ============================
+let _settlePage = 1;
+let _settleSize = 20;
+let _settleIncludeTest = false;
+
+async function fetchSettlements() {
+  const params = new URLSearchParams({
+    page: String(_settlePage),
+    size: String(_settleSize),
+    include_test: _settleIncludeTest ? "1" : "0",
+  });
+  try {
+    const r = await fetch("/api/settlements?" + params, {cache: "no-store"});
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const d = await r.json();
+    renderSettlements(d);
+  } catch (e) {
+    document.getElementById("recent-rows").innerHTML =
+      `<tr><td colspan="5" class="empty">加载失败：${e.message}</td></tr>`;
+  }
+}
+
+function renderSettlements(d) {
+  const tbody = document.getElementById("recent-rows");
+  tbody.dataset.ready = "1";
+  const items = d.items || [];
+  if (!items.length) {
+    tbody.innerHTML = `<tr><td colspan="7" class="empty">无结算记录</td></tr>`;
+  } else {
+    tbody.innerHTML = items.map(r => {
+      const cls = r.net_usd >= 0 ? "pos" : "neg";
+      const id = r.id || "";
+      const idShort = id.length > 26 ? id.slice(0, 26) + "…" : id;
+      const sideCls = r.side === "long" ? "pos" : (r.side === "short" ? "neg" : "");
+      const sideTxt = r.side_cn || "—";
+      const entryTxt = r.entry != null ? r.entry.toLocaleString("en-US", {maximumFractionDigits: 1}) : "—";
+      const exitTxt = r.exit_px != null ? r.exit_px.toLocaleString("en-US", {maximumFractionDigits: 1}) : "—";
+      return `<tr>
+        <td><code style="font-size:11px" title="${id}">${idShort}</code></td>
+        <td class="${sideCls}" style="font-weight:600">${sideTxt}</td>
+        <td>${r.outcome || "—"}</td>
+        <td class="num">${entryTxt}</td>
+        <td class="num">${exitTxt}</td>
+        <td class="num ${cls}">${fmtUsd(r.net_usd)}</td>
+        <td>${fmtTime(r.ts)}</td>
+      </tr>`;
+    }).join("");
+  }
+  // 翻页按钮可用状态
+  const prevBtn = document.getElementById("settle-prev");
+  const nextBtn = document.getElementById("settle-next");
+  prevBtn.disabled = _settlePage <= 1;
+  nextBtn.disabled = !d.has_more;
+  prevBtn.style.opacity = prevBtn.disabled ? 0.4 : 1;
+  nextBtn.style.opacity = nextBtn.disabled ? 0.4 : 1;
+  // 摘要 + 页码
+  const filterInfo = d.included_test
+    ? "（含测试）"
+    : (d.filtered_test_n > 0 ? `（已过滤 ${d.filtered_test_n} 条测试）` : "");
+  document.getElementById("settle-summary").textContent =
+    `共 ${d.total} 条${filterInfo} ｜ 文件总数 ${d.total_all} 条`;
+  document.getElementById("settle-page-info").textContent =
+    `第 ${d.page} / ${Math.max(1, Math.ceil(d.total / d.size))} 页`;
+}
+
+// 翻页 / 切换大小 / 切换测试过滤 — 都触发 fetchSettlements
+document.getElementById("settle-prev").addEventListener("click", () => {
+  if (_settlePage > 1) { _settlePage--; fetchSettlements(); }
+});
+document.getElementById("settle-next").addEventListener("click", () => {
+  _settlePage++; fetchSettlements();
+});
+document.getElementById("settle-size").addEventListener("change", (e) => {
+  _settleSize = parseInt(e.target.value, 10);
+  _settlePage = 1;
+  fetchSettlements();
+});
+document.getElementById("settle-include-test").addEventListener("change", (e) => {
+  _settleIncludeTest = e.target.checked;
+  _settlePage = 1;
+  fetchSettlements();
+});
+
+async function load() {
+  try {
+    const r = await fetch("/api/status", {cache: "no-store"});
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const d = await r.json();
+    render(d);
+  } catch (e) {
+    document.getElementById("updated").textContent = "加载失败：" + e.message;
+  }
+  // 独立加载（不阻塞主状态刷新）
+  fetchSettlements();
+}
+
+load();
+setInterval(load, 1000);  // 1s 自动刷新
+</script>
+</body>
+</html>
