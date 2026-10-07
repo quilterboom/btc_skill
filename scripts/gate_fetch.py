@@ -477,4 +477,120 @@ if __name__ == "__main__":
     if bars:
         t0 = datetime.datetime.fromtimestamp(bars[0][0], _U).strftime("%Y-%m-%d %H:%M")
         t1 = datetime.datetime.fromtimestamp(bars[-1][0], _U).strftime("%Y-%m-%d %H:%M")
-        print(f"区间 {t0} ~ {t1} UTC ｜ 末根 {bars[-1]}")
+
+# ============================================
+# 新增数据源: OI / 盘口 / 多空比 (2026-10-07 liusir B 方案)
+# ============================================
+
+# OI 历史（用于计算变化率）
+_OI_HISTORY = []  # [(timestamp, oi_value)]
+
+
+def fetch_oi(contract="BTC_USDT"):
+    """获取当前 OI + 5分钟前 OI，返回变化率"""
+    import time
+    now = time.time()
+
+    # 拉当前 OI
+    stats = fetch_public("/futures/usdt/contract_stats", {"contract": contract, "limit": 1})
+    if not stats:
+        return {"oi_current": None, "oi_change_pct": 0, "signal": 0}
+
+    oi_current = float(stats[0].get("open_interest", 0))
+    lsr_taker = float(stats[0].get("lsr_taker", 1))
+    lsr_account = float(stats[0].get("lsr_account", 1))
+
+    # 存历史
+    _OI_HISTORY.append((now, oi_current))
+
+    # 只保留最近 10 分钟
+    cutoff = now - 600
+    while _OI_HISTORY and _OI_HISTORY[0][0] < cutoff:
+        _OI_HISTORY.pop(0)
+
+    # 找 5 分钟前的 OI
+    target_time = now - 300
+    oi_5m_ago = None
+    for ts, val in reversed(_OI_HISTORY):
+        if ts <= target_time:
+            oi_5m_ago = val
+            break
+
+    if oi_5m_ago and oi_5m_ago > 0:
+        oi_change_pct = (oi_current - oi_5m_ago) / oi_5m_ago * 100
+    else:
+        oi_change_pct = 0
+
+    # 信号: OI 变化率 > 0.5% → 资金进场 +1
+    signal = 1 if oi_change_pct > 0.5 else 0
+
+    return {
+        "oi_current": oi_current,
+        "oi_change_pct": oi_change_pct,
+        "lsr_taker": lsr_taker,
+        "lsr_account": lsr_account,
+        "signal": signal
+    }
+
+
+def fetch_orderbook_imbalance(contract="BTC_USDT", limit=20):
+    """获取盘口买卖比"""
+    ob = fetch_public("/futures/usdt/order_book", {"contract": contract, "limit": limit})
+    if not ob:
+        return {"bid_vol": 0, "ask_vol": 0, "ratio": 1.0, "signal_long": 0, "signal_short": 0}
+
+    bids = ob.get("bids", [])
+    asks = ob.get("asks", [])
+
+    bid_vol = sum(float(b.get("s", 0)) for b in bids)
+    ask_vol = sum(float(a.get("s", 0)) for a in asks)
+
+    ratio = bid_vol / ask_vol if ask_vol > 0 else float("inf")
+
+    # 信号: 买卖比 > 1.5 → 做多 +1; < 0.67 → 做空 +1
+    signal_long = 1 if ratio > 1.5 else 0
+    signal_short = 1 if ratio < 0.67 else 0
+
+    return {
+        "bid_vol": bid_vol,
+        "ask_vol": ask_vol,
+        "ratio": ratio,
+        "signal_long": signal_long,
+        "signal_short": signal_short
+    }
+
+
+def fetch_lsr_signal(contract="BTC_USDT"):
+    """获取多空比信号（反指逻辑）"""
+    stats = fetch_public("/futures/usdt/contract_stats", {"contract": contract, "limit": 1})
+    if not stats:
+        return {"lsr": 1.0, "signal_long": 0, "signal_short": 0}
+
+    lsr_taker = float(stats[0].get("lsr_taker", 1))
+    lsr_account = float(stats[0].get("lsr_account", 1))
+
+    # 用 taker 比（更敏感）
+    lsr = lsr_taker
+
+    # 反指逻辑:
+    # 2.0-3.0: 正常看多 → 做多 +1
+    # >3.0: 过热 → 做空 +1 (反指)
+    # 0.33-0.5: 正常看空 → 做空 +1
+    # <0.33: 过热 → 做多 +1 (反指)
+
+    if 2.0 <= lsr <= 3.0:
+        signal_long, signal_short = 1, 0
+    elif lsr > 3.0:
+        signal_long, signal_short = 0, 1  # 反指做空
+    elif 0.33 <= lsr <= 0.5:
+        signal_long, signal_short = 0, 1
+    elif lsr < 0.33:
+        signal_long, signal_short = 1, 0  # 反指做多
+    else:
+        signal_long, signal_short = 0, 0  # 中间区域，不加分
+
+    return {
+        "lsr": lsr,
+        "signal_long": signal_long,
+        "signal_short": signal_short
+    }

@@ -429,20 +429,52 @@ def main():
     tl_long_score  = tl_long_ok  and not sideways
     tl_short_score = tl_short_ok and not sideways
 
+    # === 新增 B 方案信号: OI / 盘口 / 多空比 (2026-10-07 liusir) ===
+    from gate_fetch import fetch_oi, fetch_orderbook_imbalance, fetch_lsr_signal
+
+    # OI 持仓量变化
+    try:
+        oi_data = fetch_oi(CONTRACT)
+        oi_signal = oi_data.get("signal", 0)
+    except:
+        oi_signal = 0
+
+    # 盘口买卖比
+    try:
+        ob_data = fetch_orderbook_imbalance(CONTRACT)
+        ob_long_signal = ob_data.get("signal_long", 0)
+        ob_short_signal = ob_data.get("signal_short", 0)
+    except:
+        ob_long_signal = ob_short_signal = 0
+
+    # 多空比（反指逻辑）
+    try:
+        lsr_data = fetch_lsr_signal(CONTRACT)
+        lsr_long_signal = lsr_data.get("signal_long", 0)
+        lsr_short_signal = lsr_data.get("signal_short", 0)
+    except:
+        lsr_long_signal = lsr_short_signal = 0
+
     rows_b = [("① TD9 抄底完成（1h，近5根）", td9b_recent),
               ("② 其后连续 2 根收阳确认【核心】", core_b),
               ("③ 4h 收盘价在 4h EMA144 之上", bool(ml.close > ml.e144)),
               ("④ 4h EMA169 斜率 > 0（多头结构）", bool(ml.e169_s5 > 0)),
               ("⑤ 1h RSI 金叉（RSI6 上穿 RSI14）", gx),
               ("⑥ 量能确认（1h 量比 > 1.2）", bool(hl.vr > 1.2)),
-              ("⑦ 1h 上升趋势线：价格站上 + 斜率 > 0（横盘不计）", tl_long_score)]
+              ("⑦ 1h 上升趋势线：价格站上 + 斜率 > 0（横盘不计）", tl_long_score),
+              ("⑧ OI 持仓量增加 > 0.5%（资金进场）", bool(oi_signal)),
+              ("⑨ 盘口买卖比 > 1.5（强买压）", bool(ob_long_signal)),
+              ("⑩ 多空比 2.0-3.0（正常看多）", bool(lsr_long_signal))]
     rows_s = [("① TD9 逃顶完成（1h，近5根）", td9s_recent),
               ("② 其后连续 2 根收阴确认【核心】", core_s),
               ("③ 4h 收盘价在 4h EMA144 之下", bool(ml.close < ml.e144)),
               ("④ 4h EMA169 斜率 < 0（空头结构）", bool(ml.e169_s5 < 0)),
               ("⑤ 1h RSI 死叉（RSI6 下穿 RSI14）", dx),
               ("⑥ 量能确认（1h 量比 > 1.2）", bool(hl.vr > 1.2)),
-              ("⑦ 1h 下降趋势线：价格跌穿 + 斜率 < 0（横盘不计）", tl_short_score)]
+              ("⑦ 1h 下降趋势线：价格跌穿 + 斜率 < 0（横盘不计）", tl_short_score),
+              ("⑧ OI 持仓量增加 > 0.5%（资金进场）", bool(oi_signal)),
+              ("⑨ 盘口买卖比 < 0.67（强卖压）", bool(ob_short_signal)),
+              ("⑩ 多空比 0.33-0.5（正常看空）", bool(lsr_short_signal))]
     sc_b = sum(1 for _, v in rows_b if v); sc_s = sum(1 for _, v in rows_s if v)
 
     # ========== 情绪/事件上下文：funding + 外部事件 ==========
