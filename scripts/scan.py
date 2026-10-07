@@ -327,7 +327,7 @@ def main():
         TUNE = {} if a.no_journal else _J.load_tuning()
     except Exception:
         _J, TUNE = None, {}
-    THR = int(TUNE.get("score_threshold", 4) or 4)
+    THR = int(TUNE.get("score_threshold", 5) or 5)  # 2026-10-07 liusir: 提高到 5（7 中过 5 才进）
     RS = float(TUNE.get("risk_scale", 1.0) or 1.0)
     SZ = dict(TUNE.get("side_size", {}) or {})
 
