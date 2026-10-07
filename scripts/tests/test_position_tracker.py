@@ -120,7 +120,7 @@ class TestSettleOneLong(unittest.TestCase):
         self.assertAlmostEqual(res["net_usd"], 84.33, places=1)
 
     def test_long_not_filled_yet_misses(self):
-        """48h 没成交 → MISSED"""
+        """48h 没成交 → MISSED（未进场不返佣）"""
         sig = _make_sig("long", entry=100, sl=99, tp1=101, ts=1000)
         # ts - pending_ts > 48h 才会 MISSED
         ts_after_48h = 1000 + 48 * 3600 + 100
@@ -131,8 +131,9 @@ class TestSettleOneLong(unittest.TestCase):
         self.assertIsNotNone(res)
         self.assertEqual(res["outcome"], "MISSED")
         self.assertEqual(res["category"], "skip")
-        # net = -FEE = -4.85
-        self.assertAlmostEqual(res["net_usd"], 1.0, places=2)
+        # 2026-10-07 liusir 规则：未进场的挂单标记作废，不返佣，net_usd = 0
+        self.assertAlmostEqual(res["net_usd"], 0.0, places=2)
+        self.assertEqual(res["note"], "48h 未成交")
 
     def test_long_same_bar_tp_sl_priority(self):
         """
@@ -458,6 +459,126 @@ class TestEmaBreakWarning(unittest.TestCase):
         self.assertTrue(r1)
         self.assertFalse(r2, "第二次应被 ema_warning_done 拦掉")
         self.assertEqual(sig["contracts"], 1500)   # 只平了一次
+
+
+class TestEmaWarningClosePnl(unittest.TestCase):
+    """2026-10-07 修复：EMA 预警触发后立即 BE_STOPPED，_close 必须把 EMA 部分 PnL 计入
+
+    Bug 现象：_close 只看 tp1_hit/tp2_hit，EMA 预警不写这两个标志，
+              导致 net_usd 漏算预警的 +0.47U 部分盈利。
+    修复后：EMA 预警分支存 ema_partial_qty / ema_partial_px，
+              _close 检测到 ema_warning_done 时把这段算进 pnl_parts。
+    """
+
+    def _long_profit_bars(self):
+        """long：成交后涨到 105 → 同根 EMA 跌破触发预警 + BE 兜底
+
+        第 2 根 K 线同时满足：
+          - cur_px=105 > fill_px=100 → 盈利
+          - EMA 预警触发（5m/15m 双跌破，由 mock 模拟）
+          - low=99.5 ≤ active_sl=100（BE）→ 触发 line 251-254 BE_STOPPED 分支
+          - high=105.5 < tp1=101 不触发（实际生产场景中预警触发瞬间 high 多未达 TP1）
+
+        真实生产中：EMA 预警 → SL 移到 BE → 同根 1m low ≤ entry → line 251 BE_STOPPED，
+        不会触 line 244-245 的同根双触分支（line 244 在高 high ≥ tp1 时才命中，
+        但 EMA 预警是跌落分支预触发，high 通常远低于 tp1）。
+        """
+        return [
+            _bar(1005, 100.0, 100.2, 100.0, 100.1),  # 成交
+            _bar(1010, 100.1, 105.5, 99.5, 105.0),   # cur=105 + low=99.5 同时触发 BE
+        ]
+
+    def test_long_ema_warn_then_be_stopped_pnl_includes_partial(self):
+        """long + 触发 EMA 预警 + 同根 SL_STOPPED：net_usd 应包含预警的 +PnL
+
+        注意：当前 _settle_one 走 line 251-252 SL_STOPPED 分支（因为 EMA 预警不写 tp1_hit
+              → cur_tp1_hit=False → category=loss），但 exit_px 用 cur_sl=entry，
+              且 _close() 的 gross_usd 已包含 EMA 部分（Bug 1 修复）。
+        """
+        sig = _make_sig("long", entry=100, sl=99, tp1=110, ts=1000, filled=True)  # tp1 调高避免触同根双触
+        sig["fill_ts"] = 1005
+        sig["fill_px"] = 100
+        sig["contracts"] = 5000
+
+        # 5m/15m 双跌破（用单调下跌的 K 线造出跌破场景）
+        bars_5m = [[i*300, 110 - i*0.2, 110-i*0.2, 110-i*0.2, 110-i*0.2, 100]
+                   for i in range(200)]
+        # 最后一根 close ≈ 70，EMA ≈ 90 → close 远在 EMA 之下
+        def _fake_fetch(contract, interval, *_a, **_kw):
+            return bars_5m
+        with patch("position_tracker.fetch_ohlcv", side_effect=_fake_fetch):
+            res = pt._settle_one(sig, self._long_profit_bars())
+        # 验证：EMA 预警已触发
+        self.assertTrue(sig.get("ema_warning_done"))
+        self.assertEqual(sig["active_sl"], 100, "SL 应移到 BE")
+        # 验证：预警分支记下了 ema_partial_qty 和 _orig_contracts
+        self.assertTrue(sig.get("ema_partial_qty"))
+        self.assertEqual(sig["_orig_contracts"], 5000, "原始量应被记录")
+        # 验证：res 不为 None（实走 SL_STOPPED 分支——这是 Bug 3，不在本次修复范围）
+        self.assertIsNotNone(res)
+        # ★ 关键验证：net_usd 应包含预警部分 PnL（Bug 1 修复的核心）
+        # entry=100, exit_px=100 (BE), partial_qty=3500, ema_partial_px=105 (cur_px)
+        # gross = (105-100) * 3500 * 0.0001 + (100-100) * 1500 * 0.0001
+        #       = 1.75 + 0 = 1.75
+        # FEE_USD = -1.0（返佣），所以 net = gross - FEE_USD = 1.75 - (-1.0) = 2.75
+        self.assertAlmostEqual(res["gross_usd"], 1.75, places=2,
+                               msg="gross 应包含 EMA 预警的部分 PnL")
+        self.assertAlmostEqual(res["net_usd"], 2.75, places=2,
+                               msg="net = gross + 1.0（FEE_USD=-1.0 是返佣）")
+        # ★ 关键验证：partial_exits 应=2（EMA + 剩余 BE 兜底）
+        self.assertEqual(res["partial_exits"], 2)
+
+    def test_short_ema_warn_then_be_stopped_pnl_includes_partial(self):
+        """short + 触发 EMA 预警 + 同根 SL_STOPPED：净利对称（亏损但净 PnL 仍应计入）"""
+        sig = _make_sig("short", entry=100, sl=101, tp1=80, ts=1000, filled=True)  # tp1 调低避免触同根双触
+        sig["fill_ts"] = 1005
+        sig["fill_px"] = 100
+        sig["contracts"] = 5000
+
+        # 5m/15m 双涨破（单调上涨让 close 远高于 EMA）
+        bars_5m = [[i*300, 90 + i*0.2, 90+i*0.2, 90+i*0.2, 90+i*0.2, 100]
+                   for i in range(200)]
+        def _fake_fetch(contract, interval, *_a, **_kw):
+            return bars_5m
+        # short 仓盈利场景：cur_px=95 < fill_px=100
+        # 同时 1m 高点 high=100.5 ≥ active_sl=100（BE 兜底）
+        bars_1m = [
+            _bar(1005, 100.0, 100.2, 100.0, 100.1),  # 成交
+            _bar(1010, 99.0, 100.5, 95.0, 95.0),    # 盈利 + 同根 BE 兜底
+        ]
+        with patch("position_tracker.fetch_ohlcv", side_effect=_fake_fetch):
+            res = pt._settle_one(sig, bars_1m)
+        self.assertIsNotNone(res)
+        # short partial PnL: (100-95) * 3500 * 0.0001 = 1.75（盈利）
+        # BE 兜底 1500 张: (100-100)*1500*0.0001 = 0
+        # gross = 1.75, net = 1.75 + 1.0 = 2.75
+        self.assertAlmostEqual(res["gross_usd"], 1.75, places=2)
+        self.assertAlmostEqual(res["net_usd"], 2.75, places=2)
+
+    def test_close_without_ema_warning_unaffected(self):
+        """没触发 EMA 预警时 _close 行为不变（回归保护）"""
+        sig = _make_sig("long", entry=100, sl=99, tp1=110, ts=1000, filled=True)  # tp1 调高避免触同根双触
+        sig["fill_ts"] = 1005
+        sig["fill_px"] = 100
+        # 不预设 contracts，让 _settle_one 按 entry 重算
+        bars = [
+            _bar(1005, 100.0, 100.2, 100.0, 100.1),  # 成交
+            _bar(1010, 100.1, 109.9, 98.5, 98.6),    # 直接 SL（无预警触发）
+        ]
+        # 让 fetch_ohlcv 返回的 5m/15m 不跌破（平稳）→ 不触发预警
+        flat_bars = [[i*300, 100, 100, 100, 100, 100] for i in range(200)]
+        with patch("position_tracker.fetch_ohlcv", return_value=flat_bars):
+            res = pt._settle_one(sig, bars)
+        self.assertIsNotNone(res)
+        self.assertEqual(res["outcome"], "SL_STOPPED")
+        self.assertEqual(res["category"], "loss")
+        # _contracts(100) = round(5000 / (100 * 0.0001)) = 500000 张
+        contracts = pt._contracts(100)
+        # SL 没移位，原 SL=99 被打：PnL = (99-100)*contracts*0.0001
+        expected_gross = (99 - 100) * contracts * 0.0001
+        expected_net = expected_gross - pt.FEE_USD  # FEE_USD=-1.0（返佣）
+        self.assertAlmostEqual(res["gross_usd"], expected_gross, places=2)
+        self.assertAlmostEqual(res["net_usd"], expected_net, places=2)
 
 
 class TestAppendEventTestPrefixGuard(unittest.TestCase):

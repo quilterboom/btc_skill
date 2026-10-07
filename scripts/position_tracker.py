@@ -150,11 +150,12 @@ def _settle_one(sig: Dict, bars: List[List]) -> Optional[Dict]:
         h, l, c = float(b[2]), float(b[3]), float(b[4])
 
         # 1) 48h 未挂到 → MISSED
+        # 2026-10-07 liusir 规则：未进场的挂单不返佣（标记作废），net_usd = 0
         if ts - pending_ts > MAX_PEND:
             return {
                 "pos_state": "MISSED", "outcome": "MISSED",
                 "exit_ts": ts, "exit_px": round(c, 1),
-                "net_usd": -FEE_USD, "category": "skip",
+                "net_usd": 0.0, "category": "skip",
                 "note": f"48h 未成交"
             }
 
@@ -366,6 +367,10 @@ def _close(sig: Dict, outcome: str, exit_px: float, exit_ts: int,
         pnl_parts.append((part_size, sig["tp1_hit_px"]))
     if sig.get("tp2_hit"):
         pnl_parts.append((part_size, sig["tp2_hit_px"]))
+    # EMA 预警分支（2026-10-07 修复）：70% 部分平仓的张数和价格需要计入 PnL
+    # 预警分支不写 tp1_hit/_orig_contracts（已有此修复），所以这里要单独走一遍
+    if sig.get("ema_warning_done") and sig.get("ema_partial_qty"):
+        pnl_parts.append((int(sig["ema_partial_qty"]), float(sig["ema_partial_px"])))
 
     # 剩余部分按当前 exit_px 平
     closed_qty = sum(q for q, _ in pnl_parts)
@@ -558,6 +563,13 @@ def _check_ema_break_warning(sig: Dict, ts: int, side: str, entry: float,
     sig["partial_exit_count"] = sig.get("partial_exit_count", 0) + 1
     sig["partial_exits"] = sig.get("partial_exits", 0) + 1
     sig["partial_net_usd"] = round(partial_net, 2)
+    # 记录预警已平张数 + 触发价（让 _close 重算 PnL 时能正确把 EMA 部分计入）
+    sig["ema_partial_qty"] = partial
+    sig["ema_partial_px"] = cur_px
+    # ★ 关键：和 TP1 / PARTIAL_CLOSE 分支保持一致——首次部分平仓时记录原始总量
+    #   否则 _close() 用 sig["contracts"]（已被减）当 base，后续 PnL 算错
+    if not sig.get("_orig_contracts"):
+        sig["_orig_contracts"] = contracts_total
     sig["last_check_ts"] = ts
 
     # 写 events + 推送
@@ -599,6 +611,9 @@ def _notify_ema_warning(sig: Dict, partial: int, px: float, side: str,
                         close_15m: float, e144_15m: float, e169_15m: float) -> None:
     """EMA 突破预警推送：带 70% 部分平仓 + SL 移到 BE"""
     side_cn = "做多" if side == "long" else "做空"
+    # 趋势方向描述：long 双跌破 = 上升结构变弱；short 双涨破 = 下降结构变弱
+    structure_word = "上升结构变弱" if side == "long" else "下降结构变弱"
+    break_word = "双跌破" if side == "long" else "双涨破"
     icon = "🟡"
     card = (
         f"{icon} <b>BTC 趋势反转预警 · 部分止盈 70%</b>\n"
@@ -609,7 +624,7 @@ def _notify_ema_warning(sig: Dict, partial: int, px: float, side: str,
         f"EMA169 <b>{e169_15m:,.1f}</b>\n"
         f"\n已平 <b>{partial}</b> 张，剩余 <b>{sig.get('contracts', partial)}</b> 张\n"
         f"本笔盈利（未扣费）<b>{partial_net:+.2f}U</b> ｜ SL 已移到 BE（开仓价）\n"
-        f"\n⚠️ 5m + 15m 双跌破 EMA144/169 → 上升结构变弱；保留 30% 跑趋势反转\n"
+        f"\n⚠️ 5m + 15m {break_word} EMA144/169 → {structure_word}；保留 30% 跑趋势反转\n"
         f"出场后会按走完整价 + 4.85U 手续费最终结算"
     )
     _push(card)

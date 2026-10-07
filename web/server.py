@@ -211,11 +211,13 @@ def _winrate() -> dict:
             by_id[rid] = r
 
     # 2026-10-05：过滤掉测试前缀（TEST-/test-）的事件，不进 winrate 统计
+    # 2026-10-07 liusir 规则：category=skip（MISSED/未进场）也不进 winrate
     closed = [r for r in by_id.values()
               if not (r.get("id", "").startswith("TEST")
-                      or r.get("id", "").startswith("test-"))]
+                      or r.get("id", "").startswith("test-"))
+              and r.get("category") != "skip"]
     wins = [r for r in closed if r.get("category") == "profit"]
-    losses = [r for r in closed if r.get("category") != "profit"]
+    losses = [r for r in closed if r.get("category") == "loss"]
     total = len(closed)
     win_n = len(wins)
 
@@ -323,16 +325,19 @@ def _settlements_api(path: str) -> dict:
     page = max(1, int(q.get("page", ["1"])[0]))
     size = min(100, max(1, int(q.get("size", ["20"])[0])))
     include_test = q.get("include_test", ["0"])[0] in ("1", "true", "yes")
+    include_missed = q.get("include_missed", ["0"])[0] in ("1", "true", "yes")
 
     all_recs = _all_settled()
     total_all = len(all_recs)
     test_n = sum(1 for r in all_recs if _is_test_id(r.get("id", "")))
 
-    # 默认过滤
+    # 默认过滤：去掉 TEST 前缀；2026-10-07 liusir 规则：category=skip（MISSED/未进场）也不算结算
     if include_test:
         recs = all_recs
     else:
         recs = [r for r in all_recs if not _is_test_id(r.get("id", ""))]
+    if not include_missed:
+        recs = [r for r in recs if r.get("category") != "skip"]
 
     recs_sorted = sorted(recs, key=lambda r: r.get("ts", 0), reverse=True)
     total = len(recs_sorted)
