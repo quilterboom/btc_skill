@@ -310,6 +310,15 @@ class JumpTracker:
                         _skip_reason = _reason
                         _write_journal_ok = False
 
+                    # 2026-10-07 liusir 守门：verdict 不成立 → 不写 journal（普通 jump 路径）
+                    #   复刻 scan.py:619 同款守门：仅 "成立" / "临界" 放行；
+                    #   反方向 JUMP-REVERSE 路径保留不动（那是 force_close 覆盖路径）。
+                    #   Bug 实例：1791339325-long 是 verdict="无信号·观望" 但 jump 路径写出来的。
+                    if not _skip and not ("成立" in verdict or "临界" in verdict):
+                        _skip = True
+                        _skip_reason = (f"verdict 不成立（{verdict}），按纪律核心①②未满足不进场")
+                        _write_journal_ok = False
+
                     # ★ 规则 0（2026-10-05 新增）：强制准入守卫 ——
                     #   量能异动 ≠ signal，仅 trigger。
                     #   只有当 1h K 线刚收完时（且结构方向与新策略一致）才允许写新 journal；
