@@ -149,9 +149,10 @@ def _settle_one(sig: Dict, bars: List[List]) -> Optional[Dict]:
             continue
         h, l, c = float(b[2]), float(b[3]), float(b[4])
 
-        # 1) 24h 未挂到 → MISSED
+        # 1) 24h 未挂到 → MISSED（仅未进场；已成交的持仓不受时间限制，靠趋势反转强平）
         # 2026-10-07 liusir 规则：未进场的挂单不返佣（标记作废），net_usd = 0
-        if ts - pending_ts > MAX_PEND:
+        # 2026-10-07 liusir 规则：TIMEOUT 24h 持仓强平已取消——持仓平仓仅靠趋势反转
+        if not sig.get("filled") and ts - pending_ts > MAX_PEND:
             return {
                 "pos_state": "MISSED", "outcome": "MISSED",
                 "exit_ts": ts, "exit_px": round(c, 1),
@@ -341,9 +342,9 @@ def _settle_one(sig: Dict, bars: List[List]) -> Optional[Dict]:
                 # 结算已平仓部分（按当前 close），剩余部分继续挂
                 return _close(sig, "PARTIAL_CLOSE", c, ts, _remain_qty, side, entry, "loss")
 
-        # 6) TIMEOUT 24h 强制平
-        if sig.get("filled") and ts - sig["fill_ts"] > MAX_HOLD:
-            return _close(sig, "TIMEOUT", c, ts, contracts, side, entry, "timeout")
+        # 2026-10-07 liusir 规则：TIMEOUT 24h 强平已取消
+        #   持仓平仓仅靠 watch/runner.py:_check_trend_reversal 检测趋势反转
+        #   老 MAX_HOLD 常量保留为占位（避免破坏其它模块的 import），不再用于强平判定
 
         sig["last_check_ts"] = ts
 

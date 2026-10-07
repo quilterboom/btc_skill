@@ -179,11 +179,9 @@ def _settle_one(r: Dict, bars: List[List]) -> Optional[Dict]:
                     "tp1_hit": True, "tp1_hit_px": round(tp1, 1), "tp1_hit_ts": ts,
                     "active_sl": float(r.get("entry") or 0),    # 移到 BE
                     "pos_state": "TP1_PARTIAL"}
-        if ft and ts - ft > MAX_HOLD:    # 日内强平（24h 未触发）
-            return {"status": "settled", "filled": True, "outcome": "TIMEOUT", "R": round(pl, 3),
-                    "net_R": round(pl - fee_r, 3), "exit_px": round(c, 1), "exit_ts": ts,
-                    "mae": round(mae, 2), "mfe": round(mfe, 2),
-                    "hold_h": round((ts - ft) / 3600, 1)}
+        # 2026-10-07 liusir 规则：TIMEOUT 24h 强平已取消
+        #     强平仅依赖 watch/runner.py:_check_trend_reversal 检测趋势反转
+        #     老 MAX_HOLD 常量已废弃（保留以避免破坏其它模块的 import）
     return None                          # 数据不足，继续 pending
 
 

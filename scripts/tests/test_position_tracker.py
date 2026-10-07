@@ -225,6 +225,25 @@ class TestSettleOneLong(unittest.TestCase):
         self.assertIsNone(res, "持仓 < 1h 不应触发 PARTIAL_CLOSE")
         self.assertFalse(sig.get("partial_close_done"))
 
+    def test_long_held_over_24h_no_timeout(self):
+        """2026-10-07 liusir 规则：TIMEOUT 24h 强平已取消——持仓超过 24h 仍 pending。
+
+        强平仅靠 watch/runner.py:_check_trend_reversal 检测趋势反转。
+        """
+        sig = _make_sig("long", entry=100, sl=99, tp1=101, ts=1000, filled=True)
+        sig["fill_ts"] = 1000
+        sig["contracts"] = 5000
+        # 24h + 1m 仍稳价 → 不触发任何强平
+        ts_after_24h = 1000 + 24 * 3600 + 60
+        bars = [
+            _bar(ts_after_24h, 100.1, 100.2, 100.0, 100.1),   # 价格几乎不动
+        ]
+        flat_bars = [[i*300, 100, 100, 100, 100, 100] for i in range(200)]
+        with patch("position_tracker.fetch_ohlcv", return_value=flat_bars):
+            res = pt._settle_one(sig, bars)
+        self.assertIsNone(res, "持仓 > 24h 不应被强平（24h TIMEOUT 已取消）")
+        self.assertNotEqual(sig.get("outcome"), "TIMEOUT")
+
 
 class TestSettleOneShort(unittest.TestCase):
     """做空路径（镜像）"""
