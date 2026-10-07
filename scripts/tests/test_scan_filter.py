@@ -90,5 +90,51 @@ class TestDropRecoveryFilter(unittest.TestCase):
         self.assertEqual(penalty, 0)
 
 
+def _apply_verdict_guard(verdict: str, config_skip: bool, config_reason: str):
+    """复刻 scan.py:619 加的 verdict 守门（不调 scan.py 全函数——它依赖实时 K 线 + talib）。"""
+    _skip, _reason = config_skip, config_reason
+    if not _skip and not ("成立" in verdict or "临界" in verdict):
+        _skip = True
+        _reason = f"verdict 不成立（{verdict}），按纪律核心①②未满足不进场"
+    return _skip, _reason
+
+
+class TestScanVerdictGuard(unittest.TestCase):
+    """2026-10-07 加：scan.py 不该给 verdict="无信号·观望"写 journal pending。
+
+    Bug 实例：1791329412 / 1791337511 两条 long 单都是 score=0 + verdict="无信号·观望"
+    → 被 log_signal 写入 → 成交 → 各打 SL 亏 -4.85 / -19.01U。
+    守门：仅 "成立" / "临界" verdict 才放行；其它一律 skip。
+    """
+
+    def test_passive_verdict_no_signal_blocks(self):
+        """verdict="无信号 · 观望" → 拦下，不写 journal"""
+        skip, reason = _apply_verdict_guard("无信号 · 观望", False, "")
+        self.assertTrue(skip)
+        self.assertIn("无信号", reason)
+
+    def test_active_verdict_signal_成立_passes(self):
+        """信号成立（无论方向）→ 放行"""
+        self.assertFalse(_apply_verdict_guard("做多信号成立", False, "")[0])
+        self.assertFalse(_apply_verdict_guard("做空信号成立", False, "")[0])
+
+    def test_boundary_verdict_临界_passes(self):
+        """临界（再等 1 根确认）也要刷点位——放行"""
+        skip, _ = _apply_verdict_guard("临界（再等 1 根确认）", False, "")
+        self.assertFalse(skip)
+
+    def test_empty_verdict_blocks(self):
+        """空 verdict 防御性拦下"""
+        skip, _ = _apply_verdict_guard("", False, "")
+        self.assertTrue(skip)
+
+    def test_existing_skip_preserved(self):
+        """已有 config_skip（同方向冷却/距离）不能被 verdict 守门覆盖 reason"""
+        skip, reason = _apply_verdict_guard("无信号 · 观望", True, "同方向冷却 30 分钟")
+        self.assertTrue(skip)
+        self.assertEqual(reason, "同方向冷却 30 分钟",
+                         "verdict 守门应只在 config_skip=False 时介入")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

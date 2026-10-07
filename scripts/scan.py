@@ -616,6 +616,15 @@ def main():
             # ★ 准入守卫：调用 config.should_skip_new_signal 统一规则
             # （防止 Settler 失效期间累积多条同向单；同时和 watch.py JumpTracker 规则对齐）
             _skip, _reason = config.should_skip_new_signal(CONTRACT, main_side, float(_plm["entry_limit"]))
+            # 2026-10-07 liusir 纪律：核心信号未满足不进场
+            #   scan.py:816 写明「核心①②未满足不进场」但代码此前没拦——verdict="无信号·观望"
+            #   仍被 log_signal 无条件写入 journal，造成 score=0 + 缩量 + 无 fib 共振的
+            #   "观望单" 被成交后吃 SL（例 1791329412 / 1791337511 各亏 -4.85 / -19.01U）。
+            #   守门加在 scan.py 这一层：不污染 journal.py / jump.py 反方向覆盖路径。
+            #   边界：verdict 以 "成立"（真信号）或 "临界"（再等 1 根确认）才放行；其它一律 skip。
+            if not _skip and not ("成立" in verdict or "临界" in verdict):
+                _skip = True
+                _reason = (f"verdict 不成立（{verdict}），按纪律核心①②未满足不进场")
             _skipped_reason = _reason if _skip else None
 
             # ★ 反方向 force_close（2026-10-04 新增）：如果已有 filled 单 + 新信号反方向
