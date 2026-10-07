@@ -137,7 +137,7 @@ def _settle_one(r: Dict, bars: List[List]) -> Optional[Dict]:
         if not filled:
             hit = (l <= entry) if side == "long" else (h >= entry)
             if not hit:
-                if ts - int(r["ts"]) > MAX_HOLD * 2:      # 48h 都没挂到 → 作废
+                if ts - int(r["ts"]) > MAX_HOLD:            # 2026-10-07 liusir规则：挂单 24h 都没挂到 → 作废
                     return {"status": "settled", "filled": False, "outcome": "MISSED",
                             "R": 0.0, "net_R": 0.0, "exit_px": round(c, 1), "exit_ts": ts,
                             "mae": 0.0, "mfe": 0.0, "hold_h": round((ts - r["ts"]) / 3600, 1)}

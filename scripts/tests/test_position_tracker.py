@@ -120,12 +120,12 @@ class TestSettleOneLong(unittest.TestCase):
         self.assertAlmostEqual(res["net_usd"], 84.33, places=1)
 
     def test_long_not_filled_yet_misses(self):
-        """48h 没成交 → MISSED（未进场不返佣）"""
+        """24h 没成交 → MISSED（未进场不返佣）"""
         sig = _make_sig("long", entry=100, sl=99, tp1=101, ts=1000)
-        # ts - pending_ts > 48h 才会 MISSED
-        ts_after_48h = 1000 + 48 * 3600 + 100
+        # ts - pending_ts > 24h 才会 MISSED
+        ts_after_24h = 1000 + 24 * 3600 + 100
         bars = [
-            _bar(ts_after_48h, 105.0, 106.0, 104.0, 105.5),  # 价已远离 entry
+            _bar(ts_after_24h, 105.0, 106.0, 104.0, 105.5),  # 价已远离 entry
         ]
         res = pt._settle_one(sig, bars)
         self.assertIsNotNone(res)
@@ -133,7 +133,7 @@ class TestSettleOneLong(unittest.TestCase):
         self.assertEqual(res["category"], "skip")
         # 2026-10-07 liusir 规则：未进场的挂单标记作废，不返佣，net_usd = 0
         self.assertAlmostEqual(res["net_usd"], 0.0, places=2)
-        self.assertEqual(res["note"], "48h 未成交")
+        self.assertEqual(res["note"], "24h 未成交")
 
     def test_long_same_bar_tp_sl_priority(self):
         """

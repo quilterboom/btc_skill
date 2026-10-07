@@ -19,7 +19,7 @@
 
 状态机：
   pending
-   ├ 48h 未挂到 → MISSED（不计入胜率）
+   ├ 24h 未挂到 → MISSED（不计入胜率）
    ├ 成交后
    │   ├ 打到 TP1 → TP1_HIT, 1/3 仓位平仓，SL 移到 BE
    │   │   ├ 打到 TP2 → TP2_HIT, 1/3 再平仓，SL 移到 TP1
@@ -67,7 +67,7 @@ FEE_USD = -1.0                              # 单笔总成本（maker 往返返�
 PARTS = 3                                   # 3 段部分止盈
 QUANT_MULT = 0.0001                         # 1 张 = 0.0001 BTC
 MAX_HOLD = 24 * 3600                        # 日内 24h 强制平
-MAX_PEND = 48 * 3600                        # 48h 没挂到 → MISSED
+MAX_PEND = 24 * 3600                        # 2026-10-07 liusir 规则：挂单 24h 没挂到 → MISSED
 OK, NO, WARN = "✅", "❌", "⚠️"
 
 
@@ -149,14 +149,14 @@ def _settle_one(sig: Dict, bars: List[List]) -> Optional[Dict]:
             continue
         h, l, c = float(b[2]), float(b[3]), float(b[4])
 
-        # 1) 48h 未挂到 → MISSED
+        # 1) 24h 未挂到 → MISSED
         # 2026-10-07 liusir 规则：未进场的挂单不返佣（标记作废），net_usd = 0
         if ts - pending_ts > MAX_PEND:
             return {
                 "pos_state": "MISSED", "outcome": "MISSED",
                 "exit_ts": ts, "exit_px": round(c, 1),
                 "net_usd": 0.0, "category": "skip",
-                "note": f"48h 未成交"
+                "note": f"24h 未成交"
             }
 
         # 2026-10-06 防御：成交当根不判 SL/TP/BE
@@ -447,7 +447,7 @@ def _notify_close(sig: Dict, res: Dict) -> None:
         "BE_STOPPED": "TP1 后保本被打",
         "SL_STOPPED": "止损扫掉",
         "TIMEOUT": "超时未触发",
-        "MISSED":  "48h 未成交"
+        "MISSED":  "24h 未成交"
     }.get(res["outcome"], res["outcome"])
 
     card = (

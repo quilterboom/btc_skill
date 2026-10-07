@@ -44,7 +44,7 @@ SETTLER_INTERVAL_SEC = 5
 # 持仓最长保留（秒，超时强制平仓）
 MAX_HOLD_SEC = 24 * 3600          # 24h
 # 挂单最长保留（秒，未挂到则作废）
-MAX_PEND_SEC = 48 * 3600          # 48h
+MAX_PEND_SEC = 24 * 3600          # 2026-10-07 liusir规则：挂单 24h 没挂到 → 作废
 # journal 同方向刷新冷却（秒）
 JOURNAL_COOLDOWN_SEC = 3600       # 1h
 # 2026-10-06 加：同方向 fill 后多少秒内禁止开新单（不论 entry 距离）

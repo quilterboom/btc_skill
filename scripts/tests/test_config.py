@@ -143,7 +143,7 @@ class TestShouldSkipNewSignal(unittest.TestCase):
         self.assertFalse(skip, f"过期 pending 应该不算活跃，但 skip={skip}, reason={reason!r}")
 
     def test_fresh_pending_should_count(self):
-        """48h 内的 pending 算活跃"""
+        """24h 内的 pending 算活跃"""
         path = self._write_journal([
             {"contract": "BTC_USDT", "side": "long", "entry": 84000,
              "status": "pending", "ts": NOW - 10 * 3600},  # 10 小时前
