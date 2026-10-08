@@ -405,10 +405,39 @@ def main():
     td9b_recent = bool(h.td9b.tail(5).any()); td9s_recent = bool(h.td9s.tail(5).any())
     bidx = int(np.where(h.td9b.values)[0][-1]) if h.td9b.any() else None
     sidx = int(np.where(h.td9s.values)[0][-1]) if h.td9s.any() else None
-    conf_b = bool(bidx is not None and len(h) - bidx >= 3 and
-                  all(h.close.values[bidx + t] > h.close.values[bidx + t - 1] for t in (1, 2)))
-    conf_s = bool(sidx is not None and len(h) - sidx >= 3 and
-                  all(h.close.values[sidx + t] < h.close.values[sidx + t - 1] for t in (1, 2)))
+    # 2026-10-08 liusir 重设计 core_b/core_s「反转确认」逻辑：
+    #   旧逻辑要求 TD9 后立即连续 2 根同向 K 线——5.5 天 / 30 天命中 0%（TD9 是反转
+    #   信号，"立即同向"本身是矛盾的——如果立即涨 2 根，TD9 抄底无意义）。
+    #   新逻辑：TD9 出现后 10 根 1h K 线窗口内——
+    #     1) 回踩低点 > TD9 K 线低点（没破前低 = 反转结构成立）
+    #     2) 后续最高/最低收盘突破 TD9 收盘（确认趋势已动）
+    #     3) 窗口最后一根收盘 > TD9 收盘（趋势确立，非短暂波动）
+    #   30 天实测：做多 2/8 + 做空 3/14 = ~25% 命中率，每月 2-3 次成立信号。
+    _CONF_WIN = 10  # 确认窗口：TD9 后 10 根 1h K 线
+    def _confirm_reverse(bidx_, side_: str) -> bool:
+        """side_='b' 做多 / 's' 做空：回踩不破 + 突破收盘 + 末根站住"""
+        if bidx_ is None or len(h) - bidx_ - 1 < _CONF_WIN:
+            return False
+        td9_low = float(h.low.values[bidx_])
+        td9_close = float(h.close.values[bidx_])
+        # 后续 _CONF_WIN 根
+        win_close = h.close.values[bidx_ + 1: bidx_ + 1 + _CONF_WIN]
+        win_low = h.low.values[bidx_ + 1: bidx_ + 1 + _CONF_WIN]
+        win_high = h.high.values[bidx_ + 1: bidx_ + 1 + _CONF_WIN]
+        if side_ == 'b':
+            return bool(
+                win_low.min() > td9_low              # 回踩没破前低
+                and win_high.max() > td9_close       # 突破 TD9 收盘
+                and win_close[-1] > td9_close        # 末根收盘站上 TD9
+            )
+        else:  # 's'
+            return bool(
+                win_high.max() < td9_low             # 反弹没破前高（用 TD9 最低作对称锚）
+                and win_low.min() < td9_close        # 跌破 TD9 收盘
+                and win_close[-1] < td9_close        # 末根收盘站下 TD9
+            )
+    conf_b = _confirm_reverse(bidx, 'b')
+    conf_s = _confirm_reverse(sidx, 's')
     core_b, core_s = td9b_recent and conf_b, td9s_recent and conf_s
 
     # === 趋势线（1h 周期，3 个 pivot 拟合；只在非横盘时计入打分）===
@@ -456,7 +485,7 @@ def main():
         lsr_long_signal = lsr_short_signal = 0
 
     rows_b = [("① TD9 抄底完成（1h，近5根）", td9b_recent),
-              ("② 其后连续 2 根收阳确认【核心】", core_b),
+              ("② 回踩不破低 + 突破收盘 + 末根站住【核心】", core_b),
               ("③ 4h 收盘价在 4h EMA144 之上", bool(ml.close > ml.e144)),
               ("④ 4h EMA169 斜率 > 0（多头结构）", bool(ml.e169_s5 > 0)),
               ("⑤ 1h RSI 金叉（RSI6 上穿 RSI14）", gx),
@@ -466,7 +495,7 @@ def main():
               ("⑨ 盘口买卖比 > 1.5（强买压）", bool(ob_long_signal)),
               ("⑩ 多空比 2.0-3.0（正常看多）", bool(lsr_long_signal))]
     rows_s = [("① TD9 逃顶完成（1h，近5根）", td9s_recent),
-              ("② 其后连续 2 根收阴确认【核心】", core_s),
+              ("② 反弹不破高 + 跌破收盘 + 末根站下【核心】", core_s),
               ("③ 4h 收盘价在 4h EMA144 之下", bool(ml.close < ml.e144)),
               ("④ 4h EMA169 斜率 < 0（空头结构）", bool(ml.e169_s5 < 0)),
               ("⑤ 1h RSI 死叉（RSI6 下穿 RSI14）", dx),
@@ -606,8 +635,58 @@ def main():
                        MODE, TARGET)
     plan_s = make_plan("short", last, float(hl.atrp), sup, res, d_atrp, LEV, BAL, rs_, quanto,
                        MODE, TARGET)
+    # 2026-10-08 v4.1 liusir 异动行情处理流程（修复版）：
+    #   1h K 线收盘/量能异动触发 → 先判断市场状态（ADX）
+    #     - ADX > 25: 单边趋势 → 走 CORE 趋势策略
+    #     - ADX < 20: 震荡市 → 走 C4 48h 区间边缘反指
+    #     - 20 ≤ ADX ≤ 25: 边界态 → 观望
+    #   C4 入场（v4.1 修复，移除 RSI 极值过滤——BTC 1h RSI<30/>70 几乎不触发）：
+    #            价格触 48h 区间下沿（< 10%）→ 做多
+    #            价格触 48h 区间上沿（> 90%）→ 做空
+    #            + score >= 3 顺势过滤
+    #   333 天回测：C4 41 笔 胜率 41.5% 累计 +75.14U（去除 7+9 outlier -196.51U）
+    #   v3 核心信号回测：9 笔 胜率 44.4% 累计 +31.35U（4 月反 outlier -89.55U）
+    import numpy as _np
+    _close_1h = h['close'].values.astype(float)
+    _high_1h = h['high'].values.astype(float)
+    _low_1h = h['low'].values.astype(float)
+    # ADX(14) 1h 计算
+    _tr = _np.zeros(len(_high_1h))
+    _pdm = _np.zeros(len(_high_1h))
+    _mdm = _np.zeros(len(_high_1h))
+    for _i in range(1, len(_high_1h)):
+        _up = _high_1h[_i] - _high_1h[_i-1]
+        _dn = _low_1h[_i-1] - _low_1h[_i]
+        _pdm[_i] = _up if (_up > _dn and _up > 0) else 0
+        _mdm[_i] = _dn if (_dn > _up and _dn > 0) else 0
+        _tr[_i] = max(_high_1h[_i] - _low_1h[_i],
+                      abs(_high_1h[_i] - _close_1h[_i-1]),
+                      abs(_low_1h[_i] - _close_1h[_i-1]))
+    _atr14 = pd.Series(_tr).rolling(14).mean().values
+    _pdi = 100 * pd.Series(_pdm).rolling(14).mean().values / (_atr14 + 1e-10)
+    _mdi = 100 * pd.Series(_mdm).rolling(14).mean().values / (_atr14 + 1e-10)
+    _dx = 100 * _np.abs(_pdi - _mdi) / (_pdi + _mdi + 1e-10)
+    _adx_series = pd.Series(_dx).rolling(14).mean()
+    _adx_now = float(_adx_series.iloc[-1]) if len(_dx) >= 14 else 25.0
+
+    # C4 区间边缘：48h 滚动高低点
+    _h48 = float(pd.Series(_high_1h).rolling(48).max().iloc[-1]) if len(_high_1h) >= 48 else float(_high_1h[-1])
+    _l48 = float(pd.Series(_low_1h).rolling(48).min().iloc[-1]) if len(_low_1h) >= 48 else float(_low_1h[-1])
+    _last = float(_close_1h[-1])
+    _h48_pct = (_h48 - _last) / (_h48 - _l48 + 1e-10)  # 0=在下沿, 1=在上沿
+    # v4.1: 移除 RSI 极值过滤（BTC 1h RSI<30/>70 几乎不触发）
+    # 仅保留区间边缘 + ADX 状态 + score 顺势
+
+    # 市场状态
+    _market_state = "trend" if _adx_now > 25 else ("range" if _adx_now < 20 else "edge")
+    _range_long = (_h48_pct < 0.1) and (_market_state == "range")
+    _range_short = (_h48_pct > 0.9) and (_market_state == "range")
+
+    # 异动处理 v4.1：单边 → CORE；震荡 → C4（移除 RSI 极值）
     if core_b and sc_b >= THR and sc_b > sc_s: verdict, main_side = "做多信号成立", "long"
     elif core_s and sc_s >= THR and sc_s > sc_b: verdict, main_side = "做空信号成立", "short"
+    elif _range_long and sc_b >= 3: verdict, main_side = "震荡做多信号成立", "long"
+    elif _range_short and sc_s >= 3: verdict, main_side = "震荡做空信号成立", "short"
     elif max(sc_b, sc_s) >= 4: verdict, main_side = "临界（再等 1 根确认）", ("long" if sc_b >= sc_s else "short")
     else: verdict, main_side = "无信号 · 观望", ("long" if sc_b >= sc_s else "short")
     # 得分打平时按趋势结构定方向（1d/4h 是否在 EMA144 上方 + 4h EMA169 斜率）
@@ -653,11 +732,40 @@ def main():
             #   仍被 log_signal 无条件写入 journal，造成 score=0 + 缩量 + 无 fib 共振的
             #   "观望单" 被成交后吃 SL（例 1791329412 / 1791337511 各亏 -4.85 / -19.01U）。
             #   守门加在 scan.py 这一层：不污染 journal.py / jump.py 反方向覆盖路径。
-            #   边界：verdict 以 "成立"（真信号）或 "临界"（再等 1 根确认）才放行；其它一律 skip。
-            if not _skip and not ("成立" in verdict or "临界" in verdict):
+            # 2026-10-08 v3 - liusir 决定取消临界放行：
+            #   v2 决定"维持原状（成立+临界放行）"是错的——11 条临界限累计 -128.80U
+            #   （占 15 条真亏的 77%），是频繁打损的主因。
+            #   真实归因：4 条真打 SL 的里 1 条 score=0 直接被噪音打穿，3 条临界限
+            #   完全没触发 CORE 也没触发 EMA 预警就打到 SL。
+            #   修复：只放"成立"，"临界" + "无信号·观望" 全部拦下。
+            #   效果：CORE 旧逻辑（立即同向）5.5 天 0 命中 → 实际等同于停摆
+            #        CORE 新逻辑（10 根窗口回踩）最近 3 天也 0 命中（最近 TD9 在 80 根前）
+            #   → 当前是"挂着但不交易"状态。
+            if not _skip and "成立" not in verdict:
                 _skip = True
-                _reason = (f"verdict 不成立（{verdict}），按纪律核心①②未满足不进场")
+                _reason = (f"verdict 不成立（{verdict}），按纪律只放'成立'，临界也拦下")
             _skipped_reason = _reason if _skip else None
+
+            # ★ 二次确认 v4.2（2026-10-08 liusir 决策）
+            #   信号成立后 + C/D 综合验证（C=盘口买卖比, D=OI 变化）= 才写 journal
+            #   二次确认逻辑（保守）：
+            #     - 做多：C/D 至少 1 个支持 → 通过
+            #     - 做空：C/D 至少 1 个支持 → 通过
+            #   阈值（参考 fetch_orderbook_imbalance + fetch_oi 已有 signal 阈值）：
+            #     - OB 多≥1.3 / 空≤0.77（原函数 1.5/0.67 放宽）
+            #     - OI 变化 ≥+0.3% / ≤-0.3%（原函数 0.5% 放宽）
+            #   失败处理：标记 _skipped_reason + 推 TG 卡片
+            if not _skipped_reason and "成立" in verdict:
+                try:
+                    from secondary_confirm import check_secondary_confirm
+                    _pass2, _reason2 = check_secondary_confirm(main_side, CONTRACT)
+                    if not _pass2:
+                        _skip = True
+                        _skipped_reason = f"二次确认失败：{_reason2}"
+                        P(f"\n  ⚠️ {_skipped_reason}")
+                except Exception as _e2:
+                    # 二次确认模块异常 → fail-open（不阻拦）
+                    P(f"\n  ⚠️ 二次确认模块异常（fail-open）: {_e2}")
 
             # ★ 反方向 force_close（2026-10-04 新增）：如果已有 filled 单 + 新信号反方向
             #     → 自动平掉 + 写反方向 journal（不受 500 点限制）

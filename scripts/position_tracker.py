@@ -57,13 +57,26 @@ JOURNAL = os.path.join(DATA_DIR, "journal.jsonl")
 EVENTS = os.path.join(DATA_DIR, "position_events.jsonl")
 
 # 用户指定常量
-# 50U 保证金 + 100x 杠杆 = 5000U 名义 → 张数 = round(5000 / entry / 0.0001)
-MARGIN_USD = 50.0                           # 保证金 50U
-LEVERAGE = 100                              # 100x 杠杆
+# 2026-10-08 liusir 决策：风控优先（杠杆 100x + 本金 50U 都不动）
+#   liusir 明确：单笔保证金 50U = 100% 本金（满仓）——信任入场信号
+#   风控兜底不靠"单笔仓位小"，靠"账户回撤 -30% 硬止损"（剩 35U 全停）
+#   名义 5000U → BTC 1% 波动 = ±50U = 整个本金 → 单笔最大亏 -50U 量级
+#   关键观察（5.5 天 45 条样本）：当前实证最大亏 -44.85U（1791209345-long）
+#   满仓 + 回撤兜底 = 接受单笔大亏、靠信号胜率 + 回撤硬止损兜住系统性风险
+MARGIN_USD = 50.0                           # 2026-10-08 liusir: 单笔保证金 50U（满仓）
+ACCOUNT_BALANCE_USD = 50.0                  # 2026-10-08 liusir: 本金保持 50U 不变
+RISK_PER_TRADE_PCT = 1.0                    # 单笔保证金占本金 100%（满仓）
+MAX_DRAWDOWN_PCT = 0.30                     # 账户回撤 30% 全停（liusir 拍板）
+LEVERAGE = 100                              # 100x 杠杆（liusir 明确不动）
 NOTIONAL_USD = MARGIN_USD * LEVERAGE        # 名义 = 5000U
-# 单笔总成本：scan 一律推挂单（maker，-0.01% 返佣），按 maker 写死
-# 名义 5000U × 0.01% × 2 (entry+exit) = -1.0U（净返佣 1U）
-FEE_USD = -1.0                              # 单笔总成本（maker 往返返佣）
+# 单笔总成本：基于 journal 45 条样本真实结算数据反推（2026-10-08 liusir 取消返佣逻辑）
+#   历史 journal net-gross 分布：17 条 diff=-4.85（taker 收费）+ 8 条 diff=+1.0（maker 返佣）
+#   即大部分单子走 taker（被扣 4.85U），少数纯 maker 单子能拿到 +1.0 返佣。
+#   原代码统一按 -1.0U 返佣计算 = **历史 bug**，让 taker 单子"少扣"了 5.85U = 净利虚高。
+#   修正：FEE_USD = +4.85（按实际 taker 费率计费，符合 journal 多数 diff 的真实成本）。
+#   名义 5000U × 0.0485% × 2 (entry+exit) = 4.85U（Gate.io BTC 永续 taker 实际费率）
+#   注：少数纯 maker 单子的 +1.0 返佣**不计入**——保守按 taker 算，避免"返佣兜底"假盈利。
+FEE_USD = 4.85                               # 单笔总成本（taker 往返收费，2026-10-08 改为正向收费）
 PARTS = 3                                   # 3 段部分止盈
 QUANT_MULT = 0.0001                         # 1 张 = 0.0001 BTC
 MAX_HOLD = 24 * 3600                        # 日内 24h 强制平

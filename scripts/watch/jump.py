@@ -314,6 +314,8 @@ class JumpTracker:
                     #   复刻 scan.py:619 同款守门：仅 "成立" / "临界" 放行；
                     #   反方向 JUMP-REVERSE 路径保留不动（那是 force_close 覆盖路径）。
                     #   Bug 实例：1791339325-long 是 verdict="无信号·观望" 但 jump 路径写出来的。
+                    # 2026-10-08 liusir 回滚：取消「仅成立」收紧（与 scan.py 同步）——原因
+                    #   同 scan.py 注释（core_b/core_s 5.5 天命中 0%，收紧=停摆）。
                     if not _skip and not ("成立" in verdict or "临界" in verdict):
                         _skip = True
                         _skip_reason = (f"verdict 不成立（{verdict}），按纪律核心①②未满足不进场")

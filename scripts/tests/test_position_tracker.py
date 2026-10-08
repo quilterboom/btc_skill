@@ -85,8 +85,8 @@ class TestSettleOneLong(unittest.TestCase):
         contracts = 500000
         # TP1 已平 500000/3 = 166666 张（int 除法），价 101，盈 = 1 * 166666 * 0.0001 = 16.67
         # 剩余部分按 cur_sl=100（BE）平，盈 = 0
-        # gross = 16.67, net = 16.67 - 4.85 = 11.82
-        self.assertAlmostEqual(res["net_usd"], 17.67, places=2)
+        # gross = 16.67, net = 16.67 - 4.85 = 11.82（FEE_USD=+4.85, 2026-10-08 改）
+        self.assertAlmostEqual(res["net_usd"], 11.82, places=2)
 
     def test_long_sl_only_no_tp1(self):
         """未触发 TP1，直接打止损 → 亏损归类"""
@@ -116,8 +116,8 @@ class TestSettleOneLong(unittest.TestCase):
         # 1/3 @ 101 + 2/3 @ 102
         # gross = (101-100)*166666*0.0001 + (102-100)*333334*0.0001
         #       = 1*16.67 + 2*33.33 = 16.67 + 66.67 = 83.33
-        # net = 83.33 - 4.85 = 78.48
-        self.assertAlmostEqual(res["net_usd"], 84.33, places=1)
+        # net = 83.33 - 4.85 = 78.48（FEE_USD=+4.85, 2026-10-08 改）
+        self.assertAlmostEqual(res["net_usd"], 78.48, places=1)
 
     def test_long_not_filled_yet_misses(self):
         """24h 没成交 → MISSED（未进场不返佣）"""
@@ -539,11 +539,11 @@ class TestEmaWarningClosePnl(unittest.TestCase):
         # entry=100, exit_px=100 (BE), partial_qty=3500, ema_partial_px=105 (cur_px)
         # gross = (105-100) * 3500 * 0.0001 + (100-100) * 1500 * 0.0001
         #       = 1.75 + 0 = 1.75
-        # FEE_USD = -1.0（返佣），所以 net = gross - FEE_USD = 1.75 - (-1.0) = 2.75
+        # FEE_USD = +4.85（taker 收费，2026-10-08 改），所以 net = gross - FEE_USD = 1.75 - 4.85 = -3.10
         self.assertAlmostEqual(res["gross_usd"], 1.75, places=2,
                                msg="gross 应包含 EMA 预警的部分 PnL")
-        self.assertAlmostEqual(res["net_usd"], 2.75, places=2,
-                               msg="net = gross + 1.0（FEE_USD=-1.0 是返佣）")
+        self.assertAlmostEqual(res["net_usd"], 1.75 - 4.85, places=2,
+                               msg="net = gross - 4.85（FEE_USD=+4.85 是 taker 收费，2026-10-08 改）")
         # ★ 关键验证：partial_exits 应=2（EMA + 剩余 BE 兜底）
         self.assertEqual(res["partial_exits"], 2)
 
@@ -570,9 +570,9 @@ class TestEmaWarningClosePnl(unittest.TestCase):
         self.assertIsNotNone(res)
         # short partial PnL: (100-95) * 3500 * 0.0001 = 1.75（盈利）
         # BE 兜底 1500 张: (100-100)*1500*0.0001 = 0
-        # gross = 1.75, net = 1.75 + 1.0 = 2.75
+        # gross = 1.75, net = 1.75 - 4.85 = -3.10（FEE_USD=+4.85, 2026-10-08 改）
         self.assertAlmostEqual(res["gross_usd"], 1.75, places=2)
-        self.assertAlmostEqual(res["net_usd"], 2.75, places=2)
+        self.assertAlmostEqual(res["net_usd"], 1.75 - 4.85, places=2)
 
     def test_close_without_ema_warning_unaffected(self):
         """没触发 EMA 预警时 _close 行为不变（回归保护）"""
@@ -595,7 +595,7 @@ class TestEmaWarningClosePnl(unittest.TestCase):
         contracts = pt._contracts(100)
         # SL 没移位，原 SL=99 被打：PnL = (99-100)*contracts*0.0001
         expected_gross = (99 - 100) * contracts * 0.0001
-        expected_net = expected_gross - pt.FEE_USD  # FEE_USD=-1.0（返佣）
+        expected_net = expected_gross - pt.FEE_USD  # FEE_USD=+4.85（taker 收费，2026-10-08 改）
         self.assertAlmostEqual(res["gross_usd"], expected_gross, places=2)
         self.assertAlmostEqual(res["net_usd"], expected_net, places=2)
 
