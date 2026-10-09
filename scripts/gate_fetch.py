@@ -272,6 +272,56 @@ def fetch_ohlcv(
     return rows
 
 
+def fetch_ohlcv_realtime(
+    contract: str = "BTC_USDT",
+    interval: str = "1h",
+    total: int = 5000,
+) -> List[List]:
+    """
+    实时数据（保留未收 K 线）—— 2026-10-08 liusir 决策
+
+    与 fetch_ohlcv 的差异：
+      - 不调用 _drop_unclosed → 保留正在收的最后一根 K 线
+      - 默认 cache=False → 不污染 cache
+      - 用途：实时分析、市场监测；**不能用于生产信号计算**（未收 K 线会闪烁）
+
+    返回：[[ts, open, high, low, close, volume, sum], ...]（含最后一根未收）
+    """
+    if interval not in INTERVAL_SEC:
+        raise ValueError(f"不支持的周期: {interval}")
+    step = INTERVAL_SEC[interval]
+    # 拉最新 2 根（包含未收）
+    try:
+        fresh = _pack(fetch_public(
+            "/futures/usdt/candlesticks",
+            {"contract": contract, "interval": interval, "limit": 2, "to": int(time.time())},
+        ))
+    except Exception as e:
+        # 失败时回退到 fetch_ohlcv
+        return fetch_ohlcv(contract, interval, total, cache=False)
+    if not fresh:
+        return fetch_ohlcv(contract, interval, total, cache=False)
+    # 历史数据用 fetch_ohlcv 拿（保留 cache）
+    rows_hist = fetch_ohlcv(contract, interval, total, cache=True, refresh=True, verbose=False)
+    # fresh 最新一根替换
+    fresh_sorted = [fresh[k] for k in sorted(fresh)]
+    live_bar = fresh_sorted[-1]
+    if not rows_hist:
+        return [list(live_bar)]
+    # 检查 live_bar 是不是真的"未收"
+    last_ts = live_bar[0]
+    if last_ts + step > int(time.time()):
+        # 替换最后一根
+        if rows_hist and rows_hist[-1][0] == last_ts:
+            rows = rows_hist[:-1] + [list(live_bar)]
+        else:
+            rows = rows_hist + [list(live_bar)]
+            rows = rows[-total:]
+    else:
+        rows = rows_hist
+    return rows
+
+
 def cache_freshness(tf_counts: Dict[str, int] = None, contract: str = "BTC_USDT") -> List[Dict]:
     """查看各周期缓存新鲜度（不联网刷新）"""
     tf_counts = tf_counts or {"15m": 8000, "1h": 20000, "4h": 5000, "1d": 1500}

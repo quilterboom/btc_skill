@@ -100,6 +100,11 @@ def log_signal(contract: str, last: float, side: str, score: int, core_ok: bool,
         "tp1_pct": round(float(plan["tp1_pct"]), 4),
         "status": "pending", "tags": dict(tags or {}),
         "meta": dict(meta or {}),
+        # 2026-10-09 加: TP 体系识别 (15m 形态信号专用)
+        "tp_mode": plan.get("tp_mode", "auto"),
+        "signal_source": plan.get("signal_source", "1h_main"),  # "1h_main" / "15m_pattern"
+        "custom_tp1_pct": plan.get("custom_tp1_pct"),
+        "custom_tp2_pct": plan.get("custom_tp2_pct"),
     }
     if recs:
         p = recs[-1]

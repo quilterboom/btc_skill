@@ -17,6 +17,7 @@
 """
 from __future__ import annotations
 import sys, os, time, json, argparse
+from datetime import datetime, timezone, timedelta
 import numpy as np
 import pandas as pd
 
@@ -211,18 +212,26 @@ def max_safe_lev(sl_pct, cushion=1.5):
 
 
 def make_plan(side, px, atrp, sup, res, d_atrp, lev, bal, risk, quanto, mode="cross",
-              target_pts: float = 500.0):
+              target_pts: float = 500.0, tp_mode: str = "auto",
+              custom_tp1_pct: float = None, custom_tp2_pct: float = None):
     """
     long  → 挂最近支撑；short → 挂最近阻力
     止损 = max/min(1.5×ATR, 次级结构位±0.3ATR)，夹在 0.8%~3%
     止盈 = **目标点数封顶**（默认 500 点）：
         T3 = 入场 ± target 点（硬顶，不贪）
         T1/T2 = 目标以内最近的合格结构位，没有就按 40%/70% 目标分批
+
+    tp_mode (2026-10-09 liusir 加):
+        - "auto"   (默认): 按 target_pts 自动算 TP1=40%/TP2=60%
+        - "custom"        : 强制用 custom_tp1_pct / custom_tp2_pct (15m 形态信号专用)
+                           此时 SL 仍按 ATR/结构算 (0.8% 下限), entry 用 px (形态已锁定入场)
     """
     a = max(atrp, 0.15) / 100.0
     near_sup = sup[0][1] if sup else px * (1 - a)
     near_res = res[0][1] if res else px * (1 + a)
     tp_pts = float(target_pts)
+    is_custom = (tp_mode == "custom" and custom_tp1_pct is not None
+                 and custom_tp2_pct is not None)
 
     if side == "long":
         entry = near_sup if (px - near_sup) / px < 0.025 else px * (1 - 0.30 * a)
@@ -232,12 +241,20 @@ def make_plan(side, px, atrp, sup, res, d_atrp, lev, bal, risk, quanto, mode="cr
         sl_pct = float(np.clip((entry - sl) / entry, 0.004, 0.030))
         R = entry * sl_pct
         cap = entry + tp_pts                                   # 500 点硬顶
-        rr = [x[1] for x in res if entry + 1.2 * R < x[1] < cap]
-        t1 = rr[0] if rr else entry + 0.40 * tp_pts    # TP1 = 40% × target (1000 → 400 点)
-        t2 = rr[1] if len(rr) > 1 else entry + 0.60 * tp_pts  # TP2 = 60% × target (1000 → 600 点)
-        t1 = min(max(t1, entry + 0.30 * R), cap - 0.20 * R)
-        t2 = min(max(t2, t1 + 0.25 * R), cap)
-        tps = [t1, t2, cap]
+        if is_custom:
+            # 15m 形态信号: 强制 TP1/TP2, T3 仍按 target_pts 算
+            t1 = entry * (1 + custom_tp1_pct)
+            t2 = entry * (1 + custom_tp2_pct)
+            t1 = max(t1, entry + 0.20 * R)   # TP1 必须 ≥ SL 距离
+            t2 = max(t2, t1 + 0.25 * R)
+            tps = [t1, t2, cap]
+        else:
+            rr = [x[1] for x in res if entry + 1.2 * R < x[1] < cap]
+            t1 = rr[0] if rr else entry + 0.40 * tp_pts
+            t2 = rr[1] if len(rr) > 1 else entry + 0.60 * tp_pts
+            t1 = min(max(t1, entry + 0.30 * R), cap - 0.20 * R)
+            t2 = min(max(t2, t1 + 0.25 * R), cap)
+            tps = [t1, t2, cap]
     else:
         entry = near_res if (near_res - px) / px < 0.025 else px * (1 + 0.30 * a)
         entry_break = (sup[0][1] * (1 - 0.05 * a)) if sup else px * (1 - 0.10 * a)
@@ -246,15 +263,27 @@ def make_plan(side, px, atrp, sup, res, d_atrp, lev, bal, risk, quanto, mode="cr
         sl_pct = float(np.clip((sl - entry) / entry, 0.004, 0.030))
         R = entry * sl_pct
         cap = entry - tp_pts
-        ss = sorted([x[1] for x in sup if cap < x[1] < entry - 1.2 * R], key=lambda v: -v)
-        t1 = ss[0] if ss else entry - 0.40 * tp_pts    # TP1 = 40% × target (1000 → 400 点)
-        t2 = ss[1] if len(ss) > 1 else entry - 0.60 * tp_pts  # TP2 = 60% × target (1000 → 600 点)
-        t1 = max(min(t1, entry - 0.30 * R), cap + 0.20 * R)
-        t2 = max(min(t2, t1 - 0.25 * R), cap)
-        tps = [t1, t2, cap]
+        if is_custom:
+            # 15m 形态信号 (做空): 跌为赢
+            t1 = entry * (1 - custom_tp1_pct)
+            t2 = entry * (1 - custom_tp2_pct)
+            t1 = min(t1, entry - 0.20 * R)   # TP1 必须 ≥ SL 距离
+            t2 = min(t2, t1 - 0.25 * R)
+            tps = [t1, t2, cap]
+        else:
+            ss = sorted([x[1] for x in sup if cap < x[1] < entry - 1.2 * R], key=lambda v: -v)
+            t1 = ss[0] if ss else entry - 0.40 * tp_pts
+            t2 = ss[1] if len(ss) > 1 else entry - 0.60 * tp_pts
+            t1 = max(min(t1, entry - 0.30 * R), cap + 0.20 * R)
+            t2 = max(min(t2, t1 - 0.25 * R), cap)
+            tps = [t1, t2, cap]
 
     sl_points = entry * sl_pct                                  # 止损点数
-    be_wr = sl_points / (sl_points + tp_pts)                    # 保本胜率（1:1 盈亏比口径）
+    # be_wr: custom 模式下用 TP1 作为"保本胜率"分母 (因为实际推到 BE 的就是 TP1)
+    if is_custom:
+        be_wr = sl_points / (sl_points + entry * custom_tp1_pct)
+    else:
+        be_wr = sl_points / (sl_points + tp_pts)
     notional = 50.0 * lev                                       # 固定 50U 保证金 × 杠杆 = 名义（50×100 = 5000 U）
     nx = notional / bal
     contracts = notional / (entry * quanto)
@@ -277,6 +306,9 @@ def make_plan(side, px, atrp, sup, res, d_atrp, lev, bal, risk, quanto, mode="cr
         "tp3_pct": (tps[2] / entry - 1) * 100,
         "rr3": abs(tps[2] / entry - 1) / sl_pct,
         "target_pts": tp_pts,
+        "tp_mode": tp_mode,                         # 2026-10-09: "auto" / "custom"
+        "custom_tp1_pct": custom_tp1_pct if is_custom else None,
+        "custom_tp2_pct": custom_tp2_pct if is_custom else None,
         "sl_points": sl_points,
         "tp_points": [abs(tps[0] - entry), abs(tps[1] - entry), abs(tps[2] - entry)],
         "be_wr": be_wr,                                  # 保本胜率（目标=target 点、亏损=止损点）
@@ -289,6 +321,98 @@ def make_plan(side, px, atrp, sup, res, d_atrp, lev, bal, risk, quanto, mode="cr
         "day_reachable": bool(abs(tps[1] / entry - 1) * 100 <= d_atrp * 0.8),
         "taker_cost": TAKER_FEE * 100 * 2, "maker_cost": abs(MAKER_FEE) * 100 * 2,
     }
+
+
+# ============================ 15m 形态信号 (2026-10-09 加) ============================
+def _is_shooting_star_15m(o, h, l, c):
+    """流星线: 上影 > 实体 2x + 下影 < 实体 0.5x + 上影 > 下影 1.5x"""
+    body = abs(c - o)
+    upper = h - max(c, o)
+    lower = min(c, o) - l
+    return body > 0 and upper >= body * 2 and upper > lower * 1.5 and lower < body * 0.5
+
+
+def _is_hammer_15m(o, h, l, c):
+    """锤子线: 下影 > 实体 2x + 上影 < 实体 0.5x + 下影 > 上影 1.5x"""
+    body = abs(c - o)
+    upper = h - max(c, o)
+    lower = min(c, o) - l
+    return body > 0 and lower >= body * 2 and lower > upper * 1.5 and upper < body * 0.5
+
+
+def _detect_15m_pattern(contract: str = "BTC_USDT", lookback: int = 5):
+    """
+    检测最近 N 根 15m K 线里是否出现形态信号.
+    返回 None 或 {"side": "long"/"short", "kind": str, "ts": int, "i": int}.
+
+    规则 (liusir 2026-10-09):
+      - 流星线 + 紧接着 2 根 K 线都收阴 (做空)
+      - 锤子线 + 紧接着 1 根 K 线收阳 (做多)
+    """
+    try:
+        raw = fetch_ohlcv(contract, "15m", max(lookback + 10, 50), cache=False)
+    except Exception:
+        return None
+    # raw 升序: 最后一根是最近已收
+    if len(raw) < 4:
+        return None
+    # 取最近 lookback 根中"形态 K 线 + 后续确认 K 线都齐全"的最后一根
+    last_valid_i = len(raw) - 3  # 至少需要 i, i+1, i+2
+    for i in range(last_valid_i, -1, -1):
+        bar = raw[i]
+        ts_i, o_i, h_i, l_i, c_i = int(bar[0]), float(bar[1]), float(bar[2]), float(bar[3]), float(bar[4])
+        # 流星线 + 连续 2 阴线
+        if _is_shooting_star_15m(o_i, h_i, l_i, c_i):
+            if i + 2 < len(raw):
+                bar1 = raw[i+1]; bar2 = raw[i+2]
+                if float(bar1[4]) < float(bar1[1]) and float(bar2[4]) < float(bar2[1]) and float(bar2[4]) < float(bar2[1]):
+                    # bar2 close < bar1 close (连续阴跌, 不只是单根阴线)
+                    if float(bar2[4]) < float(bar1[4]):
+                        return {"side": "short", "kind": "流星+连续2阴线",
+                                "ts": ts_i, "i": i}
+        # 锤子线 + 次根阳线
+        if _is_hammer_15m(o_i, h_i, l_i, c_i):
+            if i + 1 < len(raw):
+                bar1 = raw[i+1]
+                if float(bar1[4]) > float(bar1[1]):  # 次根收阳
+                    return {"side": "long", "kind": "锤子+次根阳线",
+                            "ts": ts_i, "i": i}
+    return None
+
+
+def _30m_trend_at(ts: int) -> int:
+    """
+    给定 15m 时间戳, 返回当时 30m 趋势: +1 (close > EMA21 * 1.001) /
+                                         -1 (close < EMA21 * 0.999) /
+                                          0 (震荡 / 数据不足)
+    """
+    try:
+        raw = fetch_ohlcv("BTC_USDT", "30m", 100, cache=False)
+    except Exception:
+        return 0
+    if not raw:
+        return 0
+    # 找 ≤ ts 的最新 30m K
+    target = None
+    for bar in raw:
+        if int(bar[0]) <= ts:
+            target = bar
+        else:
+            break
+    if target is None:
+        return 0
+    closes = [float(b[4]) for b in raw if int(b[0]) <= ts]
+    if len(closes) < 21:
+        return 0
+    e21 = ema(np.array(closes), 21)
+    if e21 is None or len(e21) == 0 or e21[-1] is None:
+        return 0
+    cur, e = closes[-1], e21[-1]
+    if cur > e * 1.001:
+        return +1
+    if cur < e * 0.999:
+        return -1
+    return 0
 
 
 # ============================ 主流程 ============================
@@ -635,6 +759,37 @@ def main():
                        MODE, TARGET)
     plan_s = make_plan("short", last, float(hl.atrp), sup, res, d_atrp, LEV, BAL, rs_, quanto,
                        MODE, TARGET)
+
+    # ============================================================
+    # 2026-10-09 加: 15m 形态信号检测 (liu_A3.2 配置)
+    #   - 流星线 + 连续 2 阴线 (做空) / 锤子线 + 次根阳线 (做多)
+    #   - + 30m EMA21 趋势过滤 (避开逆势)
+    #   - + 1h score 叠加 (5/8+形态 = "7 中过 4 + 形态" 才放行)
+    #   - TP1=400 / TP2=850 手工指定 (B-改方案, 跟回测数据对齐)
+    # ============================================================
+    _15m_signal = _detect_15m_pattern(contract=CONTRACT)
+    _pattern_trigger = None  # {"side": "long"/"short", "score_combined": int, "ts": int}
+    if _15m_signal:
+        _pside = _15m_signal["side"]
+        # 30m 趋势过滤: 做空不能在 30m 强多, 做多不能在 30m 强空
+        _tr = _30m_trend_at(_15m_signal["ts"])
+        _pass_trend = not ((_pside == "short" and _tr == +1) or
+                           (_pside == "long" and _tr == -1))
+        if _pass_trend:
+            # 取该时刻对应 1h 主信号的 score (sc_b / sc_s)
+            _p_score = sc_b if _pside == "long" else sc_s
+            _combined = _p_score + 1  # 形态加 1 分
+            if _combined >= 5:  # 5/8+形态
+                _pattern_trigger = {
+                    "side": _pside,
+                    "score_combined": _combined,
+                    "score_1h": _p_score,
+                    "ts": _15m_signal["ts"],
+                }
+                P(f"\n  🔔 15m 形态信号命中：{_pside.upper()} "
+                  f"(1h score={_p_score}+形态=1={_combined} ≥ 5)")
+                _ts_str = datetime.fromtimestamp(_15m_signal["ts"], timezone(timedelta(hours=8))).strftime('%m-%d %H:%M')
+                P(f"     形态: {_15m_signal['kind']} @ {_ts_str}")
     # 2026-10-08 v4.1 liusir 异动行情处理流程（修复版）：
     #   1h K 线收盘/量能异动触发 → 先判断市场状态（ADX）
     #     - ADX > 25: 单边趋势 → 走 CORE 趋势策略
@@ -812,6 +967,57 @@ def main():
                     verdict, _plm,
                     {"trend": trend_tag, "vol": vol_tag, "fib": fib_tag},
                     {"lev": LEV, "bal": BAL, "risk": RISK, "mode": MODE})
+
+            # ============================================================
+            # 2026-10-09 加: 15m 形态信号触发 → 单独走 tp_mode="custom" 路径
+            #   - 形态信号**独立于主信号 verdict** (5/8+形态 已经过 1h score 4 + 形态 1 验证)
+            #   - 复用 make_plan 的 custom_tp1_pct/custom_tp2_pct (TP1=400/TP2=850)
+            #   - 主信号 cooldown 检查仍生效 (config.should_skip_new_signal), 避免
+            #     短时间内多个反向单同时挂出
+            # ============================================================
+            if _pattern_trigger:
+                try:
+                    _pside = _pattern_trigger["side"]
+                    # 重新生成 plan (custom 模式)
+                    _pplan = make_plan(
+                        _pside, last, float(hl.atrp), sup, res, d_atrp, LEV, BAL,
+                        RISK * RS * float(SZ.get(_pside, 1.0)), quanto, MODE, TARGET,
+                        tp_mode="custom",
+                        custom_tp1_pct=0.00480,   # 400 点
+                        custom_tp2_pct=0.01020,   # 850 点
+                    )
+                    _pplan["signal_source"] = "15m_pattern"  # 标记信号源
+                    _pverdict = (f"15m形态信号成立（{_15m_signal['kind']}，"
+                                 f"1h{_pattern_trigger['score_1h']}+形态=1={_pattern_trigger['score_combined']}）")
+                    jstat_15m = _J.log_signal(
+                        CONTRACT, last, _pside,
+                        _pattern_trigger["score_1h"],   # 1h 主信号 score (7分制)
+                        core_b if _pside == "long" else core_s,
+                        _pverdict, _pplan,
+                        {"trend": trend_tag, "vol": vol_tag, "fib": fib_tag,
+                         "pattern": _15m_signal["kind"]},
+                        {"lev": LEV, "bal": BAL, "risk": RISK, "mode": MODE,
+                         "signal_source": "15m_pattern"})
+                    P(f"\n  ✅ 15m 形态信号已写入 journal: {jstat_15m}")
+                    P(f"     TP1={_pplan['tp1']:,.1f}  TP2={_pplan['tp2']:,.1f}  SL={_pplan['sl']:,.1f}")
+                    # 推 TG 卡片
+                    try:
+                        from telegram import push
+                        push(
+                            f"🔔 *15m 形态信号* `{_pside.upper()}`\n"
+                            f"形态: {_15m_signal['kind']}\n"
+                            f"1h score: {_pattern_trigger['score_1h']} + 形态=1 = {_pattern_trigger['score_combined']}\n"
+                            f"入场: {last:,.1f}\n"
+                            f"SL: {_pplan['sl']:,.1f} ({_pplan['sl_pct']:.2f}%)\n"
+                            f"TP1: {_pplan['tp1']:,.1f} (400 点)\n"
+                            f"TP2: {_pplan['tp2']:,.1f} (850 点)\n"
+                            f"仓位: {_pplan['contracts']:.0f} 张 (名义 {_pplan['notional']:,.0f}U)\n"
+                            f"`signal_source=15m_pattern, tp_mode=custom`"
+                        )
+                    except Exception as _tg_e:
+                        P(f"\n  ⚠️ TG 推送失败 (非阻塞): {_tg_e}")
+                except Exception as _e15m:
+                    P(f"\n  ⚠️ 15m 形态信号处理失败 (非阻塞): {_e15m}")
         except Exception:
             jstat = None
 
