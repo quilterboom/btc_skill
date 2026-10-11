@@ -1064,6 +1064,39 @@ def main():
                     {"trend": trend_tag, "vol": vol_tag, "fib": fib_tag},
                     {"lev": LEV, "bal": BAL, "risk": RISK, "mode": MODE},
                     preview_secs=PREVIEW_SECS)
+                # 2026-10-11 补: 1h 主信号路径也推预览/正式 TG 卡
+                # 修复预览闸门漏改这个分支的 bug (之前只在 15m 形态信号路径推)
+                try:
+                    from telegram import push
+                    if PREVIEW_SECS and PREVIEW_SECS > 0 and jstat == "added":
+                        _until = int(time.time()) + PREVIEW_SECS
+                        _until_str = time.strftime("%H:%M:%S", time.localtime(_until))
+                        push(
+                            f"📋 *1h 主信号预览* `{main_side.upper()}`\n"
+                            f"判定: {verdict}\n"
+                            f"1h score: {sc_b if main_side == 'long' else sc_s}/7\n"
+                            f"入场: {_plm['entry_limit']:,.1f} (挂单 post-only)\n"
+                            f"突破追: {_plm.get('entry_break', 0):,.1f}\n"
+                            f"SL: {_plm['sl']:,.1f} ({_plm['sl_pct']:.2f}%)\n"
+                            f"TP1: {_plm['tp1']:,.1f} (400 点)\n"
+                            f"TP2: {_plm['tp2']:,.1f} (600 点)\n"
+                            f"仓位: {_plm['contracts']:.0f} 张 (名义 {_plm['notional']:,.0f}U)\n"
+                            f"⏳ {PREVIEW_SECS}s 后自动执行 ({_until_str} 前可取消)\n"
+                            f"取消: `python3 journal.py cancel {CONTRACT}-{int(time.time())}-{main_side}`"
+                        )
+                    elif jstat == "added":
+                        push(
+                            f"🔔 *1h 主信号* `{main_side.upper()}`\n"
+                            f"判定: {verdict}\n"
+                            f"1h score: {sc_b if main_side == 'long' else sc_s}/7\n"
+                            f"入场: {_plm['entry_limit']:,.1f}\n"
+                            f"SL: {_plm['sl']:,.1f} ({_plm['sl_pct']:.2f}%)\n"
+                            f"TP1: {_plm['tp1']:,.1f} (400 点)\n"
+                            f"TP2: {_plm['tp2']:,.1f} (600 点)\n"
+                            f"仓位: {_plm['contracts']:.0f} 张 (名义 {_plm['notional']:,.0f}U)"
+                        )
+                except Exception as _tg_e:
+                    P(f"\n  ⚠️ 1h 主信号 TG 推送失败 (非阻塞): {_tg_e}")
 
             # ============================================================
             # 2026-10-09 加: 15m 形态信号触发 → 单独走 tp_mode="custom" 路径
