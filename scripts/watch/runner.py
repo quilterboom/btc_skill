@@ -540,6 +540,9 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--preview-secs", type=int, default=None,
                     help="传给 scan.py 的 --preview-secs（信号进 journal 前 N 秒预览闸门）。"
                          "不传则 scan 用默认值 0（立即生效）")
+    ap.add_argument("--training", action="store_true", default=False,
+                    help="训练环境模式（模拟开单，不计真实资金）。"
+                         "数据写到 training_journal.jsonl，跟生产隔离")
     return ap
 
 
@@ -638,6 +641,14 @@ def main() -> int:
     # 2026-10-11 加：透传预览闸门参数给 scan.py
     if a.preview_secs is not None and int(a.preview_secs) > 0:
         extra += ["--preview-secs", str(int(a.preview_secs))]
+    # 2026-10-11 加：训练环境模式（模拟开单，不计真实资金）
+    # 隔离 journal: 训练环境写到 training_journal.jsonl，跟生产隔离
+    if a.training:
+        os.environ["TRAINING_MODE"] = "1"
+        os.environ["TRAINING_DATA_DIR"] = "/root/data/training"
+        os.environ["TRAINING_JOURNAL"] = "/root/data/training/journal.jsonl"
+        extra += ["--training"]
+        print(f"[training] 训练环境模式启用，数据隔离到 /root/data/training/journal.jsonl")
 
     if a.cmd == "stop":
         return cmd_stop()

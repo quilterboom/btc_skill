@@ -32,7 +32,14 @@ from typing import List, Dict, Any, Optional, Callable
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from gate_fetch import DATA_DIR, fetch_ohlcv
 
-JOURNAL = os.path.join(DATA_DIR, "journal.jsonl")
+# 2026-10-11 加：训练环境模式（journal 隔离）
+# 训练模式下 JOURNAL 切换到 training_journal.jsonl，跟生产隔离
+if os.environ.get("TRAINING_MODE") == "1":
+    TRAINING_DATA_DIR = os.environ.get("TRAINING_DATA_DIR", "/root/data/training")
+    JOURNAL = os.path.join(TRAINING_DATA_DIR, "journal.jsonl")
+else:
+    JOURNAL = os.path.join(DATA_DIR, "journal.jsonl")
+
 TUNING = os.path.join(DATA_DIR, "tuning.json")
 TUNING_SUG = os.path.join(DATA_DIR, "tuning_suggested.json")
 COOLDOWN = int(os.environ.get("BTC_JOURNAL_COOLDOWN", "3600"))

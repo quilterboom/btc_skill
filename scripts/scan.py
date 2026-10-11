@@ -527,11 +527,21 @@ def main():
                     help="信号→journal 之间加预览闸门：写 status=preview_pending，"
                          "N 秒后自动 promote 到 pending；0=立即生效（默认）。"
                          "搭配 'journal cancel <id>' 可提前取消。")
+    ap.add_argument("--training", action="store_true", default=False,
+                    help="训练环境模式（模拟开单，不计真实资金）。"
+                         "journal 路径切换到 training_journal.jsonl，跟生产隔离")
     a = ap.parse_args()
     CONTRACT, LEV, BAL, RISK, MODE = a.contract, a.lev, a.bal, a.risk, a.mode
     BRIEF = a.brief
     TARGET = a.target
     PREVIEW_SECS = max(0, int(getattr(a, "preview_secs", 0) or 0))
+
+    # 2026-10-11 加：训练环境模式（journal 隔离）
+    if a.training:
+        os.environ["TRAINING_MODE"] = "1"
+        os.environ["TRAINING_DATA_DIR"] = "/root/data/training"
+        os.environ["TRAINING_JOURNAL"] = "/root/data/training/journal.jsonl"
+        print(f"[training] 训练环境模式启用，journal 隔离到 /root/data/training/journal.jsonl")
 
     # 解析情绪上下文（news_watcher 注入或人工传）
     EVENT = None
