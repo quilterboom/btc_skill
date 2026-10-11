@@ -340,6 +340,97 @@ def _is_hammer_15m(o, h, l, c):
     return body > 0 and lower >= body * 2 and lower > upper * 1.5 and upper < body * 0.5
 
 
+# ============================ 第一梯队：单根反转/犹豫形态 (2026-10-11 加) ============================
+# 复用同套比例语言（实体/影线）
+# 不引入新参数，只为 daily_report 形态分布统计 + 反转成功率服务
+# 不进 journal 路径（保守，先观察）
+
+def _body_ratio(o, h, l, c):
+    """实体相对振幅的比例 (0~1). body 太小视为犹豫态"""
+    rng = h - l
+    if rng <= 0:
+        return 0.0
+    return abs(c - o) / rng
+
+def _upper_ratio(o, h, l, c):
+    """上影线相对振幅的比例"""
+    rng = h - l
+    if rng <= 0:
+        return 0.0
+    return (h - max(c, o)) / rng
+
+def _lower_ratio(o, h, l, c):
+    """下影线相对振幅的比例"""
+    rng = h - l
+    if rng <= 0:
+        return 0.0
+    return (min(c, o) - l) / rng
+
+
+def _is_doji(o, h, l, c):
+    """十字星: 实体 < 振幅 10% (默认实体比例 <0.1)"""
+    return _body_ratio(o, h, l, c) < 0.10
+
+def _is_long_legged_doji(o, h, l, c):
+    """长腿十字星: 实体很小 (<10%) + 上下影都 > 35%"""
+    return (_body_ratio(o, h, l, c) < 0.10
+            and _upper_ratio(o, h, l, c) > 0.35
+            and _lower_ratio(o, h, l, c) > 0.35)
+
+def _is_gravestone_doji(o, h, l, c):
+    """墓碑十字星: 上影极长 (>70%) + 下影几乎 0 (<5%) + 实体 <10%"""
+    return (_upper_ratio(o, h, l, c) > 0.70
+            and _lower_ratio(o, h, l, c) < 0.05
+            and _body_ratio(o, h, l, c) < 0.10)
+
+def _is_dragonfly_doji(o, h, l, c):
+    """蜻蜓十字星: 下影极长 (>70%) + 上影几乎 0 (<5%) + 实体 <10%"""
+    return (_lower_ratio(o, h, l, c) > 0.70
+            and _upper_ratio(o, h, l, c) < 0.05
+            and _body_ratio(o, h, l, c) < 0.10)
+
+def _is_spinning_top(o, h, l, c):
+    """纺锤线: 实体小 (<35%) + 上下影都有 (>25%)"""
+    return (_body_ratio(o, h, l, c) < 0.35
+            and _upper_ratio(o, h, l, c) > 0.25
+            and _lower_ratio(o, h, l, c) > 0.25)
+
+
+# 7 个形态的统一入口 — 一次扫描得到所有可能的形态（互斥：返回最强的一个）
+PATTERN_REGISTRY = [
+    # (id_zh, id_en, 函数, 默认方向建议, 强度 1~3)
+    ("锤子",       "hammer",         _is_hammer_15m,         "long",  3),
+    ("蜻蜓十字",   "dragonfly_doji", _is_dragonfly_doji,     "long",  3),
+    ("流星",       "shooting_star",  _is_shooting_star_15m,  "short", 3),
+    ("墓碑十字",   "gravestone_doji",_is_gravestone_doji,    "short", 3),
+    ("长腿十字",   "long_legged",    _is_long_legged_doji,   None,    2),
+    ("普通十字",   "doji",           _is_doji,               None,    1),
+    ("纺锤",       "spinning_top",   _is_spinning_top,       None,    1),
+]
+
+
+def detect_all_patterns_15m(o, h, l, c):
+    """识别一根 15m K 线所有匹配的形态, 按强度排序返回列表.
+
+    返回: list of dict, 每个元素:
+      {"name_zh": "锤子", "name_en": "hammer", "bias": "long"/"short"/None, "strength": 3}
+    """
+    out = []
+    for name_zh, name_en, fn, bias, strength in PATTERN_REGISTRY:
+        try:
+            if fn(o, h, l, c):
+                out.append({
+                    "name_zh": name_zh,
+                    "name_en": name_en,
+                    "bias": bias,
+                    "strength": strength,
+                })
+        except Exception:
+            continue
+    out.sort(key=lambda x: -x["strength"])
+    return out
+
+
 def _detect_15m_pattern(contract: str = "BTC_USDT", lookback: int = 5):
     """
     检测最近 N 根 15m K 线里是否出现形态信号.
