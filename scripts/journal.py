@@ -77,6 +77,60 @@ def _write(recs: List[Dict]) -> None:
 
 
 # ============================ 记录 ============================
+def _account_safety_check() -> tuple[bool, float, str]:
+    """2026-10-11 账户级安全阀（防 -50U 累计极端亏损）
+    
+    返回: (allowed, cumulative_24h_net, message)
+      allowed=True  → 允许开新仓
+      allowed=False → 阻止开新仓
+    
+    触发条件: 近 24 小时累计 net_usd < -50U
+    解锁条件: 人工调用 `python journal.py unlock` 或时间窗到期
+    
+    Unlock 机制: marker 文件 (account_unlock.marker) 24h 内有效
+    """
+    # 检查 unlock marker
+    marker = os.path.join(DATA_DIR, "account_unlock.marker")
+    if os.path.exists(marker):
+        try:
+            with open(marker) as f:
+                m_ts = int(f.read().strip() or 0)
+            # marker 24h 内有效
+            if time.time() - m_ts < 24 * 3600:
+                recs = _read()
+                now = int(time.time())
+                win_start = now - 24 * 3600
+                cumulative = 0.0
+                for r in recs:
+                    if r.get("status") != "settled":
+                        continue
+                    exit_ts = r.get("exit_ts") or r.get("ts") or 0
+                    if exit_ts and exit_ts >= win_start:
+                        cumulative += r.get("net_usd", 0.0)
+                return (True, cumulative, "账户安全阀已解锁 (人工 unlock)")
+        except Exception:
+            pass
+    
+    recs = _read()
+    now = int(time.time())
+    win_start = now - 24 * 3600
+    cumulative = 0.0
+    for r in recs:
+        if r.get("status") != "settled":
+            continue
+        exit_ts = r.get("exit_ts") or r.get("ts") or 0
+        if exit_ts and exit_ts >= win_start:
+            cumulative += r.get("net_usd", 0.0)
+    
+    if cumulative < -50.0:
+        return (False, cumulative, f"账户级安全阀触发：近 24h 累计 {cumulative:+.2f}U < -50U 阈值")
+    return (True, cumulative, "账户正常")
+
+
+# 安全阀开关（默认启用，可用环境变量 BTC_NO_ACCOUNT_LOCK=1 临时禁用）
+_ACCOUNT_LOCK_ENABLED = os.environ.get("BTC_NO_ACCOUNT_LOCK") != "1"
+
+
 def log_signal(contract: str, last: float, side: str, score: int, core_ok: bool,
                verdict: str, plan: Dict, tags: Dict, meta: Dict = None,
                preview_secs: int = 0) -> str:
@@ -89,10 +143,22 @@ def log_signal(contract: str, last: float, side: str, score: int, core_ok: bool,
       - preview_secs>0 → 写入时用 status="preview_pending"，加 preview_until_ts
         字段；调用方需配合 promote_pending/cancel_preview 在到期前后处理。
 
-    返回: "added" / "updated" / "off"
+    2026-10-11 加账户级安全阀（防 -50U 累计极端亏损）：
+      - 近 24h 累计 net_usd < -50U 时，阻止新信号挂单
+      - 解锁: `python journal.py unlock` 或 24h 时间窗到期
+
+    返回: "added" / "updated" / "off" / "blocked_account_safety"
     """
     if os.environ.get("BTC_NO_JOURNAL") == "1":
         return "off"
+    # 2026-10-11 账户级安全阀（v5 风控机制, 非参数调优）
+    if _ACCOUNT_LOCK_ENABLED:
+        allowed, cum, msg = _account_safety_check()
+        if not allowed:
+            # 阻止但不返回"off"——让调用方能区分"journals 关闭" vs "安全阀触发"
+            # 同时打日志（不推送，避免刷屏）
+            print(f"[journal] 账户安全阀触发: {msg} ｜ 信号被阻止 side={side} entry={plan.get('entry_limit')}")
+            return "blocked_account_safety"
     recs = _read()
     now = int(time.time())
     if preview_secs and preview_secs > 0:
@@ -667,6 +733,28 @@ def main():
         # 不传 id：自动 promote 所有到期记录
         promoted = promote_due_previews(a.contract)
         print(f"自动 promote {len(promoted)} 条：{promoted}")
+        return 0
+    if cmd == "unlock":
+        # 2026-10-11 新增：账户级安全阀手动解锁（针对 -50U 累计极端亏损）
+        # 解锁方式：把近 24h 累计重置为 0（即不再阻止新信号）
+        # 实现: 写一个 unlock marker，让 _account_safety_check 跳过
+        import time as _t
+        marker = os.path.join(DATA_DIR, "account_unlock.marker")
+        now_ts = int(_t.time())
+        with open(marker, "w") as f:
+            f.write(f"{now_ts}\n")
+        # 同时打印当前累计
+        allowed, cum, msg = _account_safety_check()
+        print(f"✓ 账户安全阀已解锁 (marker 写入 {marker})")
+        print(f"  近 24h 累计: {cum:+.2f}U ｜ 状态: {msg}")
+        print(f"  解锁到期: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(now_ts + 24*3600))}")
+        return 0
+    if cmd == "lock":
+        # 2026-10-11 新增：手动锁定账户（用于测试 / 暂停开新仓）
+        marker = os.path.join(DATA_DIR, "account_unlock.marker")
+        if os.path.exists(marker):
+            os.remove(marker)
+        print(f"✓ 账户安全阀已强制锁定 (移除 {marker})")
         return 0
     if cmd == "stats":
         settle_all(a.contract)

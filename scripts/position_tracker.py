@@ -410,6 +410,12 @@ def _close(sig: Dict, outcome: str, exit_px: float, exit_ts: int,
     gross = sum(_pnl_usd(side, entry, px, q) for q, px in pnl_parts)
     net = gross - FEE_USD
 
+    # 2026-10-11 v5 风控（非调参）：单笔亏损深度安全阀
+    # 背景: 历史数据最大单笔亏损 -44.85U，接近 50U 本金。无任何风控机制
+    # 触发条件: net < -30U（含手续费后）→ 标 safety_break=true + 推送告警
+    # 这是「防极端亏损」不是「参数调优」——不改 score/SL/TP 等决策参数
+    safety_break = net < -30.0
+
     return {
         "pos_state": outcome,
         "outcome": outcome,
@@ -420,6 +426,9 @@ def _close(sig: Dict, outcome: str, exit_px: float, exit_ts: int,
         "category": category,
         "partial_exits": len(pnl_parts),
         "contracts": contracts,
+        # 2026-10-11 风控: 标记极端亏损 + 记录深度
+        "safety_break": safety_break,
+        "loss_depth": abs(min(net, 0.0)) if net < 0 else 0.0,
         "note": ""
     }
 
@@ -486,6 +495,22 @@ def _notify_close(sig: Dict, res: Dict) -> None:
         f"类目：{cat} ｜ 部分止盈 {res.get('partial_exits', 0)} 次"
     )
     _push(card)
+
+    # 2026-10-11 风控安全阀触发告警（不改参数，只加风控机制）
+    if res.get("safety_break"):
+        depth = res.get("loss_depth", abs(net))
+        alert = (
+            f"🚨 <b>单笔极端亏损 · 安全阀触发</b>\n"
+            f"亏损深度 <b>{depth:.2f}U</b>（超过 -30U 阈值）\n"
+            f"持仓：{side_cn} @ {entry:,.1f} → {res['exit_px']:,.1f}\n"
+            f"净利 {net:+.2f}U ｜ 类目 {cat}\n"
+            f"\n"
+            f"⚠️ <b>建议</b>：\n"
+            f"  1. 检查当前策略参数（ATR SL 是否太宽）\n"
+            f"  2. 单笔超过 -30U 后暂停开新仓，等 v5 验证后再重启\n"
+            f"  3. 账户级风控：累计 -50U 时强制全停"
+        )
+        _push(alert)
 
 
 def _push(text: str) -> None:
