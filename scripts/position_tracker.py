@@ -206,8 +206,20 @@ def _settle_one(sig: Dict, bars: List[List]) -> Optional[Dict]:
                 })
                 last_check_ts = ts
                 return _sig_meta
+            # 2026-10-11 A2 守卫: 防止同一信号重复触发"假成交"
+            #   痛点: 今天 10-11 的 6 条 15m_pattern 信号都是 entry 早就到过的，
+            #   每 5s settler 回放一次 → 填一次 fill_ts，反复污染 journal。
+            #   修复: entry 触发的假 fill 只允许一次；后续 K 线即使 hit 同一 entry 也跳过。
+            #   区分: 已成交的 fill (实际进入 SL/TP 判定) 走原路径,
+            #   未成交的 fill 走新分支 — 一旦 fill_ts 已存在, 不要再"假装重新成交"。
             hit = (l <= entry) if side == "long" else (h >= entry)
             if not hit:
+                last_check_ts = ts
+                continue
+            # A2 守卫生效 — A1 已经把今天 6 条填过 fill 的状态改了,
+            # 这里加一道确认: 若 sig 已存在 fill_ts (上次回放过), 不要重复触发
+            if sig.get("fill_ts"):
+                # 不变 last_check_ts, 让下一次 settle 重新判断（一般不会发生，下面防御）
                 last_check_ts = ts
                 continue
             sig["filled"] = True
