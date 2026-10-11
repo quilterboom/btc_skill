@@ -252,7 +252,11 @@ def format_card(kind: str, alert: Dict, scan_payload: Optional[Dict],
         tag = a.get("tag", "异动")
         close = a.get("close", 0)
         vol = a.get("vol", 0)
+        trigger_reason = a.get("trigger_reason", "")   # 2026-10-11 加：触发原因
         lines = [f"🚨 <b>BTC 量能异动</b>  {tag}"]
+        # 2026-10-11 加：触发原因（让用户区分是标准触发还是极度放量触发）
+        if trigger_reason:
+            lines.append(f"<i>📋 触发原因：{trigger_reason}</i>")
         lines.append(f"ratio <b>{ratio:.2f}×</b> ｜ z <b>{z:.2f}</b> ｜ 现价 <b>{close:,.1f}</b>")
         lines.append(f"1m 量 {vol:,.0f} 张")
         lines.append("⚠️ 这是「提醒」不是「信号」：触发只说明有事发生，决策看下方 scan。")
@@ -426,73 +430,103 @@ def format_card(kind: str, alert: Dict, scan_payload: Optional[Dict],
     else:
         lines.append(f"判定：{verdict_s}")
 
-    # 方向 + 6 分评分（保留）
-    lines.append(f"方向：<b>{side}</b> ({score_str})")
+    # 方向 (中文化: long=做多 / short=做空 / 震荡未明)
+    _side_cn = {"long": "做多", "short": "做空", "LONG": "做多", "SHORT": "做空"}
+    side_cn = _side_cn.get(side if isinstance(side, str) else "", "震荡未明")
+    lines.append(f"方向：<b>{side_cn}</b> ({score_str})")
 
-    # ===== 价位依据 =====
-    # 解析 plan 入场/止损/止盈是从哪个结构位/EMA 算出来的
-    # 依据字段：payload.support/resistance（按距离现价最近的几条），payload.tf['1h']['atrp']/['ema144']
-    _basis = []    # 每条依据（最近支撑/阻力 + EMA + ATR）
+    # 单行口语化行情速览 (liusir: 不要只列数字)
+    # 模板: 现价 X 在 [区间] 中, 上有 Y 压住 (+N%), 下有 Z 撑住 (-M%). [横盘/上行/下行/待突破]
+    _analysis_text = ""
     try:
+        cur_px = scan_payload.get("last") if scan_payload else None
         sup_list = (scan_payload.get("support") or []) if scan_payload else []
         res_list = (scan_payload.get("resistance") or []) if scan_payload else []
-        if sup_list:
-            _s0 = sup_list[0]
-            _basis.append(f"近支撑 {(_s0.get('name') or '支撑位')} {_s0.get('price', 0):,.0f}")
-        if res_list:
-            _r0 = res_list[0]
-            _basis.append(f"近阻力 {(_r0.get('name') or '阻力位')} {_r0.get('price', 0):,.0f}")
-        tf_data = (scan_payload.get("tf") or {}).get("1h") if scan_payload else None
-        if tf_data and tf_data.get("ema144"):
-            _basis.append(f"1h EMA144 {tf_data['ema144']:,.0f}")
-        if tf_data and tf_data.get("atrp"):
-            _basis.append(f"1h ATR {tf_data['atrp']:.2f}%")
-        if scan_payload and scan_payload.get("sideways"):
-            _basis.append("⚠️ 横盘")
-        if _plan_src.get("target_pts"):
-            _basis.append(f"目标 {_plan_src['target_pts']:,.0f} 点封顶")
+        if cur_px is not None:
+            cur_px_f = f"{cur_px:,.0f}"
+            # 找最近的阻力 + 支撑
+            res_above = [r for r in res_list if r.get('price', 0) > cur_px]
+            sup_below = [s for s in sup_list if s.get('price', 0) < cur_px]
+            res_nearest = min(res_above, key=lambda x: x.get('price', 999999), default=None)
+            sup_nearest = max(sup_below, key=lambda x: x.get('price', 0), default=None)
+            # 区间
+            all_prices = [s.get('price', 0) for s in sup_list] + [r.get('price', 0) for r in res_list] + [cur_px]
+            hi = max(all_prices)
+            lo = min(all_prices)
+            pct_in_range = (cur_px - lo) / (hi - lo) * 100 if hi > lo else 50
+            if pct_in_range < 30: range_pos = "（偏下沿）"
+            elif pct_in_range > 70: range_pos = "（偏上沿）"
+            else: range_pos = ""
+            _parts = [f"现价 <b>{cur_px_f}</b> 在 {lo:,.0f}-{hi:,.0f} 区间{range_pos}"]
+            if res_nearest:
+                d_pct = (res_nearest['price'] - cur_px) / cur_px * 100
+                _parts.append(f"上方最近阻力 <b>{res_nearest['price']:,.0f}</b>（+{d_pct:.2f}%）")
+            if sup_nearest:
+                d_pct = (cur_px - sup_nearest['price']) / cur_px * 100
+                _parts.append(f"下方最近支撑 <b>{sup_nearest['price']:,.0f}</b>（-{d_pct:.2f}%）")
+            if scan_payload and scan_payload.get("sideways"):
+                _parts.append("横盘待方向")
+            tf_data_1h = (scan_payload.get("tf") or {}).get("1h") if scan_payload else None
+            atrp = tf_data_1h.get("atrp") if tf_data_1h else None
+            if atrp:
+                _parts.append(f"1h 振幅约 {atrp:.2f}%")
+            _analysis_text = "，".join(_parts)
     except Exception:
         pass
 
-    if _basis:
-        # 一行展示最多 3 个依据（挤不下就截断）
-        lines.append("依据：" + " ｜ ".join(_basis[:4]))
+    if _analysis_text:
+        lines.append("行情速览：" + _analysis_text)
 
-    # ===== 入场 / 止损 =====
-    # 临界 / 无信号档：plan 加「参考」标记
-    _plan_tag = ""
+    # ===== 入场 / 止损 / 止盈 / 仓位 =====
+    # 临界 / 无信号档：不展示价格 (因为不能跟单)
+    # 这是 liusir 反馈: "(参考：判定非成立，不应跟单) 这部分的内容优化下，我看不懂"
+    # —— 之前的做法是 4 行价位都挂灰字, 卡片看着像半屏都是"不应跟单"
+    # —— 改成临界/无信号 干脆**不展示价位**, 只留一句"挂参考位" + 行动行已经明确说"不要进场"
+    # ===== 价位参考 =====
+    # liusir 反馈: "如果有挂单就写挂单的内容, 如果没有挂单或者没有价位就说暂无推荐价位"
+    # —— 三态: 信号成立 + 有 plan → 展示入场/止损/止盈/仓位
+    # —— 信号成立 + plan 缺 → "暂无推荐价位 (scan 未算全)"
+    # —— 临界/无信号 → "暂无推荐价位 (等信号成立再展示)"
     if is_boundary or is_empty:
-        _plan_tag = " <i>（参考：判定非成立，不应跟单）</i>"
-
-    if entry and stop:
-        lines.append(f"入场 <b>{entry:,.1f}</b> ｜ 止损 <b>{stop:,.1f}</b> ({stop_pct or '?'}){_plan_tag}")
+        lines.append("价位参考：<b>暂无推荐价位</b>（等信号成立再展示挂单位）")
     else:
-        lines.append(f"入场 / 止损：scan 未给出{_plan_tag}")
+        has_any_price = entry is not None or stop is not None or bool(exits)
+        if not has_any_price:
+            lines.append("价位参考：<b>暂无推荐价位</b>（scan 未算全, 等待下一轮）")
+        else:
+            if entry and stop:
+                lines.append(f"入场 <b>{entry:,.1f}</b> ｜ 止损 <b>{stop:,.1f}</b> ({stop_pct or '?'})")
+            elif entry:
+                lines.append(f"入场 <b>{entry:,.1f}</b> ｜ 止损 scan 未给出")
+            elif stop:
+                lines.append(f"入场 scan 未给出 ｜ 止损 <b>{stop:,.1f}</b> ({stop_pct or '?'})")
+            else:
+                lines.append("入场 / 止损：scan 未给出")
 
-    if exits:
-        tp_parts = []
-        for e in exits:
-            if isinstance(e, dict):
-                lbl = e.get("label", "?")
-                px = e.get("price", 0)
-                pct = e.get("pct", "?")
-                tp_parts.append(f"{lbl} {px:,.1f} ({pct})" if isinstance(px, (int, float))
-                                else f"{lbl} {px} ({pct})")
-        if tp_parts:
-            lines.append("止盈  " + " / ".join(tp_parts) + _plan_tag)
-    else:
-        lines.append(f"止盈：scan 未给出{_plan_tag}")
+            if exits:
+                tp_parts = []
+                for e in exits:
+                    if isinstance(e, dict):
+                        lbl = e.get("label", "?")
+                        px = e.get("price", 0)
+                        pct = e.get("pct", "?")
+                        tp_parts.append(f"{lbl} {px:,.1f} ({pct})" if isinstance(px, (int, float))
+                                        else f"{lbl} {px} ({pct})")
+                if tp_parts:
+                    lines.append("止盈  " + " / ".join(tp_parts))
+            else:
+                lines.append("止盈：scan 未给出")
 
-    if qty:
-        # 仓位加依据：风险% × 余额 / sl_pct，夹在 50× 余额上限
-        _qty_basis = ""
-        try:
-            _lev = (_plan_src.get("notional_x") or 0)
-            if _lev:
-                _qty_basis = f"（{_lev:.1f}x 账户，止损 {_plan_src.get('sl_pct', '?')}% 满仓上限）"
-        except Exception:
-            pass
-        lines.append(f"仓位 {qty} 张（名义 {notional or '?'} U）{_qty_basis}{_plan_tag}")
+            if qty:
+                # 仓位加依据：风险% × 余额 / sl_pct
+                _qty_basis = ""
+                try:
+                    _lev = (_plan_src.get("notional_x") or 0)
+                    if _lev:
+                        _qty_basis = f"（{_lev:.1f}x 账户，止损 {_plan_src.get('sl_pct', '?')}% 满仓上限）"
+                except Exception:
+                    pass
+                lines.append(f"仓位 {qty} 张（名义 {notional or '?'} U）{_qty_basis}")
 
     # 把 override_active 标记 + fill 实况插到末尾
     if _overridden_marker:

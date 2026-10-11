@@ -128,13 +128,30 @@ class VolumeWatcher:
         ratio = vol / med
         z = (vol - mean) / sd
         pct = vol / sum(hist) * 100
-        hit = (ratio >= self.ratio_thr and z >= self.z_thr) or ratio >= self.ratio_thr * 2
+        # 2026-10-11 修复：收紧 ratio 兜底 + 记录触发原因（让用户区分是哪个条件触发）
+        # 之前：
+        #   hit = (ratio >= self.ratio_thr and z >= self.z_thr) 
+        #         or ratio >= self.ratio_thr * 2 
+        #         or ratio >= 5
+        # 问题：ratio >= 5 就触发（不要求 z），z 阈值 --z 3.5 被绕过
+        # 修复：收紧 ratio 兜底到 8 倍，z 仍然要达到 z_thr
+        hit_and = (ratio >= self.ratio_thr and z >= self.z_thr)
+        hit_high_ratio = ratio >= 8 and z >= self.z_thr  # ratio 极高时也要求 z
+        hit = hit_and or hit_high_ratio
+        # 记录触发原因（让用户区分）
+        if hit_and:
+            d_trigger = f"标准触发（ratio≥{self.ratio_thr}× 且 z≥{self.z_thr}）"
+        elif hit_high_ratio:
+            d_trigger = f"极度放量（ratio≥8× 且 z≥{self.z_thr}）"
+        else:
+            d_trigger = ""
         if vol < self.min_vol:
             hit = False
         d = {"ts": int(bar["ts"]), "vol": vol, "close": bar["c"],
              "median": med, "mean": mean, "sd": sd,
              "ratio": ratio, "z": z, "pct_of_window": pct,
-             "hit": bool(hit), "min_vol_gate": self.min_vol}
+             "hit": bool(hit), "min_vol_gate": self.min_vol,
+             "trigger_reason": d_trigger if hit else ""}
         if hit:
             d["tag"] = self.tag(bar)
         return d if hit else None
@@ -146,6 +163,9 @@ class VolumeWatcher:
         dp = 0.0
         if prev_c:
             dp = (c / prev_c - 1) * 100
+        # 2026-10-11 修复：在 tag 里写明价格基准（让用户知道 dp 是 v1m close 比对）
+        # 之前：dp 用 bar["c"] / prev_close 计算，但卡片下方行情速览用 ticker.last
+        # 两个价格基准不同，导致 dp 看起来"错"（实际是基准不同）
         if abs(dp) < 0.03:
-            return f"放量滞涨（吸收/换手，价格 {dp:+.2f}%）"
-        return f"放量{'上涨' if dp > 0 else '下跌'} {dp:+.2f}%"
+            return f"放量滞涨（吸收/换手，1m close 比对 {dp:+.2f}%）"
+        return f"放量{'上涨' if dp > 0 else '下跌'}（1m close 比对 {dp:+.2f}%）"
