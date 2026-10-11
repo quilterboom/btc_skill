@@ -686,6 +686,94 @@ def fmt_tune(sug: Dict) -> str:
 
 # ============================ CLI ============================
 def main():
+    # 2026-10-11 v5: add_teacher / backup_production 需要自定义参数
+    # 在 argparse 之前拦截，避免 argparse 报错
+    if len(sys.argv) >= 2 and sys.argv[1] in ("add_teacher", "backup_production"):
+        cmd = sys.argv[1]
+        if cmd == "add_teacher":
+            # 解析参数（直接用 sys.argv 避免 argparse 限制）
+            args_dict = {}
+            for i in range(2, len(sys.argv), 2):
+                if i < len(sys.argv) and sys.argv[i].startswith('--'):
+                    key = sys.argv[i][2:].replace('-', '_')
+                    if i + 1 < len(sys.argv):
+                        args_dict[key] = sys.argv[i + 1]
+            
+            if not all(k in args_dict for k in ['side', 'entry', 'sl', 'tp1', 'tp2']):
+                print("用法: python3 journal.py add_teacher --side long|short --entry X --sl X --tp1 X --tp2 X [--note '...' ]")
+                return 1
+            
+            side = args_dict['side']
+            if side not in ['long', 'short']:
+                print(f"✗ side 必须是 long 或 short, 得到: {side}")
+                return 1
+            
+            entry = float(args_dict['entry'])
+            sl = float(args_dict['sl'])
+            tp1 = float(args_dict['tp1'])
+            tp2 = float(args_dict['tp2'])
+            note = args_dict.get('note', '')
+            source = args_dict.get('source', 'liusir_manual')
+            
+            from datetime import datetime, timezone, timedelta
+            CST = timezone(timedelta(hours=8))
+            now = datetime.now(CST)
+            today = now.strftime("%Y-%m-%d")
+            ts = int(now.timestamp())
+            
+            teacher_rec = {
+                "id": f"TEACHER-{ts}-{side}",
+                "ts": ts,
+                "datetime": now.strftime("%Y-%m-%d %H:%M:%S"),
+                "side": side,
+                "entry": entry,
+                "sl": sl,
+                "tp1": tp1,
+                "tp2": tp2,
+                "note": note,
+                "source": source,
+                "type": "teacher_signal",
+            }
+            
+            # 写到 teacher_signals/
+            teacher_dir = os.path.join(DATA_DIR, "teacher_signals")
+            os.makedirs(teacher_dir, exist_ok=True)
+            teacher_file = os.path.join(teacher_dir, f"teacher_{today}.jsonl")
+            
+            with open(teacher_file, "a") as f:
+                f.write(json.dumps(teacher_rec, ensure_ascii=False) + "\n")
+            
+            print(f"✓ 老师单已录入")
+            print(f"  ID: {teacher_rec['id']}")
+            print(f"  时间: {teacher_rec['datetime']}")
+            print(f"  方向: {side}")
+            print(f"  入场: {entry:,.1f}")
+            print(f"  SL: {sl:,.1f}  TP1: {tp1:,.1f}  TP2: {tp2:,.1f}")
+            print(f"  备注: {note}")
+            print(f"  文件: {teacher_file}")
+            print()
+            print(f"用途: 1) benchmark 对比  2) 训练信号（学习开单逻辑）  3) 反向学习验证")
+            return 0
+        
+        if cmd == "backup_production":
+            from datetime import datetime, timezone, timedelta
+            CST = timezone(timedelta(hours=8))
+            today = datetime.now(CST).strftime("%Y-%m-%d")
+            
+            prod_dir = os.path.join(DATA_DIR, "production_trades")
+            os.makedirs(prod_dir, exist_ok=True)
+            backup_path = os.path.join(prod_dir, f"journal_{today}.jsonl")
+            
+            import shutil
+            if os.path.exists(JOURNAL):
+                shutil.copy2(JOURNAL, backup_path)
+                with open(backup_path) as f:
+                    recs = [json.loads(ln) for ln in f if ln.strip()]
+                print(f"✓ 备份 {len(recs)} 条到 {backup_path}")
+            else:
+                print(f"⚠️  journal.jsonl 不存在")
+            return 0
+    
     ap = argparse.ArgumentParser(add_help=False)
     ap.add_argument("cmd", nargs="?", default="stats")
     ap.add_argument("--min-n", type=int, default=1)
@@ -799,6 +887,94 @@ def main():
         if c.strip().lower() == "yes":
             _write([])
             print("已清空")
+        return 0
+    if cmd == "add_teacher":
+        # 2026-10-11 v5 训练环境：老师单录入（benchmark + 训练信号 + 反向学习）
+        # 用法: python3 journal.py add_teacher --side long --entry 83000 --sl 82500 --tp1 83500 --tp2 84000 --note "..."
+        # 录入到: teacher_signals/teacher_YYYY-MM-DD.jsonl
+        # 解析参数（直接用 sys.argv 避免 argparse 限制）
+        args_dict = {}
+        for i in range(2, len(sys.argv), 2):
+            if sys.argv[i].startswith('--'):
+                key = sys.argv[i][2:].replace('-', '_')
+                if i + 1 < len(sys.argv):
+                    args_dict[key] = sys.argv[i + 1]
+        
+        if not all(k in args_dict for k in ['side', 'entry', 'sl', 'tp1', 'tp2']):
+            print("用法: python3 journal.py add_teacher --side long|short --entry X --sl X --tp1 X --tp2 X [--note '...' ]")
+            return 1
+        
+        side = args_dict['side']
+        if side not in ['long', 'short']:
+            print(f"✗ side 必须是 long 或 short, 得到: {side}")
+            return 1
+        
+        entry = float(args_dict['entry'])
+        sl = float(args_dict['sl'])
+        tp1 = float(args_dict['tp1'])
+        tp2 = float(args_dict['tp2'])
+        note = args_dict.get('note', '')
+        source = args_dict.get('source', 'liusir_manual')
+        
+        from datetime import datetime, timezone, timedelta
+        CST = timezone(timedelta(hours=8))
+        now = datetime.now(CST)
+        today = now.strftime("%Y-%m-%d")
+        ts = int(now.timestamp())
+        
+        teacher_rec = {
+            "id": f"TEACHER-{ts}-{side}",
+            "ts": ts,
+            "datetime": now.strftime("%Y-%m-%d %H:%M:%S"),
+            "side": side,
+            "entry": entry,
+            "sl": sl,
+            "tp1": tp1,
+            "tp2": tp2,
+            "note": note,
+            "source": source,
+            "type": "teacher_signal",
+        }
+        
+        # 写到 teacher_signals/
+        teacher_dir = os.path.join(DATA_DIR, "teacher_signals")
+        os.makedirs(teacher_dir, exist_ok=True)
+        teacher_file = os.path.join(teacher_dir, f"teacher_{today}.jsonl")
+        
+        with open(teacher_file, "a") as f:
+            f.write(json.dumps(teacher_rec, ensure_ascii=False) + "\n")
+        
+        print(f"✓ 老师单已录入")
+        print(f"  ID: {teacher_rec['id']}")
+        print(f"  时间: {teacher_rec['datetime']}")
+        print(f"  方向: {side}")
+        print(f"  入场: {entry:,.1f}")
+        print(f"  SL: {sl:,.1f}  TP1: {tp1:,.1f}  TP2: {tp2:,.1f}")
+        print(f"  备注: {note}")
+        print(f"  文件: {teacher_file}")
+        print()
+        print(f"用途: 1) benchmark 对比  2) 训练信号（学习开单逻辑）  3) 反向学习验证")
+        return 0
+    if cmd == "backup_production":
+        # 2026-10-11 v5：备份生产 journal 到 production_trades/
+        # 用法: python3 journal.py backup_production
+        from datetime import datetime, timezone, timedelta
+        CST = timezone(timedelta(hours=8))
+        today = datetime.now(CST).strftime("%Y-%m-%d")
+        
+        prod_dir = os.path.join(DATA_DIR, "production_trades")
+        os.makedirs(prod_dir, exist_ok=True)
+        backup_path = os.path.join(prod_dir, f"journal_{today}.jsonl")
+        
+        # 复制当前 journal
+        import shutil
+        if os.path.exists(JOURNAL):
+            shutil.copy2(JOURNAL, backup_path)
+            with open(backup_path) as f:
+                recs = [json.loads(ln) for ln in f if ln.strip()]
+            print(f"✓ 备份 {len(recs)} 条到 {backup_path}")
+        else:
+            print(f"⚠️  journal.jsonl 不存在")
         return 0
     print(__doc__)
     return 0
