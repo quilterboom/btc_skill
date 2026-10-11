@@ -144,6 +144,17 @@ def should_skip_new_signal(contract: str, side: str, new_entry: float,
                       f"冷却 {same_side_block_sec // 60} 分钟内禁止再开同方向 → "
                       f"避免同一信号连续开仓")
             return (True, reason)
+    
+    # ★ 2026-10-11 修复：同方向有 pending 持仓（filled=true）时，不允许新开仓
+    # 问题：same_side_block_sec 只看时间窗（fill_ts 之后多久），不看"是否还在持仓"
+    # 修复：同方向有 pending + filled=true 持仓时，不管时间窗，都应该跳过
+    for r in sim:
+        if (r.get("status") == "pending" and r.get("filled", False)):
+            rid_short = (r.get("id") or "?")[:25]
+            entry = r.get("entry", 0)
+            reason = (f"同方向有 pending 持仓（id={rid_short}，entry={entry:,.1f}），"
+                      f"不允许新开仓 → 等当前持仓平仓后再开新单")
+            return (True, reason)
 
     near = min(sim, key=lambda r: abs(float(r.get("entry", 0)) - new_entry))
     dist = abs(new_entry - float(near.get("entry", 0)))
