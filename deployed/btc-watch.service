@@ -1,0 +1,38 @@
+# 部署中的 systemd unit 文件
+# ==============================
+#
+# 这是 /root/.config/systemd/user/btc-watch.service 的版本化镜像。
+# 用户级 systemd unit 不在 git 仓库里，但它是"代码+运行时"之间的接缝——
+# 这里记录生效的版本，让代码 commit 和服务配置能对齐回溯。
+#
+# 生效流程：
+#   1) 本文件改了，把内容回写到 /root/.config/systemd/user/btc-watch.service
+#   2) systemctl --user daemon-reload
+#   3) systemctl --user restart btc-watch.service
+#   4) git commit 本目录的变更（用 deploy 标记）
+
+[Unit]
+Description=BTC USDT intraday watch daemon (Gate.io)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/skills/btc-gate-intraday-strategy/scripts
+ExecStart=/root/.hermes/hermes-agent/venv/bin/python3 watch.py run --ratio 4 --z 3.5 --cooldown 1800 --rsi-tf 1h --target 1000 --preview-secs 30
+# 2026-10-11 liusir 反馈: 信号进 journal 太快，加 30s 预览窗口。
+# 见 SKILL.md §3.2.1：信号 → preview_pending → 30s 自动 promote → pending
+# 该参数由 watch/runner.py 透传给 scan.py 子进程（--preview-secs）。
+# systemd 自动写 PID 到这个文件（每次 start/restart 更新）
+# 注：Type=simple + watch.py run 不会自写 PID 文件；改用 web 端 fallback pgrep
+# PIDFile=/root/data/watch.pid  # 暂时禁用了，留作兼容未来
+Restart=on-failure
+RestartSec=15s
+StandardOutput=append:/root/data/watch.log
+StandardError=append:/root/data/watch.log
+# 凭证在 /root/.hermes/secrets/btc_tg.json — 不需要环境变量
+# Telegram TOKEN 落地前手动校验：
+# journal 路径 /root/data/journal.jsonl（gate_fetch.DATA_DIR 默认）
+
+[Install]
+WantedBy=default.target
