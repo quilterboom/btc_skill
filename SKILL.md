@@ -171,6 +171,35 @@ python3 scan.py --brief --target 1000
 - `btc-watch.service` — 主守护
 - `btc-status-web.service` — 3003 端口状态面板
 
+### 3.2.1 预览闸门（2026-10-11 加）：信号→journal 之间的缓冲
+
+> liusir 反馈：信号进入 journal 太快，没看到进场提醒。需要在「信号成立」与「真的挂单」之间加一道缓冲卡片，让用户能取消。
+
+**启用方式**（任一命令加 `--preview-secs N`）：
+
+```bash
+# 一次性手动扫描（30 秒预览）
+python3 scan.py --brief --preview-secs 30
+
+# 量能异动/RSI 触发后自动跑 scan 也走预览（需 systemd 服务重启加载新代码）
+```
+
+**行为**：
+- 信号触发后 → 立即写 journal，但 `status="preview_pending"`（不是 `pending`）
+- TG 推送换成「📋 信号预览 · N 秒后自动执行」卡片
+- `preview_until_ts` 到期 → `scan.py` 主循环结尾自动 `promote_due_previews` 把状态推到 `pending`，下次跑 scan 触发挂单
+- `position_tracker.settle_all` / `force_close_position` 看到 `preview_pending` 直接跳过（不挂单、不能强平）
+- 手动取消：`python3 journal.py cancel [signal_id]`（不带参数列出当前待取消项）
+- 手动 promote：`python3 journal.py promote [signal_id]`（不带参数自动 promote 到期项）
+
+**状态机**：
+```
+trigger → preview_pending → (取消 / 到期) → pending → filled → settled
+                └─ CANCELLED ─┘              └─ 24h 未挂到 MISSED ─┘
+```
+
+**默认建议**：`PREVIEW_SECS=30`（刚够瞄一眼 Telegram，多了反而挡信号）。
+
 ### 3.3 改代码后必跑
 
 ```bash

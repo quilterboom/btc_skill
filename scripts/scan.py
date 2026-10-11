@@ -432,10 +432,15 @@ def main():
     ap.add_argument("--html", default=None)
     ap.add_argument("--event", default=None,
                     help="市场情绪上下文 JSON，例如 '{\"name\":\"NFP\",\"minutes\":25,\"impact\":\"high\"}'")
+    ap.add_argument("--preview-secs", type=int, default=0,
+                    help="信号→journal 之间加预览闸门：写 status=preview_pending，"
+                         "N 秒后自动 promote 到 pending；0=立即生效（默认）。"
+                         "搭配 'journal cancel <id>' 可提前取消。")
     a = ap.parse_args()
     CONTRACT, LEV, BAL, RISK, MODE = a.contract, a.lev, a.bal, a.risk, a.mode
     BRIEF = a.brief
     TARGET = a.target
+    PREVIEW_SECS = max(0, int(getattr(a, "preview_secs", 0) or 0))
 
     # 解析情绪上下文（news_watcher 注入或人工传）
     EVENT = None
@@ -966,7 +971,8 @@ def main():
                     core_b if main_side == "long" else core_s,
                     verdict, _plm,
                     {"trend": trend_tag, "vol": vol_tag, "fib": fib_tag},
-                    {"lev": LEV, "bal": BAL, "risk": RISK, "mode": MODE})
+                    {"lev": LEV, "bal": BAL, "risk": RISK, "mode": MODE},
+                    preview_secs=PREVIEW_SECS)
 
             # ============================================================
             # 2026-10-09 加: 15m 形态信号触发 → 单独走 tp_mode="custom" 路径
@@ -997,23 +1003,41 @@ def main():
                         {"trend": trend_tag, "vol": vol_tag, "fib": fib_tag,
                          "pattern": _15m_signal["kind"]},
                         {"lev": LEV, "bal": BAL, "risk": RISK, "mode": MODE,
-                         "signal_source": "15m_pattern"})
+                         "signal_source": "15m_pattern"},
+                        preview_secs=PREVIEW_SECS)
                     P(f"\n  ✅ 15m 形态信号已写入 journal: {jstat_15m}")
                     P(f"     TP1={_pplan['tp1']:,.1f}  TP2={_pplan['tp2']:,.1f}  SL={_pplan['sl']:,.1f}")
                     # 推 TG 卡片
                     try:
                         from telegram import push
-                        push(
-                            f"🔔 *15m 形态信号* `{_pside.upper()}`\n"
-                            f"形态: {_15m_signal['kind']}\n"
-                            f"1h score: {_pattern_trigger['score_1h']} + 形态=1 = {_pattern_trigger['score_combined']}\n"
-                            f"入场: {last:,.1f}\n"
-                            f"SL: {_pplan['sl']:,.1f} ({_pplan['sl_pct']:.2f}%)\n"
-                            f"TP1: {_pplan['tp1']:,.1f} (400 点)\n"
-                            f"TP2: {_pplan['tp2']:,.1f} (850 点)\n"
-                            f"仓位: {_pplan['contracts']:.0f} 张 (名义 {_pplan['notional']:,.0f}U)\n"
-                            f"`signal_source=15m_pattern, tp_mode=custom`"
-                        )
+                        if PREVIEW_SECS and PREVIEW_SECS > 0 and jstat_15m == "added":
+                            # 预览卡：明确告知"尚未挂单"，给用户取消窗口
+                            _until = int(time.time()) + PREVIEW_SECS
+                            _until_str = time.strftime("%H:%M:%S", time.localtime(_until))
+                            push(
+                                f"📋 *15m 形态信号预览* `{_pside.upper()}`\n"
+                                f"形态: {_15m_signal['kind']}\n"
+                                f"1h score: {_pattern_trigger['score_1h']} + 形态=1 = {_pattern_trigger['score_combined']}\n"
+                                f"入场: {last:,.1f}\n"
+                                f"SL: {_pplan['sl']:,.1f} ({_pplan['sl_pct']:.2f}%)\n"
+                                f"TP1: {_pplan['tp1']:,.1f} (400 点)\n"
+                                f"TP2: {_pplan['tp2']:,.1f} (850 点)\n"
+                                f"仓位: {_pplan['contracts']:.0f} 张 (名义 {_pplan['notional']:,.0f}U)\n"
+                                f"⏳ {PREVIEW_SECS}s 后自动执行 ({_until_str} 前可取消)\n"
+                                f"取消: `python3 journal.py cancel {_pplan.get('id') or (CONTRACT + '-' + str(int(time.time())) + '-' + _pside)}`"
+                            )
+                        elif jstat_15m == "added":
+                            push(
+                                f"🔔 *15m 形态信号* `{_pside.upper()}`\n"
+                                f"形态: {_15m_signal['kind']}\n"
+                                f"1h score: {_pattern_trigger['score_1h']} + 形态=1 = {_pattern_trigger['score_combined']}\n"
+                                f"入场: {last:,.1f}\n"
+                                f"SL: {_pplan['sl']:,.1f} ({_pplan['sl_pct']:.2f}%)\n"
+                                f"TP1: {_pplan['tp1']:,.1f} (400 点)\n"
+                                f"TP2: {_pplan['tp2']:,.1f} (850 点)\n"
+                                f"仓位: {_pplan['contracts']:.0f} 张 (名义 {_pplan['notional']:,.0f}U)\n"
+                                f"`signal_source=15m_pattern, tp_mode=custom`"
+                            )
                     except Exception as _tg_e:
                         P(f"\n  ⚠️ TG 推送失败 (非阻塞): {_tg_e}")
                 except Exception as _e15m:
@@ -1028,6 +1052,16 @@ def main():
             return _J.brief_line(CONTRACT)
         except Exception:
             return None
+
+    # 2026-10-11 加：每次 scan 跑完顺手 promote 到期的 preview_pending
+    # 否则 sleep N 秒再 scan 也好，单独跑 journal.py promote 也行
+    if _J is not None:
+        try:
+            _auto_promo = _J.promote_due_previews(CONTRACT)
+            if _auto_promo:
+                P(f"\n  ⏩ 自动 promote {len(_auto_promo)} 条 preview 到 pending：{_auto_promo}")
+        except Exception as _pe:
+            P(f"\n  ⚠️ promote_due_previews 失败（非阻塞）: {_pe}")
 
     # === 极简模式：只要 支撑/阻力/入场/出场 ===
     # === 横盘判定：1h close 距 1h EMA144 偏离 < 0.5% 视为横盘（已在打分块算过）===

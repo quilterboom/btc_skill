@@ -676,6 +676,7 @@ def force_close_position(
     if signal_id is not None:
         for r in recs:
             # position_tracker 的语义：status="pending" + filled=True 表示「已成交未平仓」
+            # 2026-10-11 加：跳过 preview_pending（预览闸门还没开，不应被强平）
             if r.get("id") == signal_id and r.get("status") == "pending" and r.get("filled") is True:
                 target = r
                 break
@@ -683,9 +684,24 @@ def force_close_position(
     # 2. 回退：找最近一条已成交（不论方向）
     if target is None and use_latest_filled:
         for r in reversed(recs):
+            # 同样跳过 preview_pending
+            if r.get("status") == "preview_pending":
+                continue
             if r.get("status") == "pending" and r.get("filled") is True:
                 target = r
                 break
+
+    # 2026-10-11 加：如果调用方明确传了一个 ID，但该 ID 处于 preview_pending
+    # （还没 promote，意味着下单指令还没真正发出），不允许回退去平别的单。
+    # 这是防御：避免外部脚本误把"想取消的预览"当成"想平的持仓"处理。
+    if signal_id is not None and use_latest_filled and target is not None:
+        # 检查原 signal_id 是不是 preview_pending / cancelled
+        _src = next((r for r in recs if r.get("id") == signal_id), None)
+        if _src and _src.get("status") in ("preview_pending", "cancelled"):
+            if verbose:
+                print(f"[force_close] signal_id={signal_id} 是 {_src['status']}，"
+                      f"不允许回退平仓（target={target.get('id')}）")
+            target = None
 
     if target is None:
         if verbose:
@@ -732,6 +748,7 @@ def force_close_position(
 def settle_all(verbose: bool = False) -> Tuple[int, int]:
     """
     扫描所有 status='pending' 的信号，逐一回放。
+    2026-10-11 注：preview_pending 不在此过滤内（预览期内不让结算回放管）。
     返回 (已结算条数, 待结算条数)
     """
     recs = _read_journal()

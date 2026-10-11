@@ -77,6 +77,9 @@ def emit_scan(contract: str, tf: str, kind: str, a: Dict, target: float,
                 if os.path.exists(_jpath):
                     _jrecs = [json.loads(ln) for ln in open(_jpath, encoding="utf-8") if ln.strip()]
                     for _jr in reversed(_jrecs):
+                        # 2026-10-11 注：preview_pending 是挂单预览，不是"已持仓"，不展示
+                        if _jr.get("status") == "preview_pending":
+                            continue
                         if (_jr.get("contract") == contract
                                 and _jr.get("status") == "pending"
                                 and _jr.get("filled") is True):
@@ -252,6 +255,9 @@ def _check_trend_reversal(contract: str, scan_payload: dict) -> None:
         return
     active = None
     for r in reversed(recs):
+        # 2026-10-11：跳过 preview_pending（预览期内不强制平仓）
+        if r.get("status") in ("preview_pending", "cancelled"):
+            continue
         if r.get("status") == "pending" and r.get("filled") is True:
             active = r
             break
@@ -531,6 +537,9 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--lev", type=float, default=None)
     ap.add_argument("--bal", type=float, default=None)
     ap.add_argument("--risk", type=float, default=None)
+    ap.add_argument("--preview-secs", type=int, default=None,
+                    help="传给 scan.py 的 --preview-secs（信号进 journal 前 N 秒预览闸门）。"
+                         "不传则 scan 用默认值 0（立即生效）")
     return ap
 
 
@@ -626,6 +635,9 @@ def main() -> int:
     if a.lev: extra += ["--lev", str(a.lev)]
     if a.bal: extra += ["--bal", str(a.bal)]
     if a.risk: extra += ["--risk", str(a.risk)]
+    # 2026-10-11 加：透传预览闸门参数给 scan.py
+    if a.preview_secs is not None and int(a.preview_secs) > 0:
+        extra += ["--preview-secs", str(int(a.preview_secs))]
 
     if a.cmd == "stop":
         return cmd_stop()

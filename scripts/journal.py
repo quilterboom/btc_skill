@@ -78,15 +78,29 @@ def _write(recs: List[Dict]) -> None:
 
 # ============================ 记录 ============================
 def log_signal(contract: str, last: float, side: str, score: int, core_ok: bool,
-               verdict: str, plan: Dict, tags: Dict, meta: Dict = None) -> str:
+               verdict: str, plan: Dict, tags: Dict, meta: Dict = None,
+               preview_secs: int = 0) -> str:
     """
     记录一条信号。同方向 + 冷却期内 → 刷新上一条（不重复计数）。
+
+    2026-10-11 加 preview_secs 参数（liusir 反饋：信号进 journal 前先给
+    用户一张预览卡，避免错过推送就不知道发生了什么）：
+      - preview_secs=0 → 立即生效 (status="pending")
+      - preview_secs>0 → 写入时用 status="preview_pending"，加 preview_until_ts
+        字段；调用方需配合 promote_pending/cancel_preview 在到期前后处理。
+
     返回: "added" / "updated" / "off"
     """
     if os.environ.get("BTC_NO_JOURNAL") == "1":
         return "off"
     recs = _read()
     now = int(time.time())
+    if preview_secs and preview_secs > 0:
+        initial_status = "preview_pending"
+        preview_until_ts = now + int(preview_secs)
+    else:
+        initial_status = "pending"
+        preview_until_ts = None
     fresh = {
         "contract": contract, "ts": now, "last": round(float(last), 1),
         "side": side, "score": int(score), "core_ok": bool(core_ok),
@@ -98,18 +112,23 @@ def log_signal(contract: str, last: float, side: str, score: int, core_ok: bool,
         "tp2": round(float(plan["tp2"]), 1),
         "sl_pct": round(float(plan["sl_pct"]), 4),
         "tp1_pct": round(float(plan["tp1_pct"]), 4),
-        "status": "pending", "tags": dict(tags or {}),
+        "status": initial_status, "tags": dict(tags or {}),
         "meta": dict(meta or {}),
         # 2026-10-09 加: TP 体系识别 (15m 形态信号专用)
         "tp_mode": plan.get("tp_mode", "auto"),
         "signal_source": plan.get("signal_source", "1h_main"),  # "1h_main" / "15m_pattern"
         "custom_tp1_pct": plan.get("custom_tp1_pct"),
         "custom_tp2_pct": plan.get("custom_tp2_pct"),
+        # 2026-10-11 加: 预览闸门
+        "preview_secs": int(preview_secs) if preview_secs and preview_secs > 0 else 0,
+        "preview_until_ts": preview_until_ts,
     }
     if recs:
         p = recs[-1]
+        # 冷却匹配同样适用于 preview_pending (同一信号前后两次刷新都在冷却内)
         if (p.get("contract") == contract and p.get("side") == side
-                and p.get("status") == "pending" and now - int(p.get("ts", 0)) < COOLDOWN):
+                and p.get("status") in ("pending", "preview_pending")
+                and now - int(p.get("ts", 0)) < COOLDOWN):
             keep_id, keep_ts = p.get("id"), p.get("ts")
             p.update(fresh)
             p["id"], p["ts"] = keep_id, keep_ts
@@ -119,6 +138,67 @@ def log_signal(contract: str, last: float, side: str, score: int, core_ok: bool,
     recs.append(fresh)
     _write(recs)
     return "added"
+
+
+# ============================ 预览闸门（2026-10-11 新增） ============================
+def promote_pending(signal_id: str) -> bool:
+    """
+    把预览中的信号推进到 pending（允许 PositionTracker 接管挂单 / 盯盘）。
+    返回 True 表示找到并推进，False 表示没找到 / 已不是 preview_pending。
+    """
+    recs = _read()
+    hit = False
+    for r in recs:
+        if r.get("id") == signal_id and r.get("status") == "preview_pending":
+            r["status"] = "pending"
+            r["promoted_ts"] = int(time.time())
+            hit = True
+            break
+    if hit:
+        _write(recs)
+    return hit
+
+
+def cancel_preview(signal_id: str, reason: str = "USER_CANCEL") -> bool:
+    """
+    取消一条仍在 preview 的信号（不进入 pending 也不挂单）。
+    返回 True 表示找到并取消。
+    """
+    recs = _read()
+    hit = False
+    for r in recs:
+        if r.get("id") == signal_id and r.get("status") == "preview_pending":
+            r["status"] = "cancelled"
+            r["outcome"] = "CANCELLED"
+            r["exit_ts"] = int(time.time())
+            r["note"] = reason
+            hit = True
+            break
+    if hit:
+        _write(recs)
+    return hit
+
+
+def promote_due_previews(contract: str = "BTC_USDT") -> List[str]:
+    """
+    把所有 preview_until_ts 已过期的 preview_pending 信号自动推进到 pending。
+    返回被推进的 signal_id 列表。
+    """
+    recs = _read()
+    now = int(time.time())
+    promoted: List[str] = []
+    for r in recs:
+        if (r.get("contract") == contract
+                and r.get("status") == "preview_pending"
+                and r.get("preview_until_ts")
+                and now >= int(r["preview_until_ts"])):
+            r["status"] = "pending"
+            r["promoted_ts"] = now
+            r["note"] = (r.get("note") or "") + " | auto-promoted after preview"
+            promoted.append(r.get("id"))
+    if promoted:
+        _write(recs)
+    return promoted
 
 
 # ============================ 结算 ============================
@@ -552,6 +632,41 @@ def main():
     if cmd == "settle":
         n = settle_all(a.contract, verbose=True)
         print(f"[journal] 结算 {n} 条 → {JOURNAL}")
+        return 0
+    if cmd == "cancel":
+        # 2026-10-11 新增：手动取消预览中的信号
+        sig_id = sys.argv[2] if len(sys.argv) > 2 else None
+        if not sig_id:
+            # 列出所有 preview_pending 供挑
+            pend = [r for r in _read() if r.get("status") == "preview_pending"]
+            if not pend:
+                print("无 preview_pending 信号。")
+                return 0
+            print(f"待取消的预览信号 ({len(pend)} 条):")
+            for r in pend:
+                _ts = time.strftime("%H:%M:%S", time.localtime(r["ts"]))
+                _until = r.get("preview_until_ts") or 0
+                _left = max(0, int(_until - time.time()))
+                print(f"  id={r.get('id')}  {_ts}  side={r['side']}  "
+                      f"entry={r['entry']:,.1f}  剩 {_left}s 自动 promote")
+            print("\n用法: python3 journal.py cancel <signal_id>")
+            return 0
+        ok = cancel_preview(sig_id)
+        if ok:
+            print(f"✓ 已取消 {sig_id}")
+        else:
+            print(f"✗ 取消失败（id={sig_id} 已不是 preview_pending？用 list 看下）")
+        return 0
+    if cmd == "promote":
+        # 2026-10-11 新增：手动 promote preview_pending → pending
+        sig_id = sys.argv[2] if len(sys.argv) > 2 else None
+        if sig_id:
+            ok = promote_pending(sig_id)
+            print(f"{'✓' if ok else '✗'} promote {sig_id} → {ok}")
+            return 0
+        # 不传 id：自动 promote 所有到期记录
+        promoted = promote_due_previews(a.contract)
+        print(f"自动 promote {len(promoted)} 条：{promoted}")
         return 0
     if cmd == "stats":
         settle_all(a.contract)
