@@ -197,6 +197,18 @@ def log_signal(contract: str, last: float, side: str, score: int, core_ok: bool,
         "preview_until_ts": preview_until_ts,
     }
     if recs:
+        # 2026-10-11 修复：优先检查同方向是否有 pending 持仓（filled=true）
+        # 问题：cooldown 判定在前，导致有持仓时仍走"刷新"逻辑，不阻止新单
+        # 修复：先检查持仓，再检查 cooldown
+        for r in recs:
+            if (r.get("contract") == contract and r.get("side") == side
+                    and r.get("status") == "pending"
+                    and r.get("filled", False)):
+                # 同方向有 pending 持仓，阻止新单
+                print(f"[journal] 同方向有 pending 持仓，阻止新单: "
+                      f"id={r.get('id')}  entry={r.get('entry')}  filled={r.get('filled')}")
+                return "blocked_same_side_holding"
+        
         p = recs[-1]
         # 冷却匹配同样适用于 preview_pending (同一信号前后两次刷新都在冷却内)
         if (p.get("contract") == contract and p.get("side") == side
@@ -207,6 +219,7 @@ def log_signal(contract: str, last: float, side: str, score: int, core_ok: bool,
             p["id"], p["ts"] = keep_id, keep_ts
             _write(recs)
             return "updated"
+    
     fresh["id"] = f"{contract}-{now}-{side}"
     recs.append(fresh)
     _write(recs)
