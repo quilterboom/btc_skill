@@ -259,13 +259,19 @@ def _is_test_id(rid: str) -> bool:
 
 
 def _all_settled() -> list:
-    """读 position_events.jsonl → dedupe by id（取最新一条 ts） → 返回 list"""
+    """读 position_events.jsonl → dedupe by id（取最新一条 ts） → 返回 list.
+
+    2026-10-11 加：双保险 — 即使 _append_event 白名单漏了，前端这一层也过滤
+    掉非 BTC_USDT- 前缀的事件（防御历史 B-* / test-* 残留）。
+    """
     ev = _read_jsonl(DATA_DIR / "position_events.jsonl")
     by_id: dict[str, dict] = {}
     for r in ev:
         rid = r.get("id")
+        if not rid or not rid.startswith("BTC_USDT-"):
+            continue   # 防御：非生产前缀的事件一律不进展示
         ts = r.get("ts", 0)
-        if rid and ts >= by_id.get(rid, {}).get("ts", -1):
+        if ts >= by_id.get(rid, {}).get("ts", -1):
             by_id[rid] = r
     return list(by_id.values())
 

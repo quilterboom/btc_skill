@@ -101,8 +101,11 @@ def _read_journal() -> List[Dict]:
 def _append_event(ev: Dict) -> None:
     # 2026-10-05 防污染：测试前缀（TEST- / TEST_*）的事件不写 events，
     # 避免演示性 force_close 或本地测试把数据混进 winrate / latest_5。
+    # 2026-10-11 加：白名单收紧 → 只放 BTC_USDT- 前缀。其他前缀一律拦下。
+    # 背景：今天 08:09 测试时随手造了 B-200-long 这种 ID，混进前端展示；
+    #       防御未来任何"非生产格式"的事件污染实盘数据。
     _rid = ev.get("id") or ""
-    if _rid.startswith("TEST") or _rid.startswith("test-"):
+    if not _rid.startswith("BTC_USDT-"):
         return
     os.makedirs(DATA_DIR, exist_ok=True)
     with open(EVENTS, "a", encoding="utf-8") as f:
