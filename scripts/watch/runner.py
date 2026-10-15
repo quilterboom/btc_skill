@@ -17,6 +17,7 @@ from .jump import JumpTracker
 from .volume import VolumeWatcher
 from .rsi import RsiWatcher
 from .settler import start_settler
+from .promoter import start_promoter
 
 
 # ============================ 触发 ============================
@@ -217,6 +218,77 @@ def fire_periodic(w: VolumeWatcher) -> None:
     # 量能异动/RSI 触发的逻辑，不该套到周期检查上——它会每 15 分钟骚扰一次 + 另起线程。
     # 量能/RSI 触发仍照常调度 JumpTracker（它们才是 trigger-as-signal 哲学该用的入口）。
     log("   [jump] 周期检查跳过 JumpTracker 调度（按 liusir 要求不推跳空检测）")
+
+    # ★ 2026-10-13 liusir 拍板：实盘 vs 训练 两条开仓方法分离
+    # 训练版（--training）额外调 v2.1 判定 → 写 v2_decisions.jsonl
+    # 实盘版（不带 --training）完全跳过此块，0 干扰
+    if os.environ.get("TRAINING_MODE") == "1":
+        try:
+            decision = _run_v2_decision_for_training(w.contract)
+            if decision and decision.get("triggered"):
+                # ★ 2026-10-14 liusir 拍板：v2.1 自己探索 SL/TP + 回填历史
+                from v2_journal import open_v2_position, settle_v2_all
+                open_v2_position(decision)
+                settle_v2_all()
+        except Exception as e:
+            log(f"{WARN} v2 训练判定异常: {e}")
+
+
+def _run_v2_decision_for_training(contract: str = "BTC_USDT") -> Optional[Dict]:
+    """
+    训练版专属：跑一次 trader_view v2.1 判定 → 落到 v2_decisions.jsonl。
+    跟实盘 journal 完全独立（只读市场数据，不下单，不写实盘 journal）。
+    """
+    try:
+        # 复用 trader_view 的 fetch + aggregate 逻辑
+        from trader_view import (
+            fetch_ticker as _fetch_ticker,
+            fetch_candles as _fetch_candles,
+            aggregate_bias as _aggregate_bias,
+            analyze_tf as _analyze_tf,
+        )
+        from v2_decision_journal import record_v2_decision
+
+        ticker = _fetch_ticker(contract)
+        per_tf = {}
+        for interval in ["4h", "1h", "15m"]:
+            bars = _fetch_candles(contract, interval, limit=500)
+            if bars:
+                per_tf[interval] = _analyze_tf(interval, bars, float(ticker["last"]))
+
+        if len(per_tf) < 3:
+            log(f"   [v2 训练] K 线不全 (只有 {len(per_tf)}/3)，跳过")
+            return
+
+        aggregate = _aggregate_bias(per_tf)
+
+        snapshot = {
+            "px": float(ticker["last"]),
+            "4h_swing": per_tf.get("4h", {}).get("swing", {}).get("bias", ""),
+            "1h_swing": per_tf.get("1h", {}).get("swing", {}).get("bias", ""),
+            "15m_swing": per_tf.get("15m", {}).get("swing", {}).get("bias", ""),
+            "consensus_score": aggregate.get("consensus_score"),
+        }
+
+        decision = record_v2_decision(
+            bias=aggregate["bias"],
+            norm=abs(aggregate["norm"]),
+            composite_score=aggregate["score"],
+            consensus=aggregate.get("consensus", "unknown"),
+            main_a_score=0,
+            main_b_score=0,
+            main_c_score=0,
+            snapshot=snapshot,
+        )
+
+        log(f"   [v2 训练] decision_id={decision['decision_id']} "
+            f"bias={decision['bias']} norm={decision['norm']:.3f} "
+            f"consensus={decision['consensus']} triggered={decision['triggered']}")
+        return decision
+
+    except Exception as e:
+        log(f"   [v2 训练] 异常: {e}")
+        return None
 
 
 def _check_trend_reversal(contract: str, scan_payload: dict) -> None:
@@ -458,6 +530,10 @@ def run(w: VolumeWatcher, rw: Optional[RsiWatcher] = None) -> None:
     threading.Thread(target=ws_loop, daemon=True).start()
     # Settler（持仓结算）线程
     start_settler()
+    # Promoter（preview_pending → pending 自动 promote）线程，2026-10-15 加
+    # 替代原"每 15min 周期检查顺手扫"的 14.6min 延迟
+    contract = w.contract
+    start_promoter(contract=contract)
     fail = 0
     hb = 0
     try:
@@ -647,8 +723,12 @@ def main() -> int:
         os.environ["TRAINING_MODE"] = "1"
         os.environ["TRAINING_DATA_DIR"] = "/root/data/training"
         os.environ["TRAINING_JOURNAL"] = "/root/data/training/journal.jsonl"
+        # 2026-10-12 修：settler 通过 gate_fetch.DATA_DIR → os.environ.get("BTC_DATA_DIR")
+        # 找 journal/cache 路径；之前没设这个变量，settler 永远跑主 journal，training journal
+        # 里的 signal 永不结算（n_done_total=0 一直不变）。训练模式一并覆盖 BTC_DATA_DIR。
+        os.environ["BTC_DATA_DIR"] = "/root/data/training"
         extra += ["--training"]
-        print(f"[training] 训练环境模式启用，数据隔离到 /root/data/training/journal.jsonl")
+        print(f"[training] 训练环境模式启用，journal + 数据隔离到 /root/data/training/")
 
     if a.cmd == "stop":
         return cmd_stop()

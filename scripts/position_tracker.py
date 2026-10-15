@@ -282,6 +282,24 @@ def _settle_one(sig: Dict, bars: List[List]) -> Optional[Dict]:
             return _close(sig, "BE_STOPPED" if cur_tp1_hit else "SL_STOPPED",
                           cur_sl, ts, contracts, side, entry,
                           "profit" if cur_tp1_hit else "loss")
+        # 2026-10-12 防御：重复 TP1 部分止盈去重（防止 cron 重跑时同一根 K 线二次触发）
+        # 现象：journal 已写 tp1_hit_ts/active_sl=entry 后，下一次 settler 仍在循环开头
+        #       读到 cur_tp1_hit=False（因为函数顶部快照早于本轮落盘），会再次走入 partial 分支
+        #       → 推送重复 TP1 卡 + 重复落盘。
+        # 关键：放在 t_tp2 检查之后，TP2_DONE 优先（同一根 K 线可能 high 同时 ≥ TP1 和 TP2）
+        if t_tp2 and cur_tp1_hit and not cur_tp2_hit:
+            sig["tp2_hit"] = True
+            sig["tp2_hit_ts"] = ts
+            sig["tp2_hit_px"] = tp2
+            # TP2 触发后：剩 1/3 立即以 TP2 平仓（这是日内 3 段止盈的最后一段）
+            # 已平 1/3 TP1 + 1/3 TP2 + 剩余 1/3 也在 TP2 出 = 全平
+            return _close(sig, "TP2_DONE", tp2, ts, contracts, side, entry, "profit")
+
+        # 已在 tp1_hit 且不是 TP2 路径再来的 t_tp1 → 跳过重复 partial 触发
+        if t_tp1 and cur_tp1_hit:
+            sig["last_check_ts"] = ts
+            continue
+
         if t_tp1 and not cur_tp1_hit:
             # TP1 部分止盈：1/3 仓位锁利，止损移到 BE
             # 2026-10-05 修正：同步减少 sig["contracts"]，让前端和结算都按"已减 1/3"为准
@@ -316,14 +334,6 @@ def _settle_one(sig: Dict, bars: List[List]) -> Optional[Dict]:
             cur_tp1_hit = True
             cur_sl = entry
             continue
-        if t_tp2 and cur_tp1_hit and not cur_tp2_hit:
-            sig["tp2_hit"] = True
-            sig["tp2_hit_ts"] = ts
-            sig["tp2_hit_px"] = tp2
-            # TP2 触发后：剩 1/3 立即以 TP2 平仓（这是日内 3 段止盈的最后一段）
-            # 已平 1/3 TP1 + 1/3 TP2 + 剩余 1/3 也在 TP2 出 = 全平
-            return _close(sig, "TP2_DONE", tp2, ts, contracts, side, entry, "profit")
-
         # 2026-10-06 加：TP1 未触发 + 持仓 > 1h + 当前浮亏 → 主动减仓 50%
         # 触发条件（同时满足）：
         #   1) sig 已 fill（fill_ts 存在）
@@ -476,6 +486,28 @@ def _notify_close(sig: Dict, res: Dict) -> None:
     side_cn = "做多" if sig["side"] == "long" else "做空"
     cat = res["category"]
     net = res["net_usd"]
+
+    # 2026-10-12 防御：噪音门——BE 单触结算的"零位移"卡片
+    # 现象：今晚 22:55 那次"+3.15U TP1 后保本被打"卡片——exit_px=entry、净利仅 3.15U。
+    #       根因：active_sl=entry 时单根 K 线影线下探 → 立刻被判定 BE_STOPPED。
+    #       这种"价格根本没动就被平"的卡片挤占 TG 无任何决策价值。
+    # 改：outcome=BE_STOPPED 且 exit_px 距 entry < 5 点 → 视为零位移噪音，跳过推送。
+    #     仅 stderr 警告 + journal audit（你仍能在 report 里看到这些结算）。
+    _is_noise_be = False
+    if res.get("outcome") == "BE_STOPPED":
+        _exit_px = float(res.get("exit_px", 0))
+        if abs(_exit_px - entry) < 5.0:
+            _is_noise_be = True
+    if _is_noise_be:
+        import sys as _sys
+        print(
+            f"[position_tracker] 跳过噪音 BE 卡片 id={sig.get('id')} "
+            f"entry={entry:.1f} exit={res.get('exit_px'):.1f} "
+            f"net={net:+.2f}U outcome={res.get('outcome')}",
+            file=_sys.stderr,
+        )
+        return
+
     icon = {"profit": "🟢", "loss": "🔴", "timeout": "⏰", "skip": "⚪"}.get(cat, "•")
     head = {
         "TP1_HIT": "TP1 触发 + 保本被打",
@@ -806,8 +838,38 @@ def settle_all(verbose: bool = False) -> Tuple[int, int]:
 
     n_done = 0
     n_still = 0
+    # 2026-10-12 修 #3：journal 双胞胎去重（按 entry+exit+outcome+side 聚类）
+    #   痛点：23:57:20 + 23:57:32 双胞胎卡片（1791692114 + 1791695718 同 entry/exit/net）
+    #   根因：journal 双胞胎两条都 pending → 各自 _settle_one → 各 _notify_close 推卡
+    #   修 #1 已堵住新双胞胎产生；此补丁对历史已落盘双胞胎做兜底
+    #   规则：相同 entry+exit_px+outcome+side 视为双胞胎 → 保留 id 最长的（带 -JUMP 后缀短）
+    from collections import defaultdict
+    _dedup_groups: dict = defaultdict(list)
+    for _r in recs:
+        if _r.get("status") != "pending":
+            continue
+        _key = (
+            _r.get("entry"), _r.get("exit_px"), _r.get("outcome"), _r.get("side"),
+            _r.get("fill_px"), _r.get("exit_ts"),
+        )
+        _dedup_groups[_key].append(_r)
+    _skipped_ids: set = set()
+    for _key, _group in _dedup_groups.items():
+        if len(_group) > 1:
+            # 保留 id 最短的（无 -JUMP 后缀为主单）
+            _group_sorted = sorted(_group, key=lambda x: (len(x.get("id") or ""), x.get("id") or ""))
+            for _dup in _group_sorted[1:]:
+                _skipped_ids.add(_dup.get("id"))
+    _seen_ids: set = set()
     for r in recs:
         if r.get("status") != "pending":
+            continue
+        rid = r.get("id")
+        if rid in _skipped_ids or rid in _seen_ids:
+            n_still += 1
+            if rid in _skipped_ids:
+                r["status"] = "settled"
+                r["note"] = (r.get("note") or "") + " | dedup:skipped (双胞胎已由主单结算)"
             continue
         try:
             res = _settle_one(r, bars)
@@ -824,6 +886,7 @@ def settle_all(verbose: bool = False) -> Tuple[int, int]:
                            "net_usd": res["net_usd"], "category": res["category"],
                            "exit_ts": res["exit_ts"], "ts": int(time.time())})
             _notify_close(r, res)
+            _seen_ids.add(rid)
         else:
             n_still += 1
 

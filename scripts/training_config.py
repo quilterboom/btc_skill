@@ -69,6 +69,18 @@ V5_DEV_CONFIG = {
     
     # EMA 突破预警全平仓（改动 5）
     'ema_full_close': True,
+
+    # 老师单偏置（改动 6 — 2026-10-13 liusir 拍板）
+    # 当训练版生成方向时，对比 teacher_signals/teacher_trades 同 24h 窗口：
+    #   well (同向) +1.0 / oppose (反向) -1.5 / weak (过期) +0.3 / neutral 0
+    # 权重 = 1.5 表示 teacher bias 的 1 分 = 综合评分 1.5 分
+    # 例: well=+1.0 → +1.5 分；oppose=-1.5 → -2.25 分
+    'teacher_bias': {
+        'enabled': True,
+        'weight': 1.5,         # teacher bias 分数乘这个权重再加到综合评分
+        'window_hours': 24,    # 跟 teacher_bias.py 的 TEACHER_WINDOW_HOURS 一致
+        'only_in_training': True,  # 只在训练版生效，生产版保持纯量信号
+    },
 }
 
 # 模拟成交配置

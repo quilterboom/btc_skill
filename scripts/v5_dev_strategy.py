@@ -31,11 +31,17 @@ v5-dev 策略（多因子加权 + ATR SL + Kelly 仓位）
 from __future__ import annotations
 import os
 import sys
+from datetime import datetime
 from typing import Dict, Tuple
 
 # 训练环境配置
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from training_config import V5_DEV_CONFIG
+from training_config import V5_DEV_CONFIG, TRAINING_MODE
+try:
+    from teacher_bias import get_teacher_bias
+    _TEACHER_BIAS_AVAILABLE = True
+except ImportError:
+    _TEACHER_BIAS_AVAILABLE = False
 
 
 # ============================ 多因子加权（改动 1）============================
@@ -44,10 +50,12 @@ def calculate_signal_strength(
     pattern_15m: str = None,
     time_hour: int = None,
     vol_regime: str = None,
-    fib_resonance: bool = False
+    fib_resonance: bool = False,
+    side: str = None,           # v5 改动 6: 用于查老师偏置
+    date_str: str = None,       # v5 改动 6: 'YYYY-MM-DD'
 ) -> float:
     """
-    计算综合评分（多因子加权）
+    计算综合评分（多因子加权 + 老师偏置）
 
     输入:
       score_1h: 1h score (0-7)
@@ -55,33 +63,72 @@ def calculate_signal_strength(
       time_hour: 当前小时（0-23，用于时段权重）
       vol_regime: 量能状态（'放量', '缩量', '温和'）
       fib_resonance: fib 共振（True/False）
+      side: 'long' / 'short'（v5 改动 6 新增 — 老师偏置需要）
+      date_str: 'YYYY-MM-DD'（v5 改动 6 新增 — 老师偏置需要）
 
     输出:
-      综合评分（float，范围 0-10）
+      综合评分（float，范围 -∞ ~ +∞，推荐 clip 到 0-10）
+
+    老师偏置规则（teacher_bias.py + training_config.py teacher_bias）:
+      - 仅在 TRAINING_MODE=True 且 config 启用时生效
+      - 同向: +1.0 × weight / 反向: -1.5 × weight / 过期同向: +0.3 × weight
     """
     config = V5_DEV_CONFIG['multi_factor']
-    
+
     # 1h score 加权
     w1_score = config['w1_1h_score'] * score_1h
-    
+
     # 15m 形态加权（形态强度 0-3）
     pattern_strength = get_pattern_strength(pattern_15m)
     w2_pattern = config['w2_15m_pattern'] * pattern_strength
-    
+
     # 时段权重（-1 to +1）
     time_weight = get_time_of_day_weight(time_hour)
     w3_time = config['w3_time_of_day'] * time_weight
-    
+
     # vol regime 加权（-1 to +1）
     vol_weight = get_vol_regime_weight(vol_regime)
     w4_vol = config['w4_vol_regime'] * vol_weight
-    
+
     # fib 共振加权（0/1）
     w5_fib = config['w5_fib_resonance'] * (1 if fib_resonance else 0)
-    
+
     # 综合评分
     total_score = w1_score + w2_pattern + w3_time + w4_vol + w5_fib
-    
+
+    # ===== v5 改动 6: 老师单偏置 =====
+    tb_cfg = V5_DEV_CONFIG.get('teacher_bias', {})
+    tb_enabled = (
+        tb_cfg.get('enabled', False)
+        and TRAINING_MODE
+        and tb_cfg.get('only_in_training', True)
+        and _TEACHER_BIAS_AVAILABLE
+        and side in ('long', 'short')
+        and date_str is not None
+    )
+    if tb_enabled:
+        if date_str is None:
+            date_str = datetime.now().strftime('%Y-%m-%d')
+        if time_hour is None:
+            time_hour = datetime.now().hour
+        label, tb_score = get_teacher_bias(side=side, hour=time_hour, date_str=date_str)
+        weighted = tb_score * tb_cfg.get('weight', 1.0)
+        total_score += weighted
+        # 把细节贴到函数属性上（调试用，调用方读 score_breakdown 即可）
+        if not hasattr(calculate_signal_strength, '_last_breakdown'):
+            calculate_signal_strength._last_breakdown = {}
+        calculate_signal_strength._last_breakdown = {
+            'w1_score': w1_score,
+            'w2_pattern': w2_pattern,
+            'w3_time': w3_time,
+            'w4_vol': w4_vol,
+            'w5_fib': w5_fib,
+            'teacher_label': label,
+            'teacher_score': tb_score,
+            'teacher_weighted': round(weighted, 3),
+            'total': round(total_score, 3),
+        }
+
     return round(total_score, 2)
 
 

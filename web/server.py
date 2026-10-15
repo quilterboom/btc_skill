@@ -197,6 +197,33 @@ def _journal_state() -> dict:
     }
 
 
+def _journal_state_training() -> dict:
+    """训练环境策略状态（2026-10-11 加）"""
+    recs = _read_jsonl(Path("/root/data/training/journal.jsonl"))
+    if not recs:
+        return {"active": None, "recent_invalidated": 0, "total": 0}
+
+    holding = None
+    for r in reversed(recs):
+        if r.get("status") == "pending" and r.get("filled") is True:
+            holding = r
+            break
+
+    pending = None
+    if not holding:
+        for r in reversed(recs):
+            if r.get("status") == "pending":
+                pending = r
+                break
+
+    invalidated = sum(1 for r in recs if r.get("status") == "invalidated")
+    return {
+        "active": holding or pending,
+        "recent_invalidated": invalidated,
+        "total": len(recs),
+    }
+
+
 def _winrate() -> dict:
     """胜率：从 position_events.jsonl + journal 算（dedupe by id，取最新）
     规则：category == "profit" 算赢；其它算输
@@ -391,6 +418,64 @@ def _settlements_api(path: str) -> dict:
     }
 
 
+def _settlements_api_training(path: str) -> dict:
+    """训练环境结算列表（2026-10-11 加）"""
+    from urllib.parse import urlparse, parse_qs
+    q = parse_qs(urlparse(path).query)
+    page = max(1, int(q.get("page", ["1"])[0]))
+    size = min(100, max(1, int(q.get("size", ["20"])[0])))
+
+    # 训练环境数据
+    all_recs = _read_jsonl(Path("/root/data/training/position_events.jsonl"))
+    total_all = len(all_recs)
+
+    recs_sorted = sorted(all_recs, key=lambda r: r.get("ts", 0), reverse=True)
+    total = len(recs_sorted)
+    start = (page - 1) * size
+    end = start + size
+    page_items = recs_sorted[start:end]
+
+    # join 训练 journal 取 side/entry
+    jmap = {}
+    for r in _read_jsonl(Path("/root/data/training/journal.jsonl")):
+        if r.get("id"):
+            jmap[r["id"]] = r
+
+    items = []
+    for r in page_items:
+        rid = r.get("id", "")
+        jr = jmap.get(rid, {})
+        side = jr.get("side") or _side_from_id(rid)
+        entry = jr.get("entry") or r.get("entry")
+        exit_px = jr.get("exit_px") or r.get("exit_px")
+        items.append({
+            "id": rid,
+            "side": side,
+            "side_cn": "做多" if side == "long" else ("做空" if side == "short" else "—"),
+            "outcome": r.get("outcome", "?"),
+            "category": r.get("category", "?"),
+            "net_usd": round(r.get("net_usd", 0), 2),
+            "entry": round(entry, 1) if isinstance(entry, (int, float)) else None,
+            "exit_px": round(exit_px, 1) if isinstance(exit_px, (int, float)) else None,
+            "exit_ts": r.get("exit_ts"),
+            "ts": r.get("ts"),
+            # 2026-10-12 加：训练策略分类用（前端按 signal_source 聚类）
+            "signal_source": jr.get("signal_source") or r.get("signal_source") or "—",
+            "verdict": jr.get("verdict") or "—",
+            "entry_ts": jr.get("entry_ts") or jr.get("promoted_ts") or r.get("ts"),
+            "score": jr.get("score"),
+        })
+
+    return {
+        "items": items,
+        "total": total,
+        "page": page,
+        "size": size,
+        "has_more": end < total,
+        "total_all": total_all,
+    }
+
+
 def _side_from_id(rid: str) -> str:
     """fallback：id 里通常带 -long / -short 后缀"""
     if rid.endswith("-long"):
@@ -425,6 +510,260 @@ def build_status() -> dict:
     }
 
 
+def _wave_analysis_training() -> dict:
+    """艾略特波浪分析（2026-10-12 加）：1d/4h/1h 三周期浪形 + 斐波那契位"""
+    try:
+        from gate_fetch import fetch_ohlcv
+        from elliott_wave import analyze
+        out = {}
+        for tf in ("1d", "4h", "1h"):
+            raw = fetch_ohlcv("BTC_USDT", tf, 200, cache=True)
+            if not raw:
+                continue
+            ts = [b[0] for b in raw]
+            hi = [b[2] for b in raw]
+            lo = [b[3] for b in raw]
+            cl = [b[4] for b in raw]
+            out[tf] = analyze(hi, lo, ts, float(cl[-1]), tf)
+        return out
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def build_status_training() -> dict:
+    """训练环境状态（2026-10-11 加）"""
+    # 2026-10-12 补：前端训练版 card 也走相同 render 路径，要 ts_str
+    hb_age = _heartbeat_age_sec_training()
+    recs = _read_jsonl(Path("/root/data/training/journal.jsonl"))
+    pending_count = sum(1 for r in recs if r.get("status") != "settled")
+    settled_count = sum(1 for r in recs if r.get("status") == "settled")
+    # 2026-10-12 加：累计净利（settled 单 net_usd 之和，None 视为 0）
+    net_usd = sum((r.get("net_usd") or 0) for r in recs if r.get("status") == "settled")
+    return {
+        "ts": int(time.time()),
+        "ts_str": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "env": "training",
+        "process": {
+            "heartbeat_age_sec": round(hb_age, 1) if hb_age is not None else None,
+            "settler_ok": hb_age is not None and hb_age < 30,
+        },
+        "strategy": _journal_state_training(),
+        "settler_counters": {
+            "pending": pending_count,
+            "settled": settled_count,
+            "net_usd": round(net_usd, 2),
+        },
+        "waves": _wave_analysis_training(),
+    }
+
+
+def _heartbeat_age_sec_training() -> float | None:
+    """训练 settler 心跳文件 age（2026-10-12 加）"""
+    p = Path("/root/data/training/settler_heartbeat.json")
+    if not p.exists():
+        return None
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        ts = float(data.get("ts", 0))
+        if ts <= 0:
+            return None
+        return time.time() - ts
+    except Exception:
+        return None
+
+
+# ============================ 老师直播单 API ============================
+# 2026-10-14 liusir 拍板：网页端展示 + 录入
+# 数据源: /root/data/teacher_trades.jsonl
+
+TEACHER_TRADES_PATH = Path("/root/data/teacher_trades.jsonl")
+
+
+def _read_teacher_trades() -> list:
+    """读所有老师直播单"""
+    if not TEACHER_TRADES_PATH.exists():
+        return []
+    out = []
+    with open(TEACHER_TRADES_PATH, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                out.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return out
+
+
+def _next_teacher_trade_id(trades: list) -> int:
+    if not trades:
+        return 1
+    return max((t.get("trade_id") or 0) for t in trades) + 1
+
+
+def _write_teacher_trades(trades: list) -> None:
+    """原子写"""
+    tmp = TEACHER_TRADES_PATH.with_suffix(".jsonl.tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        for t in trades:
+            f.write(json.dumps(t, ensure_ascii=False) + "\n")
+    os.replace(tmp, TEACHER_TRADES_PATH)
+
+
+def build_status_teacher() -> dict:
+    """老师口头单状态聚合（前端老师单卡片用）
+
+    老数据 result.open 可能缺失：用 net_usd != None 视为已结算兜底。
+    """
+    trades = _read_teacher_trades()
+
+    def _is_open(t):
+        r = t.get("result") or {}
+        if r.get("open") is False:
+            return False
+        if r.get("net_usd") is not None:
+            return False
+        return True
+
+    settled = [t for t in trades if not _is_open(t)]
+    pending = [t for t in trades if _is_open(t)]
+    net_usd = sum((t.get("result") or {}).get("net_usd") or 0 for t in settled)
+    wins = sum(1 for t in settled if (t.get("result") or {}).get("win"))
+    return {
+        "ts": int(time.time()),
+        "ts_str": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "total": len(trades),
+        "settled": len(settled),
+        "pending": len(pending),
+        "net_usd": round(net_usd, 2),
+        "win_rate": f"{wins}/{len(settled)}" if settled else "0/0",
+        "trades": trades,   # 完整列表（前端表格渲染）
+    }
+
+
+def teacher_add_trade(payload: dict) -> tuple[int, dict]:
+    """新增一笔老师直播单。
+    payload 必填字段：
+      date (YYYY-MM-DD HH:MM), contract, side, entry_zone,
+      tp1, tp2=None, sl_initial=None, qty_pct_partial=50, size_contracts=None, notional_usd=5000
+    """
+    required = ["date", "contract", "side", "entry_zone", "tp1"]
+    missing = [k for k in required if payload.get(k) is None or payload.get(k) == ""]
+    if missing:
+        return 400, {"error": f"missing fields: {missing}"}
+
+    if payload["side"] not in ("long", "short"):
+        return 400, {"error": f"side must be long/short, got {payload['side']}"}
+
+    trades = _read_teacher_trades()
+    new_id = _next_teacher_trade_id(trades)
+
+    qty_pct_partial = int(payload.get("qty_pct_partial") or 50)
+    if qty_pct_partial not in (30, 50, 70, 100):
+        return 400, {"error": f"qty_pct_partial must be 30/50/70/100, got {qty_pct_partial}"}
+
+    entry = float(payload["entry_zone"])
+    tp1 = float(payload["tp1"])
+    tp2 = payload.get("tp2")
+    tp2_f = float(tp2) if tp2 is not None else None
+    sl_initial = payload.get("sl_initial")
+    sl_initial_f = float(sl_initial) if sl_initial is not None else entry  # 默认保本
+
+    if payload["side"] == "long":
+        tp1_pct = (tp1 - entry) / entry * 100
+        tp2_pct = ((tp2_f - entry) / entry * 100) if tp2_f else None
+        sl_pct_initial = ((sl_initial_f - entry) / entry * 100) if sl_initial_f else 0.0
+    else:
+        tp1_pct = (entry - tp1) / entry * 100
+        tp2_pct = ((entry - tp2_f) / entry * 100) if tp2_f else None
+        sl_pct_initial = ((entry - sl_initial_f) / entry * 100) if sl_initial_f else 0.0
+
+    sig = {
+        "trade_id": new_id,
+        "date": payload["date"],
+        "contract": payload["contract"],
+        "side": payload["side"],
+        "entry_zone": entry,
+        "sl_initial": sl_initial_f,
+        "sl_pct_initial": sl_pct_initial,
+        "tp1": tp1,
+        "tp1_pct": round(tp1_pct, 4),
+        "tp2": tp2_f,
+        "tp2_pct": round(tp2_pct, 4) if tp2_pct is not None else None,
+        "rr_initial": None,
+        "fill_price": entry,
+        "trigger_reason": payload.get("trigger_reason") or "liusir 口头录入（网页端）",
+        "size_contracts": payload.get("size_contracts"),
+        "notional_usd": payload.get("notional_usd", 5000),
+        "leverage": payload.get("leverage", 100),
+        "events": [
+            {
+                "ts": payload["date"],
+                "type": "entry",
+                "px": entry,
+                "note": payload.get("entry_note") or "liusir 直播单进场（网页录入）",
+            }
+        ],
+        "result": {
+            "net_usd": None,
+            "outcome": "持仓中（已录入，待 TP1 / 打保本）",
+            "notes": "",
+            "open": True,
+        },
+        "data_quality": f"liusir {payload['date']} 口头录入；减仓比例 {qty_pct_partial}%（待 TP1 命中后回填）",
+    }
+
+    trades.append(sig)
+    _write_teacher_trades(trades)
+    return 200, {"trade_id": new_id, "status": "pending", "ts": int(time.time())}
+
+
+def teacher_add_event(trade_id: int, payload: dict) -> tuple[int, dict]:
+    """追加事件（TP1 减仓 / 打保本 / 手动平）
+    payload 字段：type, px, qty_pct, note
+    """
+    ev_type = payload.get("type")
+    if ev_type not in ("tp1_partial", "remaining_close", "remaining_pending"):
+        return 400, {"error": f"type must be tp1_partial/remaining_close/remaining_pending, got {ev_type}"}
+
+    trades = _read_teacher_trades()
+    for t in trades:
+        if t.get("trade_id") == trade_id:
+            px = payload.get("px")
+            if px is None:
+                return 400, {"error": "px required"}
+            px_f = float(px)
+
+            t["events"].append({
+                "ts": payload.get("ts") or time.strftime("%Y-%m-%d %H:%M"),
+                "type": ev_type,
+                "px": px_f,
+                "qty_pct": payload.get("qty_pct"),
+                "note": payload.get("note") or "",
+            })
+
+            # 落 result（如果是平仓事件）
+            if ev_type in ("remaining_close", "tp1_partial"):
+                net_usd_input = payload.get("net_usd")
+                if net_usd_input is not None:
+                    t["result"]["net_usd"] = float(net_usd_input)
+                if ev_type == "remaining_close":
+                    t["result"]["open"] = False
+                    t["result"]["outcome"] = payload.get("outcome") or "盈利（TP1 + 保本/手动平）"
+                    t["result"]["notes"] = payload.get("note") or ""
+                    t["result"]["win"] = (t["result"].get("net_usd") or 0) > 0
+                    t["result"]["close_ts_estimate"] = payload.get("ts") or time.strftime("%Y-%m-%d %H:%M")
+                else:
+                    # TP1 减仓：仍持仓中，但更新 notes
+                    t["result"]["outcome"] = f"持仓中（TP1 已减仓 {payload.get('qty_pct')}% + 剩余 {100 - int(payload.get('qty_pct') or 0)}% 保本）"
+
+            _write_teacher_trades(trades)
+            return 200, {"trade_id": trade_id, "status": t["result"].get("open"), "events_count": len(t["events"])}
+
+    return 404, {"error": f"trade_id {trade_id} not found"}
+
+
 # ============================ HTTP ============================
 
 class Handler(BaseHTTPRequestHandler):
@@ -456,6 +795,30 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_error(500, str(e))
             return
+        if self.path == "/api/status/training":
+            try:
+                payload = build_status_training()
+                body = json.dumps(payload, ensure_ascii=False).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception as e:
+                self.send_error(500, str(e))
+            return
+        if self.path.startswith("/api/settlements/training"):
+            try:
+                payload = _settlements_api_training(self.path)
+                body = json.dumps(payload, ensure_ascii=False).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception as e:
+                self.send_error(500, str(e))
+            return
         if self.path.startswith("/api/settlements"):
             try:
                 payload = _settlements_api(self.path)
@@ -469,7 +832,80 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_error(500, str(e))
             return
+        # ===== 老师直播单：GET 列表 =====
+        if self.path == "/api/teacher/trades":
+            try:
+                payload = build_status_teacher()
+                body = json.dumps(payload, ensure_ascii=False).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception as e:
+                self.send_error(500, str(e))
+            return
         self.send_error(404, "not found")
+
+    def do_POST(self):
+        """老师直播单录入 / 追加事件"""
+        if self.path == "/api/teacher/trades":
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                raw = self.rfile.read(length) if length > 0 else b""
+                payload = json.loads(raw.decode("utf-8")) if raw else {}
+                status, body = teacher_add_trade(payload)
+                body_bytes = json.dumps(body, ensure_ascii=False).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(body_bytes)
+            except json.JSONDecodeError as e:
+                self.send_error(400, f"invalid JSON: {e}")
+            except Exception as e:
+                self.send_error(500, str(e))
+            return
+
+        # /api/teacher/trades/<id>/events
+        if self.path.startswith("/api/teacher/trades/") and self.path.endswith("/events"):
+            try:
+                # 解析 trade_id
+                # /api/teacher/trades/123/events
+                parts = self.path.strip("/").split("/")
+                # ['api', 'teacher', 'trades', '123', 'events']
+                if len(parts) != 5:
+                    self.send_error(400, "bad path")
+                    return
+                trade_id = int(parts[3])
+                length = int(self.headers.get("Content-Length", 0))
+                raw = self.rfile.read(length) if length > 0 else b""
+                payload = json.loads(raw.decode("utf-8")) if raw else {}
+                status, body = teacher_add_event(trade_id, payload)
+                body_bytes = json.dumps(body, ensure_ascii=False).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(body_bytes)
+            except ValueError as e:
+                self.send_error(400, f"bad trade_id: {e}")
+            except json.JSONDecodeError as e:
+                self.send_error(400, f"invalid JSON: {e}")
+            except Exception as e:
+                self.send_error(500, str(e))
+            return
+
+        self.send_error(404, "not found")
+
+    def do_OPTIONS(self):
+        """CORS 预检（前端 fetch 用）"""
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
 
 
 def main(host: str = "0.0.0.0", port: int = 3003):

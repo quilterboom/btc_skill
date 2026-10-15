@@ -95,6 +95,43 @@
   }
   .toolbar button:hover { background: #f3f4f6; }
   .toolbar .updated { font-size: 12px; color: var(--muted); }
+  /* 顶部 正式/训练 切换按钮组 */
+  .env-toggle {
+    display: inline-flex;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    overflow: hidden;
+    background: white;
+  }
+  .env-toggle button {
+    padding: 6px 16px;
+    border: 0;
+    background: transparent;
+    cursor: pointer;
+    font-size: 13px;
+    color: var(--muted);
+  }
+  .env-toggle button + button { border-left: 1px solid var(--border); }
+  .env-toggle button.active {
+    background: var(--blue);
+    color: white;
+    font-weight: 500;
+  }
+  .env-toggle button:hover:not(.active) { background: #f3f4f6; color: var(--text); }
+  .env-badge {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 1px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 500;
+  }
+  .env-badge.training { background: #fef3c7; color: #92400e; }
+  .env-badge.prod     { background: #dbeafe; color: #1e40af; }
+  .hidden { display: none !important; }
+  /* 环境切换：body[data-env="training"] 下，data-env-show="prod" 隐藏；反之亦然 */
+  body[data-env="prod"] [data-env-show="training"],
+  body[data-env="training"] [data-env-show="prod"] { display: none !important; }
 </style>
 </head>
 <body>
@@ -102,14 +139,24 @@
 
   <div class="toolbar">
     <div>
-      <h1>BTC 策略状态</h1>
+      <h1>
+        BTC 策略状态
+        <span class="env-badge" id="env-badge-prod">正式</span>
+        <span class="env-badge training hidden" id="env-badge-training">训练</span>
+      </h1>
       <div class="sub" id="updated">加载中…</div>
     </div>
-    <button onclick="load()">手动刷新</button>
+    <div style="display:flex; align-items:center; gap:12px; flex-wrap: wrap">
+      <div class="env-toggle" role="tablist">
+        <button id="env-btn-prod" class="active" onclick="switchEnv('prod')" role="tab">正式</button>
+        <button id="env-btn-training" onclick="switchEnv('training')" role="tab">训练</button>
+      </div>
+      <button onclick="load()">手动刷新</button>
+    </div>
   </div>
 
   <!-- 顶部 4 个小卡片：进程 / 冷却 / 数据 / BTC -->
-  <div class="grid">
+  <div class="grid" data-env-show="prod">
 
     <div class="card">
       <h3>进程状态</h3>
@@ -142,8 +189,40 @@
     </div>
   </div>
 
+  <!-- 训练版专属：settler 心跳 + 计数器 -->
+  <div class="grid" style="margin-top:16px" data-env-show="training">
+    <div class="card">
+      <h3>训练 settler 心跳</h3>
+      <div class="big" id="train-hb-age">—</div>
+      <div class="row"><span class="lbl">n_iter</span><span class="val" id="train-hb-niter">—</span></div>
+      <div class="row"><span class="lbl">n_done_total</span><span class="val" id="train-hb-done">—</span></div>
+      <div class="row"><span class="lbl">n_still</span><span class="val" id="train-hb-still">—</span></div>
+      <div class="meta" id="train-hb-meta"></div>
+    </div>
+    <div class="card">
+      <h3>训练策略概览</h3>
+      <div id="train-strategy-summary">暂无</div>
+    </div>
+  </div>
+
+  <!-- 训练版专属：艾略特波浪分析 -->
+  <div class="grid" style="margin-top:16px" data-env-show="training">
+    <div class="card" style="grid-column: 1 / -1">
+      <h3>艾略特波浪分析（swing + 斐波那契，仅供判读参考）</h3>
+      <div id="train-waves">加载中…</div>
+    </div>
+  </div>
+
+  <!-- 训练版专属：训练策略列表（按 signal_source 聚类） -->
+  <div class="grid" style="margin-top:16px" data-env-show="training">
+    <div class="card" style="grid-column: 1 / -1">
+      <h3>训练策略明细（按 signal_source 聚类）</h3>
+      <div id="train-strategy-list">加载中…</div>
+    </div>
+  </div>
+
   <!-- 底部：胜率 -->
-  <div class="grid" style="margin-top:16px">
+  <div class="grid" style="margin-top:16px" data-env-show="prod">
     <div class="card">
       <h3>累计胜率</h3>
       <div class="big" id="wr-total">—</div>
@@ -165,11 +244,75 @@
     </div>
   </div>
 
+  <!-- 老师直播单（2026-10-14 liusir 拍板：网页端展示 + 录入） -->
+  <div class="grid" style="margin-top:16px">
+    <div class="card" style="grid-column: 1 / -1">
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap">
+        <h3 style="margin:0">
+          老师直播单
+          <span class="meta" id="teacher-meta" style="margin-left:8px; font-weight:400">—</span>
+        </h3>
+        <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap">
+          <button class="btn" id="teacher-toggle-form" style="font-size:13px; padding:6px 12px; border:1px solid var(--border); background:#fff; border-radius:6px; cursor:pointer">+ 录入新单</button>
+          <button class="btn" id="teacher-refresh" style="font-size:13px; padding:6px 12px; border:1px solid var(--border); background:#fff; border-radius:6px; cursor:pointer">刷新</button>
+        </div>
+      </div>
+
+      <div class="meta" style="margin:6px 0 12px 0; display:flex; gap:24px; flex-wrap:wrap">
+        <span><b id="teacher-stat-total">—</b> 总单数</span>
+        <span><b id="teacher-stat-settled">—</b> 已结算</span>
+        <span><b id="teacher-stat-pending">—</b> 持仓中</span>
+        <span>累计净利 <b id="teacher-stat-net" class="pos">—</b></span>
+        <span>胜率 <b id="teacher-stat-winrate">—</b></span>
+      </div>
+
+      <!-- 新增单 表单（默认折叠） -->
+      <div id="teacher-form" style="display:none; margin:0 0 12px 0; padding:12px; border:1px dashed var(--border); border-radius:6px; background:#f9fafb">
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(140px, 1fr)); gap:10px">
+          <label style="font-size:12px">日期时间<input id="tf-date" type="text" placeholder="2026-10-14 22:30" style="width:100%; padding:6px 8px; border:1px solid var(--border); border-radius:4px; font-size:13px"></label>
+          <label style="font-size:12px">合约<input id="tf-contract" type="text" value="BTC_USDT" style="width:100%; padding:6px 8px; border:1px solid var(--border); border-radius:4px; font-size:13px"></label>
+          <label style="font-size:12px">方向<select id="tf-side" style="width:100%; padding:6px 8px; border:1px solid var(--border); border-radius:4px; font-size:13px"><option value="long">多</option><option value="short">空</option></select></label>
+          <label style="font-size:12px">入场价<input id="tf-entry" type="number" step="0.1" style="width:100%; padding:6px 8px; border:1px solid var(--border); border-radius:4px; font-size:13px"></label>
+          <label style="font-size:12px">TP1<input id="tf-tp1" type="number" step="0.1" style="width:100%; padding:6px 8px; border:1px solid var(--border); border-radius:4px; font-size:13px"></label>
+          <label style="font-size:12px">TP2（可空）<input id="tf-tp2" type="number" step="0.1" style="width:100%; padding:6px 8px; border:1px solid var(--border); border-radius:4px; font-size:13px"></label>
+          <label style="font-size:12px">SL（可空）<input id="tf-sl" type="number" step="0.1" style="width:100%; padding:6px 8px; border:1px solid var(--border); border-radius:4px; font-size:13px"></label>
+          <label style="font-size:12px">减仓 %<select id="tf-qty" style="width:100%; padding:6px 8px; border:1px solid var(--border); border-radius:4px; font-size:13px"><option value="50" selected>50</option><option value="30">30</option><option value="70">70</option><option value="100">100</option></select></label>
+          <label style="font-size:12px">名义 (U)<input id="tf-notional" type="number" value="5000" style="width:100%; padding:6px 8px; border:1px solid var(--border); border-radius:4px; font-size:13px"></label>
+        </div>
+        <div style="margin-top:10px; display:flex; gap:8px; align-items:center">
+          <input id="tf-note" type="text" placeholder="备注（可选）" style="flex:1; padding:6px 8px; border:1px solid var(--border); border-radius:4px; font-size:13px">
+          <button id="tf-submit" style="padding:8px 16px; background:#3b82f6; color:white; border:none; border-radius:6px; font-size:13px; cursor:pointer">提交</button>
+          <button id="tf-cancel" style="padding:8px 16px; background:white; border:1px solid var(--border); border-radius:6px; font-size:13px; cursor:pointer">取消</button>
+        </div>
+        <div id="tf-msg" class="meta" style="margin-top:6px; min-height:14px"></div>
+      </div>
+
+      <!-- 列表（表格） -->
+      <div style="overflow-x:auto">
+        <table>
+          <thead>
+            <tr>
+              <th style="width:5%">#</th>
+              <th>日期</th>
+              <th>方向</th>
+              <th class="num">入场</th>
+              <th class="num">TP1</th>
+              <th>状态</th>
+              <th class="num">净 U</th>
+              <th style="width:1%">操作</th>
+            </tr>
+          </thead>
+          <tbody id="teacher-rows"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
   <!-- 结算明细（分页） -->
   <div class="grid" style="margin-top:16px">
     <div class="card" style="grid-column: 1 / -1">
       <div style="display:flex; align-items:center; justify-content:space-between; gap:12px">
-        <h3 style="margin:0">结算明细（已过滤测试单）</h3>
+        <h3 style="margin:0"><span id="settle-title">结算明细</span><span class="meta" id="settle-filter-note" style="margin-left:8px; font-weight:400"></span></h3>
         <div style="display:flex; align-items:center; gap:12px">
           <label class="meta" style="cursor:pointer">
             <input type="checkbox" id="settle-include-test" style="vertical-align:middle">
@@ -235,7 +378,76 @@ function pillClass(ok, warn) {
   return "pill warn";
 }
 
+function renderTraining(d) {
+  // 训练版：只渲染策略 + settler 计数器 + 训练专属卡
+  // 不动 process / watch_state / btc / 胜率（这些卡片是 data-env-show="prod"，本来就不显示）
+  document.getElementById("updated").textContent = "更新时间：" + (d.ts_str || "—") + "  ·  自动每 1s 刷新";
+
+  const proc = d.process || {};
+  let procPill, procMeta;
+  if (!proc.settler_ok) {
+    procPill = `<span class="pill warn">心跳异常</span>`;
+    procMeta = `心跳 ${fmtAge(proc.heartbeat_age_sec)}`;
+  } else {
+    procPill = `<span class="pill ok">训练运行中</span>`;
+    procMeta = "settler 正常";
+  }
+  // 训练版卡片 ID 已在 HTML 中定义
+  document.getElementById("train-hb-age").textContent = proc.heartbeat_age_sec == null ? "—" : fmtAge(proc.heartbeat_age_sec);
+  document.getElementById("train-hb-meta").innerHTML = procPill + " · " + procMeta;
+
+  // 训练版策略概览
+  const st = d.strategy || {};
+  const counters = d.settler_counters || {};
+  const summary = `
+    <div style="display:flex; gap:24px; flex-wrap:wrap; font-size:14px">
+      <div><b>${st.active ? st.active.side : "无活跃"}</b><div class="meta">当前策略</div></div>
+      <div><b>${st.total ?? 0}</b><div class="meta">已记录总单数</div></div>
+      <div><b>${st.recent_invalidated ?? 0}</b><div class="meta">近 12 笔被否</div></div>
+      <div><b>${counters.pending ?? 0}</b><div class="meta">pending</div></div>
+      <div><b>${counters.settled ?? 0}</b><div class="meta">已结算</div></div>
+      <div><b>${(counters.net_usd ?? 0).toFixed(2)}U</b><div class="meta">累计净利</div></div>
+    </div>`;
+  document.getElementById("train-strategy-summary").innerHTML = summary;
+
+  // 艾略特波浪分析（1d / 4h / 1h）
+  const waves = d.waves || {};
+  const waveEl = document.getElementById("train-waves");
+  if (waveEl) {
+    if (waves.error) {
+      waveEl.innerHTML = `<div class="empty">波浪分析失败：${waves.error}</div>`;
+    } else {
+      const biasBadge = b => b === "long" ? '<span class="pill ok">顺势多</span>'
+        : b === "short" ? '<span class="pill bad">顺势空</span>'
+        : '<span class="pill idle">中性</span>';
+      const blocks = ["1d", "4h", "1h"].map(tf => {
+        const w = waves[tf];
+        if (!w) return "";
+        const sw = w.current_swing || {};
+        const retr = Object.entries(w.retracements || {}).map(([r, px]) =>
+          `<div class="row"><span class="lbl">回撤 ${Number(r).toFixed(3)}</span><span class="val">${Number(px).toLocaleString("en-US", {maximumFractionDigits: 1})}</span></div>`).join("");
+        const ext = Object.entries(w.extensions || {}).map(([r, px]) =>
+          `<div class="row"><span class="lbl">扩展 ${Number(r).toFixed(3)}</span><span class="val">${Number(px).toLocaleString("en-US", {maximumFractionDigits: 1})}</span></div>`).join("");
+        return `
+          <div style="flex:1 1 300px; min-width:280px; padding:10px; border:1px solid var(--border); border-radius:8px">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px">
+              <b>${tf}</b> ${biasBadge(w.bias)}
+            </div>
+            <div class="row"><span class="lbl">浪形</span><span class="val">${w.label || "—"}</span></div>
+            <div class="row"><span class="lbl">最近段</span><span class="val">${sw.kind === "up" ? "↑" : "↓"} ${sw.lo_px?.toLocaleString("en-US", {maximumFractionDigits:1})} → ${sw.hi_px?.toLocaleString("en-US", {maximumFractionDigits:1})}（${sw.bars}根 / ${sw.span_pct}%）</span></div>
+            <div class="row"><span class="lbl">段内位置</span><span class="val">${((w.pos_in_leg ?? 0) * 100).toFixed(1)}%</span></div>
+            <div class="meta" style="margin:6px 0">${w.note || ""}</div>
+            ${retr}
+            ${ext}
+          </div>`;
+      }).join("");
+      waveEl.innerHTML = `<div style="display:flex; gap:12px; flex-wrap:wrap">${blocks || '<div class="empty">暂无波浪数据</div>'}</div>`;
+    }
+  }
+}
+
 function render(d) {
+  if (_env === "training") return renderTraining(d);
   // 顶部时间戳
   document.getElementById("updated").textContent = "更新时间：" + d.ts_str + "  ·  自动每 1s 刷新";
 
@@ -421,11 +633,13 @@ async function fetchSettlements() {
     size: String(_settleSize),
     include_test: _settleIncludeTest ? "1" : "0",
   });
+  const base = _env === "training" ? "/api/settlements/training" : "/api/settlements";
   try {
-    const r = await fetch("/api/settlements?" + params, {cache: "no-store"});
+    const r = await fetch(base + "?" + params, {cache: "no-store"});
     if (!r.ok) throw new Error("HTTP " + r.status);
     const d = await r.json();
     renderSettlements(d);
+    if (_env === "training") renderTrainingStrategyList(d);  // 训练版额外渲染策略明细
   } catch (e) {
     document.getElementById("recent-rows").innerHTML =
       `<tr><td colspan="5" class="empty">加载失败：${e.message}</td></tr>`;
@@ -475,6 +689,81 @@ function renderSettlements(d) {
     `第 ${d.page} / ${Math.max(1, Math.ceil(d.total / d.size))} 页`;
 }
 
+// 训练版策略明细渲染：按 signal_source 聚类
+function renderTrainingStrategyList(d) {
+const el = document.getElementById("train-strategy-list");
+if (!el) return;
+// dedup by id（position_events.jsonl 同一个 id 可能写多条：partial_close + settled）
+const seen = new Set();
+const items = (d.items || []).filter(r => {
+  if (!r.id) return false;
+  if (seen.has(r.id)) return false;
+  seen.add(r.id);
+  return true;
+});
+if (!items.length) { el.innerHTML = `<div class="empty">暂无训练记录</div>`; return; }
+
+  // 1) 按 signal_source 聚类
+  const bySrc = new Map();
+  for (const r of items) {
+    const src = r.signal_source || "未分类";
+    if (!bySrc.has(src)) bySrc.set(src, []);
+    bySrc.get(src).push(r);
+  }
+
+  // 2) 计算每个 source 的小计
+  const summaries = [];
+  for (const [src, list] of bySrc) {
+    const n = list.length;
+    const wins = list.filter(x => (x.net_usd || 0) > 0).length;
+    const net = list.reduce((a, x) => a + (x.net_usd || 0), 0);
+    summaries.push({ src, n, wins, wr: (wins / n * 100).toFixed(1), net });
+  }
+  // 按净利降序
+  summaries.sort((a, b) => b.net - a.net);
+
+  // 3) 渲染顶部聚类小计
+  const sourceChips = summaries.map(s => {
+    const color = s.net > 0 ? "pos" : s.net < 0 ? "neg" : "";
+    return `
+      <div class="row" style="border-bottom:1px dashed var(--border); padding:4px 0">
+        <span class="lbl">${s.src}</span>
+        <span class="val">${s.n} 笔 · 胜率 ${s.wr}% · 累计 <span class="${color}">${s.net >= 0 ? "+" : ""}${s.net.toFixed(2)}U</span></span>
+      </div>`;
+  }).join("");
+
+  // 4) 列表：按 entry_ts 倒序（最新在前）
+  const rows = [...items].sort((a, b) => (b.entry_ts || b.ts) - (a.entry_ts || a.ts))
+    .map(r => {
+      const t = r.entry_ts ? new Date(r.entry_ts * 1000).toLocaleString("zh-CN", {month:"2-digit", day:"2-digit", hour:"2-digit", minute:"2-digit"}) : "—";
+      const cls = r.net_usd >= 0 ? "pos" : "neg";
+      const sign = r.net_usd >= 0 ? "+" : "";
+      const score = r.score != null ? `score=${r.score}` : "";
+      const src = (r.signal_source || "—");
+      const entry = r.entry != null ? r.entry.toLocaleString("en-US", {maximumFractionDigits: 1}) : "—";
+      const exit = r.exit_px != null ? r.exit_px.toLocaleString("en-US", {maximumFractionDigits: 1}) : "—";
+      return `<tr>
+        <td><span class="meta">${t}</span></td>
+        <td><code style="font-size:11px">${(r.id||"").slice(-15)}</code></td>
+        <td>${src}</td>
+        <td>${score}</td>
+        <td>${entry}</td>
+        <td>${exit}</td>
+        <td>${r.outcome || "—"}</td>
+        <td class="${cls}">${sign}${r.net_usd.toFixed(2)}U</td>
+      </tr>`;
+    }).join("");
+
+  el.innerHTML = `
+    <div style="margin-bottom:12px">${sourceChips}</div>
+    <table class="data" style="font-size:13px">
+      <thead><tr>
+        <th>时间</th><th>ID</th><th>策略</th><th>分</th><th>进场</th><th>出场</th><th>结果</th><th>净利</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
 // 翻页 / 切换大小 / 切换测试过滤 — 都触发 fetchSettlements
 document.getElementById("settle-prev").addEventListener("click", () => {
   if (_settlePage > 1) { _settlePage--; fetchSettlements(); }
@@ -495,7 +784,8 @@ document.getElementById("settle-include-test").addEventListener("change", (e) =>
 
 async function load() {
   try {
-    const r = await fetch("/api/status", {cache: "no-store"});
+    const url = _env === "training" ? "/api/status/training" : "/api/status";
+    const r = await fetch(url, {cache: "no-store"});
     if (!r.ok) throw new Error("HTTP " + r.status);
     const d = await r.json();
     render(d);
@@ -506,8 +796,194 @@ async function load() {
   fetchSettlements();
 }
 
+// ============================ 环境切换（正式 / 训练） ============================
+let _env = "prod";  // "prod" | "training"
+
+function switchEnv(env) {
+  if (env !== "prod" && env !== "training") return;
+  _env = env;
+  document.body.dataset.env = env;
+  // 切换按钮高亮
+  document.getElementById("env-btn-prod").classList.toggle("active", env === "prod");
+  document.getElementById("env-btn-training").classList.toggle("active", env === "training");
+  // badge 切换
+  document.getElementById("env-badge-prod").classList.toggle("hidden", env !== "prod");
+  document.getElementById("env-badge-training").classList.toggle("hidden", env !== "training");
+  // 结算明细标题
+  document.getElementById("settle-title").textContent =
+    env === "training" ? "训练结算明细" : "结算明细";
+  document.getElementById("settle-filter-note").textContent =
+    env === "training" ? "" : "（已过滤测试单）";
+  // 训练版无 BTC / 胜率字段，但 process 仍有 settler_ok / heartbeat_age_sec
+  // 训练版额外卡（train-hb-* / train-strategy-summary）由 render() 同时填充
+  _settlePage = 1;  // 重置到第 1 页
+  load();
+}
+
+document.body.dataset.env = _env;
+
 load();
 setInterval(load, 1000);  // 1s 自动刷新
+// ★ 老师单：独立拉取（不阻塞主状态刷新）+ 表单交互
+loadTeacher();
+setInterval(loadTeacher, 5000);  // 5s 刷新
+
+// ============================ 老师直播单 ============================
+async function teacherApi(path, opts = {}) {
+  const r = await fetch(path, opts);
+  if (!r.ok) {
+    const t = await r.text();
+    throw new Error(`HTTP ${r.status}: ${t.slice(0,200)}`);
+  }
+  return r.json();
+}
+
+async function loadTeacher() {
+  try {
+    const d = await teacherApi("/api/teacher/trades", {cache: "no-store"});
+    document.getElementById("teacher-meta").textContent =
+      "更新时间：" + (d.ts_str || "—");
+    document.getElementById("teacher-stat-total").textContent = d.total;
+    document.getElementById("teacher-stat-settled").textContent = d.settled;
+    document.getElementById("teacher-stat-pending").textContent = d.pending;
+    const netEl = document.getElementById("teacher-stat-net");
+    netEl.textContent = (d.net_usd >= 0 ? "+" : "") + d.net_usd.toFixed(2) + "U";
+    netEl.className = d.net_usd >= 0 ? "pos" : "neg";
+    document.getElementById("teacher-stat-winrate").textContent = d.win_rate;
+    renderTeacherRows(d.trades || []);
+  } catch (e) {
+    document.getElementById("teacher-rows").innerHTML =
+      `<tr><td colspan="8" class="empty">加载失败：${e.message}</td></tr>`;
+  }
+}
+
+function renderTeacherRows(trades) {
+  const tbody = document.getElementById("teacher-rows");
+  if (!trades.length) {
+    tbody.innerHTML = `<tr><td colspan="8" class="empty">暂无老师直播单</td></tr>`;
+    return;
+  }
+  // 跟后端 build_status_teacher 对齐：net_usd != null 即视为已结算
+  const isOpen = t => {
+    const r = t.result || {};
+    if (r.open === false) return false;
+    if (r.net_usd != null) return false;
+    return true;
+  };
+  // 按 trade_id 倒序（新单在前）
+  const sorted = [...trades].sort((a, b) => (b.trade_id || 0) - (a.trade_id || 0));
+  tbody.innerHTML = sorted.map(t => {
+    const r = t.result || {};
+    const open = isOpen(t);
+    const net = r.net_usd;
+    const netStr = net == null ? "—" : (net >= 0 ? "+" : "") + net.toFixed(2) + "U";
+    const netClass = net == null ? "" : (net > 0 ? "pos" : (net < 0 ? "neg" : ""));
+    const statusPill = open
+      ? `<span class="pill warn">持仓中</span>`
+      : `<span class="pill ok">已结算</span>`;
+    const opBtn = open
+      ? `<button class="btn close-btn" data-id="${t.trade_id}" style="font-size:12px; padding:4px 10px; border:1px solid var(--border); background:#fff; border-radius:4px; cursor:pointer">平仓</button>`
+      : `<span class="meta">closed</span>`;
+    const sidePill = t.side === "long"
+      ? `<span class="pill ok">多</span>`
+      : `<span class="pill bad">空</span>`;
+    return `<tr>
+      <td>#${t.trade_id}</td>
+      <td><span style="white-space:nowrap">${t.date}</span></td>
+      <td>${sidePill}</td>
+      <td class="num">${(+t.entry_zone).toFixed(1)}</td>
+      <td class="num">${t.tp1 == null ? "—" : (+t.tp1).toFixed(1)}</td>
+      <td>${statusPill}</td>
+      <td class="num ${netClass}">${netStr}</td>
+      <td>${opBtn}</td>
+    </tr>`;
+  }).join("");
+
+  // 绑定平仓按钮
+  tbody.querySelectorAll(".close-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const id = btn.dataset.id;
+      promptCloseTeacher(id);
+    });
+  });
+}
+
+function promptCloseTeacher(tradeId) {
+  const px = prompt(`给 trade_id=${tradeId} 的剩余仓位设平仓价（数字）：`, "0");
+  if (px === null) return;
+  const net = prompt("净利 USD（正数=盈利，负数=亏损，0=保本）：", "0");
+  if (net === null) return;
+  const note = prompt("备注（可空）：", "网页端平仓") || "";
+  teacherApi(`/api/teacher/trades/${tradeId}/events`, {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({
+      type: "remaining_close",
+      px: parseFloat(px),
+      net_usd: parseFloat(net),
+      note: note,
+    }),
+  }).then(() => {
+    loadTeacher();
+  }).catch(e => alert("平仓失败：" + e.message));
+}
+
+// 录入表单交互
+document.getElementById("teacher-toggle-form").addEventListener("click", () => {
+  const form = document.getElementById("teacher-form");
+  form.style.display = form.style.display === "none" ? "block" : "none";
+  if (form.style.display === "block") {
+    // 默认日期 = 现在
+    const now = new Date();
+    const pad = n => String(n).padStart(2, "0");
+    document.getElementById("tf-date").value =
+      `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
+  }
+});
+document.getElementById("teacher-refresh").addEventListener("click", loadTeacher);
+document.getElementById("tf-cancel").addEventListener("click", () => {
+  document.getElementById("teacher-form").style.display = "none";
+  document.getElementById("tf-msg").textContent = "";
+});
+document.getElementById("tf-submit").addEventListener("click", async () => {
+  const get = id => document.getElementById(id).value.trim();
+  const payload = {
+    date: get("tf-date"),
+    contract: get("tf-contract") || "BTC_USDT",
+    side: get("tf-side"),
+    entry_zone: parseFloat(get("tf-entry")),
+    tp1: parseFloat(get("tf-tp1")),
+    tp2: get("tf-tp2") ? parseFloat(get("tf-tp2")) : null,
+    sl_initial: get("tf-sl") ? parseFloat(get("tf-sl")) : null,
+    qty_pct_partial: parseInt(get("tf-qty") || "50"),
+    notional_usd: parseFloat(get("tf-notional") || "5000"),
+    entry_note: get("tf-note"),
+  };
+  const msg = document.getElementById("tf-msg");
+  msg.style.color = "#6b7280";
+  msg.textContent = "提交中…";
+  try {
+    const r = await teacherApi("/api/teacher/trades", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(payload),
+    });
+    if (r.trade_id) {
+      msg.style.color = "#065f46";
+      msg.textContent = `✓ 已创建 trade_id=${r.trade_id}`;
+      // 清空表单（保留合约 + 减仓% + 名义）
+      ["tf-date","tf-entry","tf-tp1","tf-tp2","tf-sl","tf-note"].forEach(id => {
+        document.getElementById(id).value = "";
+      });
+      loadTeacher();
+    } else {
+      throw new Error(r.error || "未知响应");
+    }
+  } catch (e) {
+    msg.style.color = "#991b1b";
+    msg.textContent = "✗ " + e.message;
+  }
+});
 </script>
 </body>
 </html>

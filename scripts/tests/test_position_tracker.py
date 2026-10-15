@@ -650,5 +650,71 @@ class TestAppendEventTestPrefixGuard(unittest.TestCase):
         self.assertIn("DEBUG", data)
 
 
+class TestNotifyCloseNoiseGate(unittest.TestCase):
+    """
+    2026-10-12 回归测试：BE 单触结算若 exit_px 距 entry < 5 点 → 零位移噪音，跳过推送。
+    复现：今晚 23:55:27 误推的 "+3.15U TP1 后保本被打" 卡片（exit_px=entry，零价格位移）。
+    """
+
+    def _make_res(self, outcome, net, exit_px=82930.5):
+        return {
+            "outcome": outcome,
+            "category": "profit",
+            "net_usd": net,
+            "exit_px": exit_px,
+            "exit_ts": 1791734100,
+            "partial_exits": 3,
+        }
+
+    def _run(self, sig, res):
+        """跑 _notify_close，mock push_telegram + load_token/chat"""
+        with patch("position_tracker.push_telegram") as mock_push, \
+             patch("position_tracker.load_token", return_value="fake"), \
+             patch("position_tracker.load_chat", return_value="fake"):
+            pt._notify_close(sig, res)
+        return mock_push
+
+    def test_be_stopped_zero_displacement_gets_skipped(self):
+        """今晚错卡：exit_px=entry=82930.5, 距 entry < 5 点 → 跳过噪音门"""
+        sig = {"id": "BTC_USDT-test-long", "side": "long", "entry": 82930.5,
+               "tp1": 83328.6, "tp2": 83776.4}
+        res = self._make_res("BE_STOPPED", 3.15, exit_px=82930.5)
+        mock_push = self._run(sig, res)
+        mock_push.assert_not_called()
+
+    def test_be_stopped_small_displacement_4pips_skipped(self):
+        """exit_px 距 entry 4 点 → 仍在零位移范围内（< 5 点），跳过"""
+        sig = {"id": "BTC_USDT-test-long", "side": "long", "entry": 82930.5,
+               "tp1": 83328.6, "tp2": 83776.4}
+        res = self._make_res("BE_STOPPED", 3.5, exit_px=82934.0)
+        mock_push = self._run(sig, res)
+        mock_push.assert_not_called()
+
+    def test_be_stopped_real_displacement_pushed(self):
+        """真 BE 价格位移 ≥ 5 点 → 推送（不能误伤真实 BE 止盈出场）"""
+        sig = {"id": "BTC_USDT-test-long", "side": "long", "entry": 82930.5,
+               "tp1": 83328.6, "tp2": 83776.4}
+        # exit_px=82920 → 距 entry 10.5 点 > 5 → 真位移 BE，仍应推
+        res = self._make_res("BE_STOPPED", -10.0, exit_px=82920.0)
+        mock_push = self._run(sig, res)
+        mock_push.assert_called_once()
+
+    def test_sl_stopped_always_pushed(self):
+        """SL_STOPPED 不在零位移门范围（亏损可能很大），永远推送"""
+        sig = {"id": "BTC_USDT-test-long", "side": "long", "entry": 82930.5,
+               "tp1": 83328.6, "tp2": 83776.4}
+        res = self._make_res("SL_STOPPED", -25.0, exit_px=82930.5)  # 即便 exit_px=entry
+        mock_push = self._run(sig, res)
+        mock_push.assert_called_once()
+
+    def test_tp2_done_always_pushed_regardless(self):
+        """TP2_DONE 不在噪音门范围 → 永远推"""
+        sig = {"id": "BTC_USDT-test-long", "side": "long", "entry": 82930.5,
+               "tp1": 83328.6, "tp2": 83776.4}
+        res = self._make_res("TP2_DONE", 37.16, exit_px=83776.4)
+        mock_push = self._run(sig, res)
+        mock_push.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

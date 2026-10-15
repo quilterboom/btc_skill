@@ -133,9 +133,28 @@ def _write_cache(path: str, rows: List[List]) -> None:
     """原子写：先写 .tmp 再 replace，避免中断导致缓存文件损坏"""
     os.makedirs(DATA_DIR, exist_ok=True)
     tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(rows, f)
-    os.replace(tmp, path)
+    # 2026-10-12 防御：第一次写前先清理可能残留的 .tmp（SIGKILL / 重启 / 磁盘满 会留）
+    if os.path.exists(tmp):
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+    try:
+        with open(tmp, "w") as f:
+            json.dump(rows, f)
+        os.replace(tmp, path)
+    except OSError as e:
+        # 写缓存失败不应该阻塞调用方（cache=次要，主链路从网络拿）
+        # 关键是清理掉 tmp 防止下次启动时残留导致 os.replace 失败
+        try:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+        except OSError:
+            pass
+        # 只在 verbose 时输出（避免刷屏）
+        import sys as _sys
+        print(f"[gate_fetch] _write_cache 失败 {os.path.basename(path)}: {e}",
+              file=_sys.stderr)
 
 
 def _read_cache(path: str) -> List[List]:

@@ -11,6 +11,7 @@ watch 包入口
   - volume        VolumeWatcher（1m 量能突增）
   - rsi           RsiWatcher（RSI 越界）
   - settler       持仓结算线程（每 5s 巡检）
+  - promoter      preview_pending 自动 promote 线程（每 1s 巡检，2026-10-15 加）
   - runner        emit_scan + fire + run + daemonize + main
 
 对外兼容：
@@ -25,6 +26,7 @@ from .volume import VolumeWatcher
 from .rsi import RsiWatcher
 from .jump import JumpTracker
 from .settler import settler_loop
+from .promoter import promoter_loop, start_promoter
 from .journal_ops import invalidate_other_pending, find_active
 
 # 兼容：position_tracker.py 早期 import "from watch import _load_tg_token" 等。
@@ -47,6 +49,7 @@ __all__ = [
     "log", "OK", "NO", "WARN",
     "HERE", "SCAN", "LOG", "PID", "ALERT_DIR", "STALE_SEC", "DATA_DIR",
     "VolumeWatcher", "RsiWatcher", "JumpTracker", "settler_loop",
+    "promoter_loop", "start_promoter",
     "invalidate_other_pending", "find_active",
     "_load_tg_token", "_load_tg_chat", "push_telegram", "format_tg_card",
 ]

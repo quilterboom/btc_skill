@@ -197,23 +197,22 @@ def log_signal(contract: str, last: float, side: str, score: int, core_ok: bool,
         "preview_until_ts": preview_until_ts,
     }
     if recs:
-        # 2026-10-11 修复：优先检查同方向是否有 pending 持仓（filled=true）
-        # 问题：cooldown 判定在前，导致有持仓时仍走"刷新"逻辑，不阻止新单
-        # 修复：先检查持仓，再检查 cooldown
+        # 2026-10-12 修 #1：持仓守卫从「pending + filled=True」放宽到「preview_pending / pending 都拦」
+        #   痛点：12:55 upsert 时 1791692114 状态 = pending + filled=False（已 promote 但未成交），
+        #         旧守卫只拦 filled=True → 漏掉 → 落双胞胎 1791695718
+        #   修复：preview_pending（已挂单未到期）+ pending（已 promote 不论是否 fill）都视为持仓
         for r in recs:
             if (r.get("contract") == contract and r.get("side") == side
-                    and r.get("status") == "pending"
-                    and r.get("filled", False)):
-                # 同方向有 pending 持仓，阻止新单
-                print(f"[journal] 同方向有 pending 持仓，阻止新单: "
+                    and r.get("status") in ("pending", "preview_pending")):
+                print(f"[journal] 同方向有 {r.get('status')} 持仓，阻止新单: "
                       f"id={r.get('id')}  entry={r.get('entry')}  filled={r.get('filled')}")
                 return "blocked_same_side_holding"
-        
+
         p = recs[-1]
-        # 冷却匹配同样适用于 preview_pending (同一信号前后两次刷新都在冷却内)
+        # 修 #2：冷却边界 `<` → `<=`，避免恰好 1h 后同一形态又触发 fresh append
         if (p.get("contract") == contract and p.get("side") == side
                 and p.get("status") in ("pending", "preview_pending")
-                and now - int(p.get("ts", 0)) < COOLDOWN):
+                and now - int(p.get("ts", 0)) <= COOLDOWN):
             keep_id, keep_ts = p.get("id"), p.get("ts")
             p.update(fresh)
             p["id"], p["ts"] = keep_id, keep_ts
