@@ -63,6 +63,8 @@ V2_SLTB_RULES = {
     "lev": 100,                   # 100x（跟实盘一致）
     "taker_fee_usd": 4.85,        # taker 手续费
     "cooldown_secs": 1800,        # 30min cooldown（同向持仓）
+    "min_contracts": 1,           # 2026-10-15 加：仓位数下限 (50U×100x / 0.0001 = 0.5 张
+                                  #   int() 抹零变 0 张 → gross=0 → 净亏只有手续费；不真实)
 }
 
 QUANT_MULT = 0.0001  # 1 张 = 0.0001 BTC
@@ -204,11 +206,16 @@ def open_v2_position(decision: dict) -> dict | None:
         tp1 = px * (1 - tp1_pct)
         tp2 = px * (1 - tp2_pct)
 
-    # 仓位：50U × 100x = 5000U 名义
+    # 仓位：跟生产 position_tracker._contracts() 一致
+    # 名义 = bal × lev = 5000U；张数 = max(1, round(notional / (entry × QUANT_MULT)))
+    # 例如 entry=83330: 5000 / (83330 * 0.0001) = 5000 / 8.333 ≈ 600 张
+    # 2026-10-15 修：原来直接 int(notional * QUANT_MULT) 是错的（notional 跟 QUANT_MULT 单位错配），
+    # 得出来 0 张，gross=0，每单净亏只剩手续费。同步生产算法 + 加 min_contracts 下限。
     bal = V2_SLTB_RULES["bal"]
     lev = V2_SLTB_RULES["lev"]
     notional = bal * lev
-    contracts = int(notional * QUANT_MULT)  # 1 张 = 0.0001 BTC
+    contracts_raw = int(round(notional / (px * QUANT_MULT)))
+    contracts = max(V2_SLTB_RULES.get("min_contracts", 1), contracts_raw)
 
     sig_id = f"v2-{decision_id}-{bias}"
     sig = {
@@ -219,6 +226,8 @@ def open_v2_position(decision: dict) -> dict | None:
         "verdict": f"v2.1 触发 ({decision.get('consensus', '?')}, norm={decision['norm']:.3f})",
         "signal_source": "v2_aggregate",
         "decision_id": decision_id,
+        "contracts": contracts,           # 2026-10-15 加：之前漏写 → settler fallback 算回 0 张
+        "notional_usd": notional,
         "score": 0,
         "core_ok": False,
         "entry": px,
