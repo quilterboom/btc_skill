@@ -17,6 +17,7 @@ from __future__ import annotations
 import os, sys, json, time, glob, subprocess
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
+from typing import Optional, Tuple
 
 # 让 scripts/ 下的模块能 import
 SKILL_ROOT = Path(__file__).resolve().parent.parent
@@ -721,7 +722,8 @@ def teacher_add_trade(payload: dict) -> tuple[int, dict]:
 
 def teacher_add_event(trade_id: int, payload: dict) -> tuple[int, dict]:
     """追加事件（TP1 减仓 / 打保本 / 手动平）
-    payload 字段：type, px, qty_pct, note
+    payload 字段：type, px, qty_pct, note, [net_usd]
+    net_usd 不传则 server 根据 events 自动算（2026-10-15 加）
     """
     ev_type = payload.get("type")
     if ev_type not in ("tp1_partial", "remaining_close", "remaining_pending"):
@@ -747,7 +749,16 @@ def teacher_add_event(trade_id: int, payload: dict) -> tuple[int, dict]:
             if ev_type in ("remaining_close", "tp1_partial"):
                 net_usd_input = payload.get("net_usd")
                 if net_usd_input is not None:
+                    # 用户显式传入 → 信任（优先于自动算）
                     t["result"]["net_usd"] = float(net_usd_input)
+                else:
+                    # 2026-10-15 加：自动按生产公式算 PnL
+                    # 生产公式：contracts = round(notional / (entry * QUANT_MULT))
+                    # partial gross = (tp1_px - entry) × partial_contracts × QUANT_MULT
+                    # remaining gross 视 remaining_close 价 vs entry
+                    auto_net = _compute_trade_net_usd(t)
+                    if auto_net is not None:
+                        t["result"]["net_usd"] = round(auto_net, 2)
                 if ev_type == "remaining_close":
                     t["result"]["open"] = False
                     t["result"]["outcome"] = payload.get("outcome") or "盈利（TP1 + 保本/手动平）"
@@ -762,6 +773,81 @@ def teacher_add_event(trade_id: int, payload: dict) -> tuple[int, dict]:
             return 200, {"trade_id": trade_id, "status": t["result"].get("open"), "events_count": len(t["events"])}
 
     return 404, {"error": f"trade_id {trade_id} not found"}
+
+
+# 2026-10-15 加：teacher_trades 自动算 PnL（跟生产 position_tracker 同公式）
+# 常量（与 position_tracker.py 保持一致）
+_TEACHER_QUANT_MULT = 0.0001        # 1 张 = 0.0001 BTC
+_TEACHER_FEE_USD = 4.85             # taker 往返收费
+
+
+def _compute_trade_net_usd(t: dict) -> Optional[float]:
+    """
+    根据 trade 完整 events 数组算 net_usd：
+      contracts = round(notional / (entry * QUANT_MULT))
+      partial gross = (tp1_px - entry) × partial_contracts × QUANT_MULT
+      remaining gross = (remaining_px - entry) × remaining_contracts × QUANT_MULT
+      fee = 4.85U（全程一笔，无论 tp1 partial + remaining close）
+      net = total_gross - fee
+
+    长/短方向：用 trade.side。
+    return None 当 events 不完整（缺 entry 或两个减仓事件都没）。
+    """
+    side = t.get("side")
+    entry = t.get("fill_price") or t.get("entry_zone")
+    notional = t.get("notional_usd") or 5000
+    if not entry or not side or side not in ("long", "short"):
+        return None
+    # 区间成交（如 '82400-82600'）或非数值 → 自动算不出来，跳过返回 None 由用户手填
+    if not isinstance(entry, (int, float)):
+        return None
+    if not isinstance(notional, (int, float)):
+        return None
+
+    evs = t.get("events") or []
+    if not evs:
+        return None
+
+    contracts = round(notional / (entry * _TEACHER_QUANT_MULT))
+
+    # 平仓事件类型（2026-10-15 起包含历史别名：sl_breakeven = remaining_close, tp2_full = remaining_close）
+    _CLOSE_TYPES = {"tp1_partial", "remaining_close", "remaining_pending", "sl_breakeven", "tp2_full"}
+
+    total_gross = 0.0
+    consumed_pct = 0
+    for ev in evs:
+        et = ev.get("type")
+        ep = ev.get("px")
+        qp = ev.get("qty_pct")
+        if et == "entry":
+            continue
+        if ep is None:
+            continue
+        # 旧数据可能没 qty_pct，按 consumed_pct 推断
+        if qp is None:
+            qp = 100 - consumed_pct
+        qty_pct = int(qp)
+        # 防御：单仓位合约只能分一次。同一 type 重复触发只算第一条
+        # 比如 remaining_pending + remaining_close 都是 same 仓位 (30%)，
+        # 那只看首次出现
+        if et in _CLOSE_TYPES:
+            ev_contracts = contracts * qty_pct / 100.0
+            if side == "long":
+                leg_gross = (ep - entry) * ev_contracts * _TEACHER_QUANT_MULT
+            else:
+                leg_gross = (entry - ep) * ev_contracts * _TEACHER_QUANT_MULT
+            # 防 trade 7 模式：remaining_pending 不计 gross（持仓还没出，仅注记 pending → 仓位已被 tp1 partial 扣完）
+            if et == "remaining_pending":
+                consumed_pct += qty_pct  # 仅更新"已被分配"，不算 gross
+                continue
+            total_gross += leg_gross
+            consumed_pct += qty_pct
+
+    if consumed_pct == 0:
+        return None
+
+    net = total_gross - _TEACHER_FEE_USD
+    return round(net, 2)
 
 
 # ============================ HTTP ============================
