@@ -21,10 +21,14 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 import urllib.parse
 import urllib.request
 from typing import Any, Dict, List, Optional
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import kline_store  # noqa: E402  单文件 K 线存储层
 
 BASE = "https://api.gateio.ws/api/v4"
 # 备用域名（主域名不通时切换）
@@ -109,7 +113,24 @@ def fetch_public(path: str, params: Optional[Dict] = None, base: str = BASE, ret
 
 
 def _cache_path(contract: str, interval: str, total: int) -> str:
-    return os.path.join(DATA_DIR, f"{contract}_{interval}_{total}.json")
+    """
+    单文件存储后的「路径」已无实际意义（一个合约一个文件）。
+
+    保留这个函数是因为大量调用点（cache_freshness / update_all / __main__ /
+    update_data.py）依赖它的签名。真实读写走 kline_store。
+    """
+    return kline_store.store_path(DATA_DIR, contract)
+
+
+def _load_interval(contract: str, interval: str) -> List[List]:
+    """读某周期已存的全部 K 线（升序）。深度在 kline_store 里跟踪。"""
+    rows, _depth = kline_store.load_bars(DATA_DIR, contract, interval)
+    return rows
+
+
+def _store_interval(contract: str, interval: str, rows: List[List]) -> None:
+    """写某周期。kline_store 内部保证「就深不就浅」，浅请求不会截断深缓存。"""
+    kline_store.save_bars(DATA_DIR, contract, interval, rows)
 
 
 def _pack(raw: List[Dict]) -> Dict[int, List]:
@@ -220,6 +241,11 @@ def fetch_ohlcv(
       缓存太旧出现缺口        → 自动降级为全量重拉
       cache=False             → 不用缓存，直接拉实时（每周期 1 次请求）
 
+    **单文件存储（2026-10-21）**：缓存不再是 `{interval}_{total}.json`，
+    而是 `BTC_USDT_klines.json` 里按周期分桶。请求 `total` 只决定**返回**
+    多少根，不再决定存哪个文件——存最深的一份，浅请求从最深的里切。
+    因此 `total=500` 与 `total=8000` 共用一份 1m 缓存，互不截断。
+
     :param contract: 合约名，如 BTC_USDT（USDT 本位永续）
     :param interval: 10s/1m/5m/15m/30m/1h/4h/8h/1d/...
     :param total:    需要多少根（滚动窗口，只保留最新 total 根）
@@ -230,19 +256,28 @@ def fetch_ohlcv(
         raise ValueError(f"不支持的周期: {interval}")
     step = INTERVAL_SEC[interval]
 
-    cpath = _cache_path(contract, interval, total)
-    old = _read_cache(cpath) if cache else []
+    old = _load_interval(contract, interval) if cache else []
     old.sort(key=lambda r: r[0])
     old_last = old[-1][0] if old else None
+    stored_depth = len(old)
 
     if not cache:
         out = _download_full(contract, interval, total, end_ts, verbose)
         added = len(out)
+    elif end_ts is not None and end_ts < int(time.time()):
+        # ★ 2026-10-23 修复：显式指定历史 end_ts 时，缓存路径此前**完全忽略 end_ts**
+        #   （增量更新固定用 to=time.time()）→ 所有历史回放调用方拿到的都是最新数据。
+        #   实测 compute_atr_pct(ts=3小时前) 返回的是最新 K 线，ATR 算错。
+        #   现在 end_ts 走 _download_full 分页回溯。
+        out = _download_full(contract, interval, total, end_ts, verbose)
+        added = len(out)
+        if verbose:
+            print(f"  [{interval}] 历史回溯 (end_ts={end_ts}) 拉取 {added} 根")
     elif not old:
         out = _download_full(contract, interval, total, end_ts, verbose)
         added = len(out)
         if verbose:
-            print(f"  [{interval}] 首次全量拉取 {added} 根 → {cpath}")
+            print(f"  [{interval}] 首次全量拉取 {added} 根")
     elif not refresh:
         out = {r[0]: r for r in old}
         added = 0
@@ -250,7 +285,9 @@ def fetch_ohlcv(
             print(f"  [{interval}] 离线模式，沿用缓存 {len(out)} 根")
     else:
         # ---- 增量更新：只拉最新一页，合并去重 ----
-        n_fetch = min(1000, max(total, 1))
+        # 拉取量按「本次请求 total」和「已存深度」的较大者取，避免浅请求
+        # 拉回一页就把深缓存的增量判断做窄了（原来每文件独立，现在跨 total 共享）。
+        n_fetch = min(1000, max(total, stored_depth, 1))
         try:
             new = _pack(fetch_public(
                 "/futures/usdt/candlesticks",
@@ -285,10 +322,13 @@ def fetch_ohlcv(
 
     rows = [out[k] for k in sorted(out)]
     rows = _drop_unclosed(rows, step)
-    rows = rows[-total:]                       # 滚动窗口：只保留最新 total 根
+    # 单文件存储：保留**已存深度**与本次请求 total 的较大者写回，
+    # 浅请求才不会把深缓存截断。返回给调用方的仍然只有 total 根。
+    keep = max(total, stored_depth) if cache else total
+    rows = rows[-keep:]
     if cache and rows:
-        _write_cache(cpath, rows)
-    return rows
+        _store_interval(contract, interval, rows)
+    return rows[-total:]
 
 
 def fetch_ohlcv_realtime(
@@ -342,16 +382,21 @@ def fetch_ohlcv_realtime(
 
 
 def cache_freshness(tf_counts: Dict[str, int] = None, contract: str = "BTC_USDT") -> List[Dict]:
-    """查看各周期缓存新鲜度（不联网刷新）"""
+    """查看各周期缓存新鲜度（不联网刷新）
+
+    单文件存储下 `total` 只作为「期望深度」用于提示，实际读的是该周期
+    已存的深度——所以即使 tf_counts 写 20000 而实际只存了 9126 根，
+    这里会如实报 9126 并算 lag，不会误报「缺文件」。
+    """
     tf_counts = tf_counts or {"15m": 8000, "1h": 20000, "4h": 5000, "1d": 1500}
     res = []
     now = int(time.time())
     for tf, total in tf_counts.items():
-        p = _cache_path(contract, tf, total)
-        rows = _read_cache(p)
+        rows, depth = kline_store.load_bars(DATA_DIR, contract, tf)
         if not rows:
-            res.append({"tf": tf, "total": total, "bars": 0, "exists": False,
-                        "last_ts": None, "lag_sec": None, "missing_bars": None})
+            res.append({"tf": tf, "total": total, "bars": 0, "depth": 0,
+                        "exists": False, "last_ts": None, "lag_sec": None,
+                        "missing_bars": None, "short_of_target": total})
             continue
         rows.sort(key=lambda r: r[0])
         step = INTERVAL_SEC[tf]
@@ -359,24 +404,26 @@ def cache_freshness(tf_counts: Dict[str, int] = None, contract: str = "BTC_USDT"
         # 已收盘的最新一根应在 now-step 处
         expected = (now // step) * step - step
         missing = int((expected - last_ts) / step)
-        res.append({"tf": tf, "total": total, "bars": len(rows), "exists": True,
-                    "last_ts": last_ts, "lag_sec": now - (last_ts + step),
-                    "missing_bars": max(0, missing)})
+        res.append({"tf": tf, "total": total, "bars": len(rows), "depth": depth,
+                    "exists": True, "last_ts": last_ts,
+                    "lag_sec": now - (last_ts + step),
+                    "missing_bars": max(0, missing),
+                    "short_of_target": max(0, total - depth)})
     return res
 
 
 def update_all(tf_counts: Dict[str, int] = None, contract: str = "BTC_USDT",
                force: bool = False, verbose: bool = True) -> Dict[str, List]:
-    """批量刷新多个周期；force=True 忽略旧缓存全量重拉"""
+    """批量刷新多个周期；force=True 清掉该周期缓存后全量重拉"""
     tf_counts = tf_counts or {"15m": 8000, "1h": 20000, "4h": 5000, "1d": 1500}
     out = {}
     order = sorted(tf_counts, key=lambda t: INTERVAL_SEC[t])
     for tf in order:
         total = tf_counts[tf]
         if force:
-            p = _cache_path(contract, tf, total)
-            if os.path.exists(p):
-                os.remove(p)
+            # 单文件存储下要删的是「该周期的桶」，不是整个文件——
+            # 删文件会连带干掉其他周期。
+            kline_store.clear_interval(DATA_DIR, contract, tf)
         rows = fetch_ohlcv(contract, tf, total, cache=True, refresh=True, verbose=verbose)
         out[tf] = rows
     return out
@@ -536,9 +583,8 @@ if __name__ == "__main__":
         raise SystemExit(0)
 
     if a.force:
-        p = _cache_path(a.contract, a.interval, a.total)
-        if os.path.exists(p):
-            os.remove(p)
+        # 单文件存储：清掉该周期的桶，不是删整个文件
+        kline_store.clear_interval(DATA_DIR, a.contract, a.interval)
     bars = fetch_ohlcv(a.contract, a.interval, a.total,
                        cache=True, refresh=not a.no_refresh, verbose=True)
     print(f"\n{a.interval} 共 {len(bars)} 根"

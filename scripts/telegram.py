@@ -146,6 +146,14 @@ def push(card: str, token: Optional[str] = None, chat_id: Optional[str] = None) 
         chat_id = load_chat()
     if not token or not chat_id:
         return False
+
+    # 2026-10-17 liusir：训练版和生产版用同一个 chat_id，分不清来源。
+    # 在消息最前面加 [生产] / [训练] 前缀（不影响卡片内部格式）。
+    tag = "🧪 <b>[训练]</b> " if os.environ.get("TRAINING_MODE") == "1" else "🚀 <b>[生产]</b> "
+    if not (card or "").lstrip().startswith("🚀 <b>[生产]</b>") and \
+       not (card or "").lstrip().startswith("🧪 <b>[训练]</b>"):
+        card = tag + (card or "")
+
     try:
         url = f"https://api.telegram.org/bot{token}/sendMessage"
         body = json.dumps({

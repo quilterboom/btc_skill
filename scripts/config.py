@@ -137,7 +137,9 @@ def should_skip_new_signal(contract: str, side: str, new_entry: float,
         if ft is None:
             continue
         age = _now - int(ft)
-        if 0 <= age < same_side_block_sec:
+        # ★ 2026-10-23 边界修正：`<` 不含等于 → 30 分钟整就放行。
+        #   实测训练环境 10-16 19:15 → 19:45 正好 1800s，被 `<` 放行导致重复开仓。
+        if 0 <= age <= same_side_block_sec:
             mins = age // 60
             rid_short = (r.get("id") or "?")[:25]
             reason = (f"{mins} 分钟内已有同方向 fill 单（id={rid_short}），"

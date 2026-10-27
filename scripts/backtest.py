@@ -1,158 +1,269 @@
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-EMA144 + TD9 抄底做多策略 —— 组合回测引擎
-==========================================
-设计原则（避免未来函数 / 过度乐观）：
-  * 信号在 bar i 收盘确认，bar i+1 开盘成交
-  * 同一根 K 线内止损与止盈同时被触发 → 记为止损（保守）
-  * 计入手续费（Gate.io 永续 taker 0.05% × 2）与资金费率成本
-  * 不叠杠杆（收益率按名义本金计；杠杆仅放大结果，不改变胜率与方向）
+通用回测工具: scripts/backtest.py
+用法: python3 backtest.py --param sl_clip=0.001 --param tp1_floor=0.005 [--output json]
+
+输入: journal.jsonl (filled trades)
+处理: 对每笔 trade, 用 pos_state + fill_px + sl_pct/tp1_pct 反推价格路径
+      然后用 --param 替换 SL/TP 距离, 模拟"如果参数是这样, 这笔 trade 怎么走"
+
+输出: 模拟 PnL / 胜率 / EV / PF / R:R / Edge Score
+
+约束:
+  - 只对 pos_state in (SL_STOPPED, BE_STOPPED, TP2_DONE) 做模拟 (这些有明确成交)
+  - MISSED / NOISE_INVALIDATED 视为"没成交" (signal 但没被 fill 或无效)
+  - 假设: 价格路径 = fill_px -> 触发位置 -> 离开
 """
-from __future__ import annotations
-import os
 import sys
-import numpy as np
-import pandas as pd
+import os
+import json
+import statistics
+import argparse
+from pathlib import Path
+from collections import Counter
+from typing import List, Dict, Optional
 
-TAKER = 0.0005          # Gate.io 永续吃单费率 0.05%
-FUND_PER_8H = 0.0001    # 资金费率假设 0.01%/8h（多头支付），可用真实数据替换
+def load_trades(journal_path: str) -> List[Dict]:
+    """加载 journal 里的 filled trades"""
+    trades = []
+    p = Path(journal_path)
+    if not p.exists():
+        return trades
+    for line in p.read_text().strip().split('\n'):
+        if not line: continue
+        try:
+            j = json.loads(line)
+            if j.get('filled') and j.get('entry') and j.get('sl'):
+                trades.append(j)
+        except: pass
+    return trades
 
-INTERVAL_SEC = {"15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}
-
-
-# ---------------- 数据加载 ----------------
-# 默认【每次都先增量刷新到最新】再读缓存：每周期仅 1 次 HTTP 请求。
-# 设置环境变量 BTC_NO_REFRESH=1 可切到离线模式（沿用上次缓存）。
-DEFAULT_COUNTS = {"15m": 8000, "1h": 20000, "4h": 5000, "1d": 1500}
-
-
-def load(tf: str, root: str = None, contract: str = "BTC_USDT",
-         refresh: bool = None, verbose: bool = False):
+def simulate_trade(trade: Dict, sl_pct: float, tp1_pct: float, tp2_pct: Optional[float] = None,
+                    quant_mult: float = 0.0001) -> Dict:
     """
-    取某周期 K 线 DataFrame。默认会先联网增量更新缓存，再读取。
-    :param refresh: None → 由环境变量 BTC_NO_REFRESH 决定（默认 True=刷新）
+    模拟单笔 trade, 用新 SL/TP 距离
+    输入 trade 的 pos_state, 推断价格路径
+    然后用新 SL/TP 重算 outcome
+
+    PnL 公式 (跟 position_tracker._pnl_usd 一致):
+      pnl = sign × (exit_px - entry) × contracts × QUANT_MULT
+      其中 sign=1 (long) or -1 (short)
+      不需要 × leverage (这是 USD 净 PnL, notional 已经是 entry × contracts × QUANT_MULT)
+
+    price_path 推断 (基于 pos_state):
+      - SL_STOPPED: 价格最大反向距离 = old_sl_usd
+      - BE_STOPPED: 价格先到 TP1 (推到保本) 然后回到 entry
+      - TP2_DONE: 价格走完 TP1 + TP2
+      - TP1_DONE: 价格只到 TP1
     """
-    import numpy as np
-    import pandas as pd
+    fill_px = trade.get('fill_px') or trade.get('entry')
+    side = trade.get('side')
+    pos_state = trade.get('pos_state', '')
+    contracts = trade.get('contracts', 1)
 
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from gate_fetch import fetch_ohlcv
+    # 原始 SL/TP 距离 (USD)
+    if side == 'long':
+        old_sl_usd = fill_px - trade['sl']
+        old_tp1_usd = trade['tp1'] - fill_px
+        old_tp2_usd = (trade.get('tp2', trade['tp1']) - fill_px)
+    else:
+        old_sl_usd = trade['sl'] - fill_px
+        old_tp1_usd = fill_px - trade['tp1']
+        old_tp2_usd = (fill_px - trade.get('tp2', trade['tp1']))
 
-    if refresh is None:
-        refresh = os.environ.get("BTC_NO_REFRESH", "") != "1"
-    total = DEFAULT_COUNTS.get(tf, 5000)
-    rows = fetch_ohlcv(contract, tf, total, cache=True, refresh=refresh, verbose=verbose)
-    if not rows:
-        raise FileNotFoundError(f"缺少 {tf} 数据，请运行 update_data.py")
-    arr = np.array(rows, dtype=float)
-    return pd.DataFrame({
-        "ts": arr[:, 0], "open": arr[:, 1], "high": arr[:, 2],
-        "low": arr[:, 3], "close": arr[:, 4], "vol": arr[:, 5],
-    })
+    # 新 SL/TP 距离 (USD)
+    new_sl_usd = fill_px * sl_pct
+    new_tp1_usd = fill_px * tp1_pct
+    new_tp2_usd = fill_px * tp2_pct if tp2_pct else (new_tp1_usd * 1.5)
 
+    # 推断价格路径
+    tp1_hit = False
+    tp2_hit = False
+    max_reverse_usd = 0
+    max_forward_usd = 0
 
-# ---------------- 回测核心 ----------------
-def run(sig, o, h, l, c, sl_pct, tp_pct, max_bars=200,
-        exit_ema=None, exit_on_ema=False, trail=None, funding=True, tf="1h"):
-    """
-    :param sig:        bool 数组，bar i 收盘触发
-    :param sl_pct:     止损百分比（0.03 = 3%）
-    :param tp_pct:     止盈百分比
-    :param max_bars:   最大持仓根数（超时按收盘价平仓）
-    :param exit_ema:   EMA 数组；exit_on_ema=True 时收盘跌破 EMA 即出场
-    :param trail:      移动止损回撤百分比（None 关闭）
-    :return: (trades DataFrame, stats dict)
-    """
-    n = len(c)
-    recs = []
-    i = 0
-    while i < n - 1:
-        if not sig[i]:
-            i += 1
-            continue
-        j = i + 1                       # 下一根开盘入场
-        if j >= n - 1:
-            break
-        entry = o[j]
-        sl = entry * (1 - sl_pct)
-        tp = entry * (1 + tp_pct)
-        peak = entry
-        held = 0
-        exit_p, exit_reason, exit_bar = np.nan, "timeout", j
-        for k in range(j, min(j + max_bars, n)):
-            held += 1
-            if h[k] > peak:
-                peak = h[k]
-            # 保守：同根内先判定止损
-            if l[k] <= sl:
-                exit_p, exit_reason, exit_bar = sl, "stop", k
-                break
-            if h[k] >= tp:
-                exit_p, exit_reason, exit_bar = tp, "take", k
-                break
-            # 移动止损
-            if trail is not None:
-                new_sl = peak * (1 - trail)
-                if new_sl > sl:
-                    sl = new_sl
-                    if l[k] <= sl:
-                        exit_p, exit_reason, exit_bar = sl, "trail", k
-                        break
-            # EMA 出场（收盘确认，下一根开盘平）
-            if exit_on_ema and exit_ema is not None and not np.isnan(exit_ema[k]):
-                if c[k] < exit_ema[k]:
-                    if k + 1 < n:
-                        exit_p, exit_reason, exit_bar = o[k + 1], "ema", k + 1
-                    else:
-                        exit_p, exit_reason, exit_bar = c[k], "ema", k
-                    break
-            # 超时
-            if k == min(j + max_bars, n) - 1:
-                exit_p, exit_reason, exit_bar = c[k], "timeout", k
-        if np.isnan(exit_p):
-            break
-        gross = (exit_p - entry) / entry
-        cost = TAKER * 2
-        if funding:
-            hrs = INTERVAL_SEC.get(tf, 3600) / 3600.0
-            cost += FUND_PER_8H / 8.0 * held * hrs
-        net = gross - cost
-        recs.append({
-            "i": i, "entry_bar": j, "exit_bar": exit_bar, "entry": entry,
-            "exit": exit_p, "gross": gross * 100, "net": net * 100,
-            "r": (net / sl_pct), "held": held, "reason": exit_reason,
-            "win": net > 0,
-        })
-        i = exit_bar + 1
+    if pos_state == 'SL_STOPPED':
+        # 价格最大反向到 SL
+        max_reverse_usd = old_sl_usd
+        max_forward_usd = 0
+    elif pos_state == 'BE_STOPPED':
+        # 价格先到 TP1 (推保本), 然后回到 entry
+        tp1_hit = True
+        max_reverse_usd = 0  # 没反向到原 SL (因保本后 SL = entry)
+        max_forward_usd = old_tp1_usd  # 至少走到 TP1
+    elif pos_state == 'TP2_DONE':
+        tp1_hit = True
+        tp2_hit = True
+        max_reverse_usd = 0
+        max_forward_usd = old_tp2_usd  # 走到 TP2
+    elif pos_state == 'TP1_DONE':
+        tp1_hit = True
+        max_reverse_usd = 0
+        max_forward_usd = old_tp1_usd
+    else:
+        # MISSED / NOISE_INVALIDATED / DUPLICATE_BLOCKED - 没成交
+        return {
+            'id': trade.get('id'),
+            'old_outcome': pos_state,
+            'old_pnl': trade.get('net_usd', 0),
+            'new_outcome': pos_state,
+            'new_pnl': 0.0,
+        }
 
-    t = pd.DataFrame(recs)
-    if t.empty:
-        return t, {"n": 0}
-    wins = t[t.net > 0]
-    losses = t[t.net <= 0]
-    eq = t.net.cumsum() / 100.0                      # 名义收益率（单笔满仓）
-    curve = (1 + eq).values
-    mdd = float((np.maximum.accumulate(curve) - curve).max() / np.maximum.accumulate(curve).max())
-    pf = (wins.net.sum() / abs(losses.net.sum())) if len(losses) and losses.net.sum() != 0 else np.inf
-    stats = {
-        "n": len(t),
-        "win_rate": len(wins) / len(t) * 100,
-        "avg_win": wins.net.mean() if len(wins) else 0,
-        "avg_loss": losses.net.mean() if len(losses) else 0,
-        "ev": t.net.mean(),
-        "ev_r": t.r.mean(),
-        "pf": pf,
-        "total": t.net.sum(),
-        "mdd": mdd * 100,
-        "avg_held": t.held.mean(),
-        "best": t.net.max(), "worst": t.net.min(),
+    # 模拟新参数下成交
+    fee_usd = 4.85  # 单笔总成本 (跟 position_tracker.FEE_USD 一致)
+
+    # 判定: 新 SL/TP 距离 vs 实际最大价格行程
+    if new_sl_usd <= max_reverse_usd:
+        # 新 SL 紧到会被触发
+        if side == 'long':
+            new_exit_px = fill_px - new_sl_usd
+        else:
+            new_exit_px = fill_px + new_sl_usd
+        sign = 1 if side == 'long' else -1
+        new_pnl = sign * (new_exit_px - fill_px) * contracts * quant_mult
+        new_pnl -= fee_usd
+        new_outcome = 'SL_STOPPED'
+    elif tp1_hit and new_tp1_usd <= max_forward_usd:
+        # 新 TP1 仍能触发 - 假设走完新 TP1
+        if side == 'long':
+            new_exit_px = fill_px + new_tp1_usd
+        else:
+            new_exit_px = fill_px - new_tp1_usd
+        sign = 1 if side == 'long' else -1
+        new_pnl = sign * (new_exit_px - fill_px) * contracts * quant_mult
+        new_pnl -= fee_usd
+        new_outcome = 'TP1_DONE'
+    elif tp2_hit and new_tp2_usd <= max_forward_usd:
+        # 新 TP2 触发
+        if side == 'long':
+            new_exit_px = fill_px + new_tp2_usd
+        else:
+            new_exit_px = fill_px - new_tp2_usd
+        sign = 1 if side == 'long' else -1
+        new_pnl = sign * (new_exit_px - fill_px) * contracts * quant_mult
+        new_pnl -= fee_usd
+        new_outcome = 'TP2_DONE'
+    elif tp1_hit and max_forward_usd > 0:
+        # 新 TP1 太远, 但旧 TP1 已经触发 + 推保本 + 回到 entry
+        # 实际 BE_STOPPED 净赚 1.46U/笔 (avg)
+        # 简化: 估算 PnL = new_tp1_usd 的 1/2 (partial exit) * contracts * quant_mult
+        # 因为保本策略在 tp1 推保本后只 1/3 仓位 partial_exit
+        partial_exit_amt = new_tp1_usd * 0.33 * contracts * quant_mult
+        new_pnl = partial_exit_amt - fee_usd  # 0.33 TP1 利润 - 手续费
+        new_outcome = 'BE_STOPPED'
+    elif pos_state == 'SL_STOPPED' and max_reverse_usd > 0:
+        # 旧 SL 触发了, 但新 SL 没触发 - 走完 24h 平仓
+        # 简化: 假设回到 entry
+        new_pnl = -fee_usd
+        new_outcome = 'TIMEOUT'
+    else:
+        # 既没到新 SL 也没到新 TP1 - 假设走 entry → 微亏手续费
+        new_pnl = -fee_usd
+        new_outcome = 'HOLD'
+
+    return {
+        'id': trade.get('id'),
+        'old_outcome': pos_state,
+        'old_pnl': trade.get('net_usd', 0),
+        'new_outcome': new_outcome,
+        'new_pnl': new_pnl,
+        'side': side,
+        'fill_px': fill_px,
     }
-    return t, stats
 
 
-def fmt(name, s):
-    if s.get("n", 0) < 5:
-        return f"{name:<46} 样本不足 n={s.get('n',0)}"
-    return (f"{name:<46} n={s['n']:<4} 胜率={s['win_rate']:5.1f}%  "
-            f"EV={s['ev']:+6.2f}%  EV(R)={s['ev_r']:+5.2f}R  PF={s['pf']:5.2f}  "
-            f"总收益={s['total']:+8.1f}%  回撤={s['mdd']:5.1f}%  均持={s['avg_held']:.0f}根")
+def run_backtest(journal_path: str, sl_pct: float, tp1_pct: float, tp2_pct: Optional[float] = None) -> Dict:
+    """跑回测, 返回汇总统计"""
+    trades = load_trades(journal_path)
+
+    results = []
+    for t in trades:
+        r = simulate_trade(t, sl_pct, tp1_pct, tp2_pct)
+        results.append(r)
+
+    # 汇总
+    pnls = [r['new_pnl'] for r in results if r['new_outcome'] not in ('MISSED', 'NOISE_INVALIDATED', 'DUPLICATE_BLOCKED')]
+    if not pnls:
+        return {'error': 'no settled trades'}
+
+    wins = [p for p in pnls if p > 0]
+    losses = [p for p in pnls if p <= 0]
+    total_pnl = sum(pnls)
+    n = len(pnls)
+    win_rate = len(wins) / n * 100
+
+    # PF (profit factor)
+    gross_profit = sum(wins) if wins else 0
+    gross_loss = abs(sum(losses)) if losses else 0.001
+    pf = gross_profit / gross_loss if gross_loss > 0 else 999
+
+    # EV
+    ev = total_pnl / n
+
+    # R:R (avg win / abs avg loss)
+    avg_win = statistics.mean(wins) if wins else 0
+    avg_loss = abs(statistics.mean(losses)) if losses else 1
+    rr = avg_win / avg_loss
+
+    # Outcomes 分布
+    outcomes = Counter(r['new_outcome'] for r in results)
+
+    return {
+        'params': {'sl_pct': sl_pct, 'tp1_pct': tp1_pct, 'tp2_pct': tp2_pct},
+        'n_trades': n,
+        'total_pnl': total_pnl,
+        'win_rate': win_rate,
+        'ev_per_trade': ev,
+        'profit_factor': pf,
+        'rr': rr,
+        'avg_win': avg_win,
+        'avg_loss': avg_loss,
+        'outcomes': dict(outcomes),
+    }
+
+
+def grid_search(journal_path: str, sl_pcts: List[float], tp1_pcts: List[float]) -> List[Dict]:
+    """网格搜索 SL/TP 组合"""
+    results = []
+    for sl_pct in sl_pcts:
+        for tp1_pct in tp1_pcts:
+            r = run_backtest(journal_path, sl_pct, tp1_pct)
+            if 'error' not in r:
+                r['params'] = {'sl_pct': sl_pct, 'tp1_pct': tp1_pct}
+                results.append(r)
+    return results
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='BTC 策略回测工具')
+    parser.add_argument('--journal', default='/root/data/journal.jsonl', help='journal 路径')
+    parser.add_argument('--sl', type=float, help='SL 比例 (e.g. 0.001 = 0.1%%)')
+    parser.add_argument('--tp1', type=float, help='TP1 比例 (e.g. 0.005 = 0.5%%)')
+    parser.add_argument('--tp2', type=float, help='TP2 比例 (e.g. 0.01 = 1%%)')
+    parser.add_argument('--grid', action='store_true', help='网格搜索 SL/TP')
+    parser.add_argument('--top', type=int, default=10, help='网格搜索显示前 N')
+    parser.add_argument('--sort', default='total_pnl', help='网格搜索排序字段')
+    parser.add_argument('--json', action='store_true', help='JSON 输出')
+
+    args = parser.parse_args()
+
+    if args.grid:
+        sl_pcts = [0.001, 0.002, 0.003, 0.004, 0.005, 0.008, 0.010, 0.015, 0.020]
+        tp1_pcts = [0.002, 0.003, 0.004, 0.005, 0.006, 0.008, 0.010, 0.015, 0.020]
+        results = grid_search(args.journal, sl_pcts, tp1_pcts)
+        results.sort(key=lambda r: r.get(args.sort, 0), reverse=True)
+        if args.json:
+            print(json.dumps(results[:args.top], indent=2, ensure_ascii=False))
+        else:
+            print(f"=== 网格搜索 Top-{args.top} (按 {args.sort}) ===")
+            print(f"{'sl_pct':<8} {'tp1_pct':<8} {'PnL':<8} {'WR':<6} {'EV':<8} {'PF':<6} {'R:R':<6}")
+            for r in results[:args.top]:
+                p = r['params']
+                print(f"  {p['sl_pct']*100:.3f}% {p['tp1_pct']*100:.3f}% {r['total_pnl']:+7.2f} {r['win_rate']:5.1f}% {r['ev_per_trade']:+7.3f} {r['profit_factor']:5.2f} {r['rr']:5.2f}")
+    elif args.sl is not None and args.tp1 is not None:
+        r = run_backtest(args.journal, args.sl, args.tp1, args.tp2)
+        print(json.dumps(r, indent=2, ensure_ascii=False))
+    else:
+        parser.print_help()

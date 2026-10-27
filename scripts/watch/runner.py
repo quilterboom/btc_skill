@@ -18,6 +18,8 @@ from .volume import VolumeWatcher
 from .rsi import RsiWatcher
 from .settler import start_settler
 from .promoter import start_promoter
+from .risk_guard import start_risk_guard
+from .hammer_watcher import start_hammer_watcher
 
 
 # ============================ 触发 ============================
@@ -224,12 +226,17 @@ def fire_periodic(w: VolumeWatcher) -> None:
     # 实盘版（不带 --training）完全跳过此块，0 干扰
     if os.environ.get("TRAINING_MODE") == "1":
         try:
+            # ★ 2026-10-23 修复：settle_v2_all 必须**每轮都跑**，不能只在有新判定时跑。
+            #   原 bug：settle 在 `if decision.triggered` 内 → 没有新信号时旧仓永远不平。
+            #   实测：3 笔单卡 pending 23.6 小时（entry 81307.8 / 81073.3 / 81311.5），
+            #         手动跑一次 settle 全部平掉（+60.43U）。
+            #   顺序：先 settle 旧仓 → cooldown 判定才看得到已平仓 → 再决定开新仓。
+            from v2_journal import open_v2_position, settle_v2_all
+            settle_v2_all()
             decision = _run_v2_decision_for_training(w.contract)
             if decision and decision.get("triggered"):
                 # ★ 2026-10-14 liusir 拍板：v2.1 自己探索 SL/TP + 回填历史
-                from v2_journal import open_v2_position, settle_v2_all
                 open_v2_position(decision)
-                settle_v2_all()
         except Exception as e:
             log(f"{WARN} v2 训练判定异常: {e}")
 
@@ -530,6 +537,12 @@ def run(w: VolumeWatcher, rw: Optional[RsiWatcher] = None) -> None:
     threading.Thread(target=ws_loop, daemon=True).start()
     # Settler（持仓结算）线程
     start_settler()
+    # RiskGuard（实时风控）线程，2026-10-17 加：liusir 决策"行情不按预期走立即减半推保本"
+    start_risk_guard()
+    # HammerWatcher（抄底反弹秒级监测直接进），2026-10-18 加：liusir 决策"挂单进不了，直接进"
+    #   - 每秒 poll ticker，hammer 触发后 2min 内涨过阈值 → 市价进
+    #   - 必须先于 promoter 标 preview_pending 的过期 promote 到 pending，否则 race condition
+    start_hammer_watcher()
     # Promoter（preview_pending → pending 自动 promote）线程，2026-10-15 加
     # 替代原"每 15min 周期检查顺手扫"的 14.6min 延迟
     contract = w.contract
@@ -597,6 +610,8 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--cooldown", type=float, default=1800.0,
                     help="触发冷却秒（默认1800=30分钟，这是主要限流阀）")
     ap.add_argument("--target", type=float, default=500.0, help="传给 scan 的目标点数")
+    ap.add_argument("--strategy-version", default="v1_prod", choices=["v1_prod", "v2_test"],
+                    help="传给 scan.py 的策略版本 (v1_prod=默认, v2_test=C 方案回测). 仅训练 watch 启用 v2_test.")
     ap.add_argument("--no-scan", action="store_true", help="只告警，不调用 scan.py")
     ap.add_argument("--rsi-tf", default="1h",
                     help="RSI 判定周期（固定默认 1h：以 1 小时数据为准；可选 15m/4h）")
@@ -729,6 +744,15 @@ def main() -> int:
         os.environ["BTC_DATA_DIR"] = "/root/data/training"
         extra += ["--training"]
         print(f"[training] 训练环境模式启用，journal + 数据隔离到 /root/data/training/")
+
+    # 2026-10-19 透传策略版本给 scan.py (C 方案回测用)
+    if a.strategy_version and a.strategy_version != "v1_prod":
+        os.environ["STRATEGY_VERSION"] = a.strategy_version
+        extra += ["--strategy-version", a.strategy_version]
+        # ★ 2026-10-26 改 print → log：watch 是后台进程，裸 print 的 stdout
+        #   不落 watch.log（只有 log() 才写文件），导致「策略版本已启用」这条
+        #   启动信息在日志里查不到 → 排查「v2_test 有没有真的生效」时无从下手。
+        log(f"[strategy] 策略版本 {a.strategy_version} 已启用 (透传 scan.py)")
 
     if a.cmd == "stop":
         return cmd_stop()

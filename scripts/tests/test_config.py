@@ -175,8 +175,19 @@ class TestShouldSkipTimeWindow(unittest.TestCase):
         self.assertIn("10", reason)        # 包含分钟数
         self.assertIn("同方向", reason)
 
-    def test_older_same_side_fill_falls_back_to_distance(self):
-        """3h 前的同方向 filled → 不被时间窗口拦截，走原有距离判定（距离 > 500 应通过）"""
+    def test_older_same_side_fill_still_blocked_while_pending(self):
+        """3h 前的同方向 filled **仍然必拒** —— 只要它还挂在 pending 持仓里。
+
+        ★ 2026-10-26 修正断言方向：原断言是「3h 前 + 距离 > 500 → 应通过」，
+        但 config.should_skip_new_signal 在 2026-10-11 加了一条更严的规则：
+        「同方向有 pending + filled=true 持仓时，**不管时间窗**都跳过，
+        等当前持仓平仓后再开新单」。
+        原断言停在「时间窗过期就回落距离判定」的旧语义，没跟上这条改动。
+
+        语义确认：这条更严的规则是**故意的**（防同方向堆叠持仓），
+        且与 v2_journal 的 cooldown 口径一致（10-23 同步过）。
+        测试改为断言新语义，并补一条「已平仓后可以开新单」的反向验证。
+        """
         path = self._write_journal([
             {"contract": "BTC_USDT", "side": "long", "status": "pending",
              "filled": True, "entry": 85000.0, "fill_ts": NOW - 10800,   # 3 小时前
@@ -184,7 +195,19 @@ class TestShouldSkipTimeWindow(unittest.TestCase):
         ])
         skip, reason = config.should_skip_new_signal(
             "BTC_USDT", "long", 89000.0, min_dist_pts=500, journal_path=path)
-        self.assertFalse(skip, f"应通过（3h 前 + 距离 > 500）：实际 reason={reason!r}")
+        self.assertTrue(skip, "3h 前的同方向 pending 持仓仍在，必须挡住新单")
+        self.assertIn("pending 持仓", reason)
+
+    def test_settled_same_side_allows_new_signal(self):
+        """反向验证：同方向那笔**已平仓**（status=settled）→ 不再挡新单。"""
+        path = self._write_journal([
+            {"contract": "BTC_USDT", "side": "long", "status": "settled",
+             "filled": True, "entry": 85000.0, "fill_ts": NOW - 10800,
+             "sl": 84320, "tp1": 85400, "tp2": 85600, "id": "BTC_USDT-OLD-long"},
+        ])
+        skip, reason = config.should_skip_new_signal(
+            "BTC_USDT", "long", 89000.0, min_dist_pts=500, journal_path=path)
+        self.assertFalse(skip, f"已平仓不该挡新单：实际 reason={reason!r}")
 
     def test_recent_same_side_fill_close_distance_still_blocked(self):
         """窗口内同方向 + entry 距离近 → 也被时间窗口拦（不依赖距离兜底）"""

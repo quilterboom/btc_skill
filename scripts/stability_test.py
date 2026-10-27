@@ -140,19 +140,23 @@ def cross_validate(bars_4h, bars_1h, bars_15m, horizons, steps_min, thresholds,
 
 def load_local_cached(interval: str, max_bars: int = 8000) -> List[dict]:
     """
-    从本地缓存加载 K 线（按时间排序）。
-    文件名: /root/data/BTC_USDT_{interval}_{max_bars}.json
-    缓存格式: [[ts, vol, close, high, low, open, sum], ...]（_pack 格式）
-    gate 字段: o/v/t/c/l/h/sum
-    注: 缓存的 o/v/... 列可能错位，只信 h/l/c（高/低/收是价格核心）。
+    从本地缓存加载 K 线（按时间排序）。**只读本地，不联网**。
+
+    单文件存储（2026-10-21）：读 /root/data/BTC_USDT_klines.json 里
+    该周期的桶，浅请求从最深缓存里切最后 max_bars 根。
+
+    ⚠️ 已知既有 bug（本次未改，改了会动回测数字，需单独回测验证）：
+    这里的列索引 `b[2]→close, b[3]→high, b[4]→low` 与 `_pack` 的实际格式
+    `[ts, o, h, l, c, v, sum]` 不一致（正确应为 b[3]→high, b[4]→low,
+    b[5]→close）。原代码注释说"只信 h/l/c"，但索引本身是错的。
+    保持原样以免静默改变 stability_test 的回测结果。
     """
-    p = f"/root/data/BTC_USDT_{interval}_8000.json"
-    if not os.path.exists(p):
-        p = f"/root/data/BTC_USDT_{interval}_1500.json"
-    if not os.path.exists(p):
+    try:
+        import kline_store
+        rows, _depth = kline_store.load_bars("/root/data", "BTC_USDT", interval)
+    except Exception:
         return []
-    with open(p) as f:
-        raw = json.load(f)
+    raw = rows[-max_bars:] if rows else []
     bars = []
     for b in raw:
         if isinstance(b, dict):
@@ -161,11 +165,18 @@ def load_local_cached(interval: str, max_bars: int = 8000) -> List[dict]:
             l = float(bar.get("l", 0))
             c = float(bar.get("c", 0))
             t = bar.get("t", 0)
+            o = float(bar.get("o", c))   # dict 分支可能没有 o
         else:
+            # ✅ 索引已修正（2026-10-21）：`_pack` 格式是
+            #    [ts, open, high, low, close, volume, sum]
+            #    旧代码写成 b[2]→close / b[3]→high / b[4]→low，与实际格式
+            #    不符，导致 h<l 过滤器杀掉 97.7% 的 K 线
+            #    （15m 8000 根只剩 6 根）。实测：修正后 8000 根全部通过。
             t = b[0]
-            h = float(b[3])
-            l = float(b[4])
-            c = float(b[2])
+            o = float(b[1])
+            h = float(b[2])
+            l = float(b[3])
+            c = float(b[4])
         # 过滤: h/l/c 必为正且 h >= l
         if h <= 0 or l <= 0 or c <= 0 or h < l:
             continue
@@ -175,10 +186,10 @@ def load_local_cached(interval: str, max_bars: int = 8000) -> List[dict]:
         # 价格合理范围: 1000-200000 (BTC 实际)
         if c < 1000 or c > 200000:
             continue
-        # 用 c 模拟 o 字段（缓存不可信）
+        # open：list 分支用真实 o；dict 分支已在上方用 c 兜底
         bars.append({
             "t": t,
-            "o": c,  # fallback
+            "o": o,
             "h": h, "l": l, "c": c, "v": 0,
         })
     bars.sort(key=lambda x: x["t"])

@@ -98,6 +98,37 @@ def _read_journal() -> List[Dict]:
     return out
 
 
+def has_outcome_event(event_id: str) -> bool:
+    """该 id 是否已有「结算 outcome event」（幂等去重用）。
+
+    ★ 2026-10-25 加：risk_guard SL 分支绕过 settle_all 直接平仓时，历史上只写了
+    journal 字段、从不追加 outcome event → daily report 把 null net 当 0、
+    dashboard 胜率漏统计。补齐时必须先查重，否则重复 backfill 会刷出多条同 id 事件。
+
+    与 partial 事件的区分：partial 事件带 "kind"（如 ema_break_partial_close）且无
+    "outcome"；结算事件带 "outcome"。这里只认带 outcome 的，避免把 EMA 减仓误判成
+    「已结算」从而跳过真正的结算事件。
+    """
+    if not event_id:
+        return False
+    if not os.path.exists(EVENTS):
+        return False
+    try:
+        for ln in open(EVENTS, encoding="utf-8"):
+            ln = ln.strip()
+            if not ln:
+                continue
+            try:
+                d = json.loads(ln)
+            except Exception:
+                continue
+            if d.get("id") == event_id and d.get("outcome") is not None:
+                return True
+    except Exception:
+        return False
+    return False
+
+
 def _append_event(ev: Dict) -> None:
     # 2026-10-05 防污染：测试前缀（TEST- / TEST_*）的事件不写 events，
     # 避免演示性 force_close 或本地测试把数据混进 winrate / latest_5。
@@ -107,6 +138,29 @@ def _append_event(ev: Dict) -> None:
     _rid = ev.get("id") or ""
     if not _rid.startswith("BTC_USDT-"):
         return
+    # ★ 2026-10-26 幂等：**完全相同**的 outcome 事件只写一次。
+    #   背景：实测 10 个 id 有重复 outcome，其中 6 个是纯重复写（同 outcome + 同 net，
+    #   只是 ts 差几秒——两个线程都跑了一遍 settle），按行累加的统计会重复计数。
+    #   注意**不能**一刀切按 id 去重：另外 4 个是合法的状态修正
+    #   （risk_guard 先写 SL_STOPPED，position_tracker 后结算成 BE_STOPPED / TP2_DONE /
+    #    MCLOSE），语义是「最新覆盖」，必须保留。
+    #   判据：同 id + 同 outcome + 同 net_usd → 纯重复，跳过；任一不同 → 当修正，写入。
+    if ev.get("outcome") is not None:
+        try:
+            for ln in open(EVENTS, encoding="utf-8"):
+                ln = ln.strip()
+                if not ln:
+                    continue
+                try:
+                    d = json.loads(ln)
+                except Exception:
+                    continue
+                if (d.get("id") == _rid
+                        and d.get("outcome") == ev.get("outcome")
+                        and d.get("net_usd") == ev.get("net_usd")):
+                    return   # 纯重复，不写
+        except Exception:
+            pass
     os.makedirs(DATA_DIR, exist_ok=True)
     with open(EVENTS, "a", encoding="utf-8") as f:
         f.write(json.dumps(ev, ensure_ascii=False) + "\n")
@@ -149,9 +203,25 @@ def _settle_one(sig: Dict, bars: List[List]) -> Optional[Dict]:
     contracts = _contracts(entry)
 
     # 检查是否记录了当前状态（如有 TP1 已触发，BE 已移）
-    cur_sl = float(sig.get("active_sl") or sl)
-    cur_tp1_hit = bool(sig.get("tp1_hit"))
-    cur_tp2_hit = bool(sig.get("tp2_hit"))
+    #
+    # ★ 2026-10-22 修复：回放必须按 K 线时间顺序判断状态，不能用「当前快照」。
+    #   根因（实测 BTC_USDT-1792594815-long）：journal 里已写 tp1_hit=True /
+    #   active_sl=84333（保本），而回放起点 ts=10-21 23:00 早于真实 TP1 触发
+    #   （10-22 04:42）。老代码在循环外就把 cur_sl=保本 / cur_tp1_hit=True 读出来，
+    #   于是 10-22 03:01 那根 low=84215 就被判 BE_STOPPED —— 比真实 TP1 早 101 分钟，
+    #   触发 sanity check 抛错 → settler 永久卡死 → risk_guard 狂刷 26267 次。
+    #
+    #   正确语义：每根 K 线判断时，状态必须是「截至这根为止」的状态。
+    #   实现：按 ts 比较 tp1_hit_ts / tp2_hit_ts，只有 ts >= 命中时刻才认为已触发。
+    _tp1_hit_ts = int(sig.get("tp1_hit_ts") or 0)
+    _tp2_hit_ts = int(sig.get("tp2_hit_ts") or 0)
+    _active_sl_now = float(sig.get("active_sl") or sl)
+    _sl_base = float(sig.get("sl") or sl)
+
+    # 回放起点之前的「已成交」状态快照（用于填充阶段的判定）
+    cur_sl = _sl_base
+    cur_tp1_hit = bool(sig.get("tp1_hit")) and (_tp1_hit_ts == 0)
+    cur_tp2_hit = bool(sig.get("tp2_hit")) and (_tp2_hit_ts == 0)
     cur_state = sig.get("pos_state", "OPEN")    # OPEN / TP1_PARTIAL
 
     pending_ts = int(sig["ts"])
@@ -159,11 +229,35 @@ def _settle_one(sig: Dict, bars: List[List]) -> Optional[Dict]:
     last_check_ts = int(sig.get("last_check_ts") or pending_ts)
     idx_start = 0
 
+    # ★ 2026-10-24 性能修复：EMA 预警判定是**循环不变量**（只看 5m/15m 序列
+    #   最后一根 close，与当前回放的 1m 根 ts 无关），所以整轮只算一次。
+    #   原实现在循环里逐根调用 _check_ema_break_warning → 每次
+    #   fetch_ohlcv(cache=True) 都整库写盘 2.5MB（≈0.87s）
+    #   → 82 次写 = 71s，占 settle_all 单轮 60% 的耗时。
+    #   语义等价性：原实现每次都取该周期「最新 200 根」，回放期间不会变
+    #   （除非跨过了新 K 线收盘那一刻 —— 那种情况下新旧行为会有一根的差异，
+    #     但那是「取数时机」差异，不是判定逻辑差异；且新版取数更早、更确定）。
+    _ema_state = None
+    _ema_state_ready = False
+
     for i, b in enumerate(bars):
         ts = int(b[0])
         if ts <= last_check_ts:
             continue
         h, l, c = float(b[2]), float(b[3]), float(b[4])
+
+        # ★ 2026-10-22 修复：按「截至这根 K 线」恢复状态。
+        #   老代码在循环外读一次 tp1_hit/active_sl 就用到底，等于用**未来状态**
+        #   回放**过去**的 K 线。实测 BTC_USDT-1792594815-long：
+        #   journal 记 tp1_hit_ts=04:42，但回放起点是 10-21 23:00，
+        #   于是 03:01 那根 low=84215 就被判 BE_STOPPED（比真实 TP1 早 101 分钟），
+        #   撞 sanity check 抛错 → settler 永久卡死。
+        #   正确：只有 ts >= tp1_hit_ts 才认为 TP1 已发生、SL 已推到保本。
+        if _tp1_hit_ts and ts >= _tp1_hit_ts and not cur_tp1_hit:
+            cur_tp1_hit = True
+            cur_sl = _active_sl_now
+        if _tp2_hit_ts and ts >= _tp2_hit_ts and not cur_tp2_hit:
+            cur_tp2_hit = True
 
         # 1) 24h 未挂到 → MISSED（仅未进场；已成交的持仓不受时间限制，靠趋势反转强平）
         # 2026-10-07 liusir 规则：未进场的挂单不返佣（标记作废），net_usd = 0
@@ -245,15 +339,31 @@ def _settle_one(sig: Dict, bars: List[List]) -> Optional[Dict]:
         # 3) 计算每根触发
         # ★ EMA 突破预警（2026-10-05 liusir 策略）：5m/15m EMA144+EMA169 同向突破
         #   → 已盈利的多/空单 → 70% 部分止盈 + SL 移到 BE
+        #
+        # ★ 2026-10-22 liusir 决策 B：EMA 预警触发的那根 K 线**不判止损**，
+        #   从下一根开始判。理由与已有的 fill_ts 防御一致（line 179-185）——
+        #   保本移动本身是靠「本根收盘价 close」判定的，而这根的影线 low 是
+        #   更早形成的行情，两者时间顺序矛盾。用影线去判刚移动的保本线属于
+        #   「同根双触自欺」：预警说趋势反转了，同一根又说保本已被击穿。
+        #   实测代价（BTC_USDT-1792594815-long）：03:15 那根 EMA 预警推保本
+        #   84333，同一根 low=84308.7 立刻止损出场 —— 比 TP1 路径的 07:05 早 3h50m，
+        #   但这单本来浮盈只有 +29 点（0.07%），被一根影线扫掉不合理。
+        _skip_sl_this_bar = False
         if sig.get("filled"):
             try:
+                # ★ 2026-10-24：ema_state 懒加载一次，循环内复用
+                if not _ema_state_ready:
+                    _ema_state = _compute_ema_state(sig, side=side)
+                    _ema_state_ready = True
                 _ema_warned = _check_ema_break_warning(
-                    sig, ts, side, entry, c, float(sig.get("fill_px") or entry))
+                    sig, ts, side, entry, c, float(sig.get("fill_px") or entry),
+                    ema_state=_ema_state)
                 if _ema_warned:
                     # 本根已部分平仓 + 移 SL 到 BE
                     # 重新读 sig 的最新状态（被改了），继续走原 SL/TP 判定
                     cur_sl = float(sig.get("active_sl") or sl)
                     contracts = int(sig.get("contracts") or contracts)
+                    _skip_sl_this_bar = True      # ← 决策 B：本根不判 SL
             except Exception as _e:
                 if __debug__:
                     print(f"[ema_warn] 调用异常: {_e}")
@@ -267,6 +377,9 @@ def _settle_one(sig: Dict, bars: List[List]) -> Optional[Dict]:
             t_tp1 = l <= tp1
             t_tp2 = tp2 > 0 and l <= tp2
 
+        if _skip_sl_this_bar:
+            t_sl = False
+
         # 4) 同根双触判定（防自欺）
         #    优先级：当前阶段最高目标 > 原 SL
         #    OPEN 阶段：未触发 TP1 时，TP/SL 同根 → SL
@@ -278,10 +391,38 @@ def _settle_one(sig: Dict, bars: List[List]) -> Optional[Dict]:
         if cur_tp2_hit and t_sl and tp2 > 0:
             return _close(sig, "TP3", tp2, ts, contracts, side, entry, "profit")
         # 5) 单触判定
+        #
+        # ★ 2026-10-23 修复：BE vs SL 的判定只看 cur_tp1_hit，漏了保本移动的另外两个来源。
+        #   保本移动有 3 个来源（见 _close 的 _be_move_ts 计算）：
+        #     ① TP1 触发           → active_sl = entry
+        #     ② EMA 突破预警       → active_sl = entry   (ema_warning_done=True)
+        #     ③ 1h 浮亏主动减仓   → active_sl = entry   (partial_close_done=True)
+        #   老代码 `BE_STOPPED if cur_tp1_hit else SL_STOPPED` 只认 ①，
+        #   于是 ② 推的保本被标成 SL_STOPPED + category=loss —— 12 笔（10-05~10-08）
+        #   全部误标，胜率被严重低估、形态家族统计失真。
+        #
+        #   正确口径：「保本移动过」= tp1_hit OR ema_warning_done OR partial_close_done；
+        #   再用「出场价在 entry 附近」做二次确认（防 active_sl 被后续逻辑推离 entry）。
+        #
+        # ★★ 2026-10-24 修复（严重）：**`if t_sl:` 守卫被 10-23 那次改动静默删掉了**。
+        #   后果：只要持仓已成交（filled=True），回放走到第一根 ts > fill_ts 的 K 线，
+        #   就**无条件**执行 _close() —— 无论价格有没有摸到 SL/TP。
+        #   现象（实测 2026-10-24 07:04 / 07:20 两笔 short）：
+        #     · exit_px 恰好 == sl（81205.5 / 81222.9），而同期 1m 最高只有 80984
+        #       → **价格从未到达止损位**，却被记成"止损扫掉"
+        #     · exit_ts 恰好 == fill_ts + 60（成交后第一根 K 线）
+        #     · TP1 / TP2 / PARTIAL_CLOSE 分支全部变成**死代码**（在 return 之后）
+        #   根因：10-23 的改动把 `if t_sl:` + return 改写成裸 return，漏掉守卫。
+        #   修复：把守卫加回来（BE 分类逻辑保留在守卫内部）。
         if t_sl:
-            return _close(sig, "BE_STOPPED" if cur_tp1_hit else "SL_STOPPED",
+            _be_moved = (cur_tp1_hit
+                         or bool(sig.get("ema_warning_done"))
+                         or bool(sig.get("partial_close_done")))
+            _be_at_entry = abs(float(cur_sl) - float(entry)) < 1.0
+            _is_be = _be_moved and _be_at_entry
+            return _close(sig, "BE_STOPPED" if _is_be else "SL_STOPPED",
                           cur_sl, ts, contracts, side, entry,
-                          "profit" if cur_tp1_hit else "loss")
+                          "profit" if _is_be else "loss")
         # 2026-10-12 防御：重复 TP1 部分止盈去重（防止 cron 重跑时同一根 K 线二次触发）
         # 现象：journal 已写 tp1_hit_ts/active_sl=entry 后，下一次 settler 仍在循环开头
         #       读到 cur_tp1_hit=False（因为函数顶部快照早于本轮落盘），会再次走入 partial 分支
@@ -396,7 +537,46 @@ def _close(sig: Dict, outcome: str, exit_px: float, exit_ts: int,
 
     2026-10-05 修正：contracts 入参是 TP1 触发时的剩余仓位（已减 1/3）；
     原始总量用 sig._orig_contracts 字段（TP1 触发时记下），用它 // PARTS 算每段张数。
+
+    2026-10-18 防御性 sanity check（liusir 10-18 发现 5/13 训练 journal 笔的
+    exit_ts < fill_ts 60s 内，疑似 cache 滚动 + 早期路径污染）：
+      - exit_ts 必须 > fill_ts，否则直接 raise 阻断污染 journal
+      - TP1 hit 时 exit_ts 必须 > tp1_hit_ts（同根双触会优先 TP2，但 BE 必须晚于 TP1）
     """
+    # 2026-10-18 sanity check
+    _fill_ts = int(sig.get("fill_ts") or 0)
+    if _fill_ts and exit_ts <= _fill_ts:
+        raise ValueError(
+            f"[position_tracker] _close sanity check FAILED: exit_ts={exit_ts} <= "
+            f"fill_ts={_fill_ts} (id={sig.get('id', '?')}, outcome={outcome})。"
+            f"这是 cache 滚动或早期路径污染的痕迹，宁可放弃 settle 也不要污染 journal。"
+        )
+    if sig.get("tp1_hit"):
+        _tp1_hit_ts = int(sig.get("tp1_hit_ts") or 0)
+        if _tp1_hit_ts and exit_ts < _tp1_hit_ts:
+            # ★ 2026-10-22 修复：保本移动有三个来源，不止 TP1。
+            #   ① TP1 触发         → tp1_hit_ts
+            #   ② EMA 突破预警     → ema_warning_ts（2026-10-22 新增字段）
+            #   ③ 1h 浮亏主动减仓   → partial_close_ts
+            #   老代码只比 tp1_hit_ts，于是「EMA 预警推的保本」被误判成
+            #   「BE 早于 TP1」→ 抛错 → settler 永久卡死
+            #   （实测 BTC_USDT-1792594815-long：EMA 03:15 推保本、
+            #     同根影线跌破 BE 止损，但 tp1_hit_ts 是 04:42 → 必抛错）。
+            #   正确口径：BE 只需晚于「**最近一次保本移动**」。
+            _be_move_ts = _tp1_hit_ts
+            for _k in ("ema_warning_ts", "partial_close_ts"):
+                _v = int(sig.get(_k) or 0)
+                if _v > _be_move_ts:
+                    _be_move_ts = _v
+            if _be_move_ts and exit_ts < _be_move_ts:
+                raise ValueError(
+                    f"[position_tracker] _close sanity check FAILED: exit_ts={exit_ts} < "
+                    f"保本移动时刻={_be_move_ts} (tp1_hit_ts={_tp1_hit_ts}, "
+                    f"ema_warning_ts={sig.get('ema_warning_ts')}, "
+                    f"id={sig.get('id', '?')}, outcome={outcome})。"
+                    f"BE 必须晚于保本移动；这是状态时间戳被污染的痕迹。"
+                )
+
     pnl_parts = []  # [(qty, exit_px)]
     contracts_orig = int(sig.get("_orig_contracts") or contracts)
     part_size = max(1, contracts_orig // PARTS)
@@ -562,8 +742,66 @@ def _push(text: str) -> None:
 EMA_WARN_PARTIAL = 0.7     # 部分止盈 70%
 
 
+def _compute_ema_state(sig: Dict, side: str | None = None) -> Optional[Dict]:
+    """
+    ★ 2026-10-24 性能修复：一次性取 5m/15m K 线并算出 EMA 判定。
+      供 _settle_one 的回放循环复用（循环内不再逐根取数/写盘）。
+
+    返回 dict:
+      {"below_5m": bool, "below_15m": bool,     ← 按 side 方向判定
+       "close_5m", "e144_5m", "e169_5m",
+       "close_15m", "e144_15m", "e169_15m"}
+    返回 None = 数据不足（K 线不够 / 取数失败）。
+
+    ⚠ 方向语义（与原实现严格一致）：
+       做多：close < EMA144 且 close < EMA169 → 跌破
+       做空：close > EMA144 且 close > EMA169 → 升破
+    below_* 已按 side 取好方向，调用方直接 AND 即可。
+    """
+    side = side or sig.get("side") or "long"
+    try:
+        bars_5m = fetch_ohlcv(sig.get("contract", "BTC_USDT"), "5m",
+                                200, cache=True)
+        bars_15m = fetch_ohlcv(sig.get("contract", "BTC_USDT"), "15m",
+                                200, cache=True)
+    except Exception as e:
+        if __debug__:
+            print(f"[ema_warn] K 线获取失败: {e}")
+        return None
+
+    def _below(side, close, e144, e169):
+        if side == "long":
+            return close < e144 and close < e169
+        return close > e144 and close > e169
+
+    def _one(bars):
+        if not bars:
+            return None
+        closes = [float(r[4]) for r in bars]
+        if len(closes) < 170:
+            return None
+        e144 = float(_ema_func(np.array(closes), 144)[-1])
+        e169 = float(_ema_func(np.array(closes), 169)[-1])
+        close = closes[-1]
+        return {"close": close, "e144": e144, "e169": e169}
+
+    m5 = _one(bars_5m)
+    if not m5:
+        return None
+    m15 = _one(bars_15m)
+    if not m15:
+        return None
+    return {
+        "below_5m": _below(side, m5["close"], m5["e144"], m5["e169"]),
+        "below_15m": _below(side, m15["close"], m15["e144"], m15["e169"]),
+        "close_5m": m5["close"], "e144_5m": m5["e144"], "e169_5m": m5["e169"],
+        "close_15m": m15["close"], "e144_15m": m15["e144"], "e169_15m": m15["e169"],
+    }
+
+
 def _check_ema_break_warning(sig: Dict, ts: int, side: str, entry: float,
-                              cur_px: float, fill_px: float) -> bool:
+                              cur_px: float, fill_px: float,
+                              ema_state: Optional[Dict] = None) -> bool:
     """
     EMA 突破预警检测。
     触发条件（同时满足）：
@@ -574,6 +812,17 @@ def _check_ema_break_warning(sig: Dict, ts: int, side: str, entry: float,
 
     触发后：部分平仓 70%、SL 移到 BE、写 partial_exit_count+1、推送。
     返回 True 表示本根已处理过预警（让调用方跳过 SL/TP 判定避免重复触发）。
+
+    ★ 2026-10-24 性能修复：新增 ema_state 参数（预计算的 5m/15m EMA 判定）。
+      根因：原实现在**回放循环里逐根 1m** 调用本函数，每次都
+            fetch_ohlcv(cache=True) 拉 5m/15m → 每次整库写盘 2.5MB（≈0.87s）
+            → 82 次 = 71s，占 settle_all 单轮耗时的 60%。
+      关键洞察：**EMA 判定是循环不变量** —— 它只看 5m/15m 序列的最后一根
+            close 和 EMA144/169，与当前回放的 1m 根 ts 无关。
+            （fetch_ohlcv 返回的是该周期最新 200 根，不随 ts 变化。）
+      所以：整轮回放只需取一次 K 线、算一次 EMA，循环内只做「盈利判断 + 比对」。
+      为保守起见，ema_state=None 时保持原行为（自己取数自己算），
+      单测（tests/test_position_tracker.py 直接调本函数）不受影响。
     """
     if sig.get("ema_warning_done"):
         return False
@@ -586,45 +835,19 @@ def _check_ema_break_warning(sig: Dict, ts: int, side: str, entry: float,
     if side == "short" and cur_px >= fill_px:
         return False
 
-    # 取 5m / 15m 当前 K 线的 close + 计算 EMA
-    try:
-        bars_5m = fetch_ohlcv(sig.get("contract", "BTC_USDT"), "5m",
-                                200, cache=True)
-        bars_15m = fetch_ohlcv(sig.get("contract", "BTC_USDT"), "15m",
-                                200, cache=True)
-    except Exception as e:
-        if __debug__:
-            print(f"[ema_warn] K 线获取失败: {e}")
+    if ema_state is None:
+        ema_state = _compute_ema_state(sig)
+    if not ema_state:
         return False
-
-    def _below(side, close, e144, e169):
-        if side == "long":
-            return close < e144 and close < e169
-        return close > e144 and close > e169
-
-    # 5m：取最后一根 close（已收盘）
-    if not bars_5m:
+    # ema_state 里的 below_5m / below_15m 已按 side 算好方向
+    if not (ema_state["below_5m"] and ema_state["below_15m"]):
         return False
-    closes_5m = [float(r[4]) for r in bars_5m]
-    if len(closes_5m) < 170:
-        return False
-    e144_5m = float(_ema_func(np.array(closes_5m), 144)[-1])
-    e169_5m = float(_ema_func(np.array(closes_5m), 169)[-1])
-    close_5m = closes_5m[-1]
-    if not _below(side, close_5m, e144_5m, e169_5m):
-        return False
-
-    # 15m
-    if not bars_15m:
-        return False
-    closes_15m = [float(r[4]) for r in bars_15m]
-    if len(closes_15m) < 170:
-        return False
-    e144_15m = float(_ema_func(np.array(closes_15m), 144)[-1])
-    e169_15m = float(_ema_func(np.array(closes_15m), 169)[-1])
-    close_15m = closes_15m[-1]
-    if not _below(side, close_15m, e144_15m, e169_15m):
-        return False
+    close_5m = ema_state["close_5m"]
+    e144_5m = ema_state["e144_5m"]
+    e169_5m = ema_state["e169_5m"]
+    close_15m = ema_state["close_15m"]
+    e144_15m = ema_state["e144_15m"]
+    e169_15m = ema_state["e169_15m"]
 
     # ★ 触发！70% 部分平仓 + SL 移到 BE
     sig["ema_warning_done"] = True
@@ -649,6 +872,12 @@ def _check_ema_break_warning(sig: Dict, ts: int, side: str, entry: float,
     sig["partial_exit_count"] = sig.get("partial_exit_count", 0) + 1
     sig["partial_exits"] = sig.get("partial_exits", 0) + 1
     sig["partial_net_usd"] = round(partial_net, 2)
+    # ★ 2026-10-22 新增：记录 EMA 预警的**触发时刻**。
+    #   缺这个字段 → 回放时无法知道「保本是什么时候移动的」，
+    #   只能用 tp1_hit_ts 代替 → sanity check 误判「BE 早于 TP1」抛错
+    #   → settler 永久卡死（实测 BTC_USDT-1792594815-long 卡了 9.6h）。
+    sig["ema_warning_ts"] = ts
+    sig["ema_warning_px"] = round(float(cur_px), 1)
     # 记录预警已平张数 + 触发价（让 _close 重算 PnL 时能正确把 EMA 部分计入）
     sig["ema_partial_qty"] = partial
     sig["ema_partial_px"] = cur_px
@@ -838,6 +1067,8 @@ def settle_all(verbose: bool = False) -> Tuple[int, int]:
 
     n_done = 0
     n_still = 0
+    n_error = 0
+    _err_ids: list = []
     # 2026-10-12 修 #3：journal 双胞胎去重（按 entry+exit+outcome+side 聚类）
     #   痛点：23:57:20 + 23:57:32 双胞胎卡片（1791692114 + 1791695718 同 entry/exit/net）
     #   根因：journal 双胞胎两条都 pending → 各自 _settle_one → 各 _notify_close 推卡
@@ -874,13 +1105,30 @@ def settle_all(verbose: bool = False) -> Tuple[int, int]:
         try:
             res = _settle_one(r, bars)
         except Exception as e:
+            # ★ 2026-10-22 修复：原代码 `except: continue` 把异常静默吞掉，
+            #   导致这一笔永远 pending —— 实测 BTC_USDT-1792594815-long 因为
+            #   sanity check 误判（exit_ts < tp1_hit_ts）每次都抛 ValueError，
+            #   settler 每 5s 撞一次、每次都跳过，单笔卡死 9.6 小时、浮亏 -138.91U。
+            #   现在：① 记 error 字段留证据 ② 记日志 ③ 计数上报（不再静默）。
+            r["settle_error"] = str(e)[:300]
+            r["settle_error_ts"] = int(time.time())
+            r["settle_error_count"] = int(r.get("settle_error_count") or 0) + 1
+            n_error += 1
             if verbose:
                 print(f"[position_tracker] 结算 {r.get('id', '?')} 异常: {e}")
+            _err_ids.append(r.get("id"))
             continue
 
         if res:
             r.update(res)
             r["status"] = "settled"
+            # 2026-10-18 修复：hold_h 必须由 settle 强制按真实 (exit_ts - fill_ts) 重算，
+            # 不能用 journal 里写死的字段——之前 8/13 笔 hold_h 跟实际差几小时
+            # （因为 sig.get("hold_h") 是早期某个错误写入的，不是 _close 算出来的）
+            _ft = int(r.get("fill_ts") or 0)
+            _et = int(r.get("exit_ts") or 0)
+            if _ft and _et and _et > _ft:
+                r["hold_h"] = round((_et - _ft) / 3600, 1)
             n_done += 1
             _append_event({"id": r.get("id"), "outcome": res["outcome"],
                            "net_usd": res["net_usd"], "category": res["category"],
@@ -890,10 +1138,26 @@ def settle_all(verbose: bool = False) -> Tuple[int, int]:
         else:
             n_still += 1
 
-    if n_done:
+    if n_done or n_error:
         _write_journal(recs)
         if verbose:
             print(f"[position_tracker] 结算 {n_done} 条｜ 仍 pending {n_still} 条")
+    if n_error:
+        # ★ 2026-10-22：错误必须显式上报，不能只写进 journal 就完事——
+        #   实测卡死案例里 journal 写了 error 但没人看，等于还是静默失败。
+        #   走 stderr（watch.log 会收）+ 写独立文件，便于事后 grep。
+        _err_msg = (f"[position_tracker] ⚠️ {n_error} 笔结算异常（已卡 pending）："
+                    f"{_err_ids}")
+        try:
+            import sys as _sys
+            print(_err_msg, file=_sys.stderr)
+        except Exception:
+            pass
+        try:
+            with open("/root/data/settle_errors.log", "a") as _ef:
+                _ef.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {_err_msg}\n")
+        except Exception:
+            pass
     return (n_done, n_still)
 
 
