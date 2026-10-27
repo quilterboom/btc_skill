@@ -20,3 +20,5 @@ watch.log
 # 我刚刚生成的备份（开发临时）
 config.yaml.bak-*
 config.yaml.*-bak-*
+# 开发期带时间戳的备份（*.bak 匹配不到 .bak.2026xxxx）
+*.bak.*
