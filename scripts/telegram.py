@@ -22,6 +22,73 @@ from typing import Optional, Dict
 
 OK, NO, WARN = "✅", "❌", "⚠️"
 
+# ============================ 推送去重 / 限流 ============================
+# ★ 2026-10-27：去重 + 限流（防刷屏淹没入场提醒）
+#   现象：10-27 14:56:46–14:57:26（40 秒）推了 19 条几乎完全相同的
+#         「部分止盈 TP1」，当天总推送 45 条里入场提醒只有 1 条，被噪音淹没。
+#   根因：risk_guard 每轮巡检都把「status 卡在 pending 的老单」当持仓处理，
+#         反复触发部分止盈推送（同一笔单同一类卡片）。
+#
+#   ★ 关键设计：去重必须用**显式幂等 key**（持仓 id + 事件类型），不能用
+#     「卡片文本指纹」。文本指纹要剥数字才能匹配价格变化 → 副作用是
+#     「同方向不同持仓的入场提醒」结构相同 → 第二笔会被误杀。
+#     正确口径：**同一笔单的同一类事件**只推一次（幂等），
+#     不同持仓 / 不同事件类型照常推。
+#
+#   API：
+#     push(card, ...)              —— 普通推送（带限流）
+#     push_once(key, card, ...)    —— 幂等推送（同一 key 只推一次，**不限流**）
+#     入场/平仓等关键卡片走 push_once，key = f"{持仓id}:{事件类型}"
+#
+#   限流只作用在「非幂等」推送上（噪音类），关键卡片永远不被限流挡掉。
+
+import hashlib
+import re as _re
+from threading import Lock as _Lock
+
+DEDUP_WINDOW = int(os.environ.get("TG_DEDUP_WINDOW", "900"))   # 幂等窗口（秒）
+MIN_INTERVAL = int(os.environ.get("TG_MIN_INTERVAL", "20"))    # 噪音类推送最小间隔（秒）
+
+_DEDUP_LOCK = _Lock()
+_IDEMPOTENT_SEEN: dict = {}   # 幂等 key -> last_ts
+_LAST_PUSH_TS: float = 0.0     # 上一次「非幂等」推送时刻
+
+
+def _fingerprint(card: str) -> str:
+    """卡片文本指纹（**仅用于日志/调试**，不做去重决策）。
+
+    去重决策用显式幂等 key，不用文本指纹 —— 见上方设计说明。
+    """
+    txt = _re.sub(r"<[^>]+>", " ", card or "")
+    txt = _re.sub(r"[\d.,%+-]+", " ", txt)
+    txt = _re.sub(r"\s+", " ", txt).strip()
+    return hashlib.sha1(txt.encode("utf-8")).hexdigest()[:16]
+
+
+def _idempotent_check(key: str, now_ts: float) -> tuple:
+    """幂等检查：同一 key 在 DEDUP_WINDOW 内只放行一次。返回 (允许, 原因)。"""
+    with _DEDUP_LOCK:
+        last = _IDEMPOTENT_SEEN.get(key, 0.0)
+        if last and (now_ts - last) < DEDUP_WINDOW:
+            return False, f"幂等({key} 于 {now_ts - last:.0f}s 前已推过)"
+        _IDEMPOTENT_SEEN[key] = now_ts
+        if len(_IDEMPOTENT_SEEN) > 2000:
+            cutoff = now_ts - DEDUP_WINDOW
+            for k in [k for k, v in _IDEMPOTENT_SEEN.items() if v < cutoff]:
+                _IDEMPOTENT_SEEN.pop(k, None)
+        return True, "ok"
+
+
+def _rate_limit_check(now_ts: float) -> tuple:
+    """限流检查：只作用在非幂等（噪音类）推送。返回 (允许, 原因)。"""
+    global _LAST_PUSH_TS
+    with _DEDUP_LOCK:
+        if _LAST_PUSH_TS and (now_ts - _LAST_PUSH_TS) < MIN_INTERVAL:
+            return False, f"限流(距上次 {now_ts - _LAST_PUSH_TS:.1f}s < {MIN_INTERVAL}s)"
+        _LAST_PUSH_TS = now_ts
+        return True, "ok"
+
+
 # ============================ 路径 ============================
 SECRETS_PATH = Path("/root/.hermes/secrets/btc_tg.json")
 DEFAULT_CHAT_ID = "7097652385"
@@ -32,8 +99,11 @@ DEFAULT_CHAT_ID = "7097652385"
 TG_AUDIT_PATH = Path(os.environ.get("BTCTG_AUDIT", "/root/data/tg_audit.log"))
 
 
-def _audit(card: str, ok: bool, chat_id: str = "") -> None:
-    """推送留痕：谁 + 何时 + 多长 + 第一行内容 + 是否成功"""
+def _audit(card: str, ok: bool, chat_id: str = "", reason: str = "") -> None:
+    """推送留痕：谁 + 何时 + 多长 + 第一行内容 + 是否成功
+
+    reason：被去重/限流拦下时写明原因（ok=False + reason），便于事后溯源
+    """
     try:
         ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
         # 提取 caller（用 inspect 拿到调用栈）
@@ -59,6 +129,7 @@ def _audit(card: str, ok: bool, chat_id: str = "") -> None:
             "chat": chat_id,
             "title": first_line,
             "ok": ok,
+            "reason": reason,
         }, ensure_ascii=False)
         with open(TG_AUDIT_PATH, "a", encoding="utf-8") as f:
             f.write(line + "\n")
@@ -154,6 +225,16 @@ def push(card: str, token: Optional[str] = None, chat_id: Optional[str] = None) 
        not (card or "").lstrip().startswith("🧪 <b>[训练]</b>"):
         card = tag + (card or "")
 
+    # ★ 2026-10-27：限流（只作用在非幂等的普通推送）
+    #   关键卡片请用 push_once(key, card) —— 幂等去重 + 不受限流。
+    _allow, _why = _rate_limit_check(time.time())
+    if not _allow:
+        try:
+            _audit(card, False, chat_id=chat_id, reason=_why)
+        except Exception:
+            pass
+        return False
+
     try:
         url = f"https://api.telegram.org/bot{token}/sendMessage"
         body = json.dumps({
@@ -174,6 +255,67 @@ def push(card: str, token: Optional[str] = None, chat_id: Optional[str] = None) 
     except Exception as e:
         print(f"{NO} TG 推送失败: {e}", file=sys.stderr)
         _audit(card, False, chat_id=chat_id or "")
+        return False
+
+
+def push_once(key: str, card: str, token: Optional[str] = None,
+              chat_id: Optional[str] = None) -> bool:
+    """幂等推送：同一个 key 在 DEDUP_WINDOW 内只推一次。
+
+    ★ 用法（2026-10-27 加，防刷屏淹没入场提醒）：
+        key = f"{持仓id}:{事件类型}"，例如
+            push_once(f"{sig['id']}:fill",   card)   # 入场
+            push_once(f"{sig['id']}:tp1",    card)   # TP1 部分止盈
+            push_once(f"{sig['id']}:ema",    card)   # EMA 预警
+            push_once(f"{sig['id']}:close",  card)   # 平仓
+        → 同一笔单的同一类事件只推一次（risk_guard 每轮巡检重复触发也不会刷屏）
+        → 不同持仓 / 不同事件类型照常推（不会误杀）
+
+    与 push() 的区别：
+        push()      —— 有限流（噪音类推送用）
+        push_once()  —— 有限流 + 幂等去重（关键事件用）
+    """
+    if token is None:
+        token = load_token()
+    if chat_id is None:
+        chat_id = load_chat()
+    if not token or not chat_id:
+        return False
+
+    now = time.time()
+    allow, why = _idempotent_check(key, now)
+    if not allow:
+        try:
+            _audit(card, False, chat_id=chat_id, reason=why)
+        except Exception:
+            pass
+        return False
+
+    # 幂等放行 → 走发送，但不占用「限流窗口」（关键事件不被噪音挡住）
+    prev_last_push = _LAST_PUSH_TS
+    try:
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        body = json.dumps({
+            "chat_id": chat_id,
+            "text": _escape_html(card),
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+        }).encode("utf-8")
+        req = urllib.request.Request(url, data=body,
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            raw = resp.read().decode("utf-8")
+            ok = '"ok":true' in raw
+            if not ok:
+                print(f"{WARN} TG 返回非 ok: {raw[:200]}", file=sys.stderr)
+            _audit(card, ok, chat_id=chat_id, reason="idempotent")
+            return ok
+    except Exception as e:
+        print(f"{NO} TG 推送失败: {e}", file=sys.stderr)
+        _audit(card, False, chat_id=chat_id, reason=f"error: {e}")
+        # 失败 → 撤销幂等标记，允许重试
+        with _DEDUP_LOCK:
+            _IDEMPOTENT_SEEN.pop(key, None)
         return False
 
 

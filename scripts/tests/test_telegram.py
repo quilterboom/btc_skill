@@ -104,6 +104,17 @@ class TestEscapeHtml(unittest.TestCase):
 class TestPush(unittest.TestCase):
     """push() 必须永不抛 + 自动 token 读取"""
 
+    def setUp(self):
+        """重置推送限流/幂等状态。
+
+        2026-10-27：push() 加了限流（噪音类推送最小间隔 20s），
+        同一测试类里连着推多条卡片会被限流挡掉 —— 每个用例独立重置。
+        """
+        import telegram as _tg
+        with _tg._DEDUP_LOCK:
+            _tg._IDEMPOTENT_SEEN.clear()
+            _tg._LAST_PUSH_TS = 0.0
+
     @patch("urllib.request.urlopen")
     def test_success_returns_true(self, m_urlopen):
         m_urlopen.return_value.__enter__.return_value.read.return_value = b'{"ok":true}'

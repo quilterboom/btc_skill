@@ -97,7 +97,9 @@ def _append_event(ev: Dict):
 def _push_fill(sig: Dict, fill_px: float, elapsed_sec: float):
     """hammer 直接进成交推送"""
     try:
-        from telegram import push as _tg_push
+        # ★ 2026-10-27：push_once（幂等 key = 持仓id:hammer_fill）——
+        #   watcher 每秒巡检，同一笔单的成交提醒只能推一次，不能刷屏。
+        from telegram import push_once as _tg_push
         side_cn = "做多"
         tp1 = float(sig.get("tp1", 0))
         tp2 = float(sig.get("tp2", 0))
@@ -109,7 +111,7 @@ def _push_fill(sig: Dict, fill_px: float, elapsed_sec: float):
             f"监测耗时 {elapsed_sec:.1f}s ｜ TP1 <b>{tp1:,.1f}</b> ｜ TP2 <b>{tp2:,.1f}</b> ｜ SL <b>{sl:,.1f}</b>\n"
             f"入场理由：hammer 触底后 {TRIGGER_PCT*100:.2f}% 反弹已确认"
         )
-        _tg_push(card)
+        _tg_push(f"{sig.get('id')}:hammer_fill", card)
     except Exception as e:
         log(f"[hammer_watcher] TG 推送失败（非阻塞）: {e}")
 
