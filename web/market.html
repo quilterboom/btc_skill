@@ -6,7 +6,7 @@
 <title>BTC 行情环境大图</title>
 <style>
   :root {
-    --bg: #f8fafc;
+    --bg: #f3f3f3;
     --card: #ffffff;
     --border: #e5e7eb;
     --border-strong: #d1d5db;
@@ -220,39 +220,557 @@
   .ai-body { font-size: 13px; line-height: 1.75; white-space: pre-wrap; word-break: break-word; }
   .foot-note { font-size: 11px; color: var(--muted); margin-top: 8px; padding-top: 7px;
                border-top: 1px dashed var(--border); }
+
+
+
+/* ============ 腾讯云控制台配色 ============ */
+:root {
+  --tc-blue: #0052d9;           /* 腾讯云主蓝 */
+  --tc-blue-hover: #003cab;
+  --tc-blue-light: #ecf2fe;
+  --tc-green: #00a400;
+  --tc-orange: #ff7200;
+  --tc-red: #e34d59;
+  --tc-text: #000;
+  --tc-text-2: #000;            /* 二级文字用 opacity 而非灰 */
+  --tc-text-sub: rgba(0,0,0,.6);
+  --tc-text-sub2: rgba(0,0,0,.4);
+  --tc-border: #e5e5e5;
+  --tc-border-2: #dcdcdc;
+  --tc-bg: #f3f3f3;             /* 页面底色 */
+  --tc-bg-card: #fff;
+  --tc-bg-hover: #f5f7fa;
+  --tc-bg-head: #fafafa;        /* 表头 / 标题栏底 */
+}
+
+/* ============ 顶层壳：深色顶栏 + 白底左栏 ============ */
+.tc {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  background: var(--tc-bg);
+}
+
+/* --- 深色顶部导航条 --- */
+.tc-top {
+  height: 50px;
+  background: #0d1a2b;          /* 腾讯云控制台深蓝黑 */
+  color: #fff;
+  display: flex;
+  align-items: center;
+  padding: 0 20px;
+  gap: 24px;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+.tc-top .tc-logo {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: .3px;
+  white-space: nowrap;
+}
+.tc-top .tc-logo .tc-mark {
+  width: 22px; height: 22px;
+  border-radius: 4px;
+  background: linear-gradient(135deg, #0052d9, #00a4ff);
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 12px; font-weight: 700;
+}
+.tc-top .tc-nav { display: flex; gap: 4px; }
+.tc-top .tc-nav a {
+  color: rgba(255,255,255,.78);
+  text-decoration: none;
+  font-size: 13px;
+  padding: 6px 12px;
+  border-radius: 3px;
+  transition: background .15s, color .15s;
+}
+.tc-top .tc-nav a:hover { background: rgba(255,255,255,.1); color: #fff; }
+.tc-top .tc-nav a.active { background: var(--tc-blue); color: #fff; }
+.tc-top .tc-tools {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  font-size: 12.5px;
+  color: rgba(255,255,255,.72);
+}
+.tc-top .tc-tools .tc-chip {
+  padding: 3px 9px;
+  border: 1px solid rgba(255,255,255,.2);
+  border-radius: 3px;
+  font-variant-numeric: tabular-nums;
+}
+.tc-top .tc-tools a { color: rgba(255,255,255,.78); text-decoration: none; }
+.tc-top .tc-tools a:hover { color: #fff; }
+
+/* --- 主体：左栏 + 内容 --- */
+.tc-body { display: flex; flex: 1; min-height: 0; }
+
+/* --- 白底左侧栏 --- */
+.tc-side {
+  width: 208px;
+  flex: none;
+  background: var(--tc-bg-card);
+  border-right: 1px solid var(--tc-border);
+  padding: 12px 0;
+  position: sticky;
+  top: 50px;
+  height: calc(100vh - 50px);
+  overflow-y: auto;
+}
+.tc-side .tc-group {
+  font-size: 11.5px;
+  color: var(--tc-text-sub2);
+  padding: 10px 20px 6px;
+  letter-spacing: .5px;
+}
+.tc-side .tc-nav { display: flex; flex-direction: column; }
+.tc-side .tc-nav a {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 20px;
+  font-size: 13px;
+  color: var(--tc-text-sub);
+  text-decoration: none;
+  border-left: 3px solid transparent;
+  transition: background .12s, color .12s;
+}
+.tc-side .tc-nav a:hover { background: var(--tc-bg-hover); color: var(--tc-text); }
+.tc-side .tc-nav a.active {
+  background: var(--tc-blue-light);
+  color: var(--tc-blue);
+  border-left-color: var(--tc-blue);
+  font-weight: 500;
+}
+.tc-side .tc-nav .nav-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: #c4c4c4; flex: none;
+}
+.tc-side .tc-nav a.active .nav-dot { background: var(--tc-blue); }
+.tc-side .tc-foot {
+  margin-top: auto;
+  padding: 14px 20px 4px;
+  font-size: 11.5px;
+  color: var(--tc-text-sub2);
+  border-top: 1px solid var(--tc-border);
+  margin-top: 24px;
+}
+.tc-side .tc-foot a { color: var(--tc-blue); text-decoration: none; }
+
+/* --- 右侧内容区 --- */
+.tc-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+
+/* --- 面包屑 + 页头 --- */
+.tc-page-hd {
+  background: var(--tc-bg-card);
+  border-bottom: 1px solid var(--tc-border);
+  padding: 14px 24px 12px;
+}
+.tc-crumb {
+  font-size: 12px;
+  color: var(--tc-text-sub2);
+  margin-bottom: 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.tc-crumb a { color: var(--tc-text-sub); text-decoration: none; }
+.tc-crumb a:hover { color: var(--tc-blue); }
+.tc-crumb .sep { color: #ccc; }
+.tc-page-hd .tc-h1-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.tc-page-hd h1 {
+  font-size: 18px;
+  font-weight: 500;
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.tc-page-hd .tc-sub { font-size: 12px; color: var(--tc-text-sub); }
+.tc-page-hd .tc-actions { display: flex; align-items: center; gap: 10px; }
+
+/* --- 内容容器 --- */
+.tc-content { padding: 16px 24px 48px; display: flex; flex-direction: column; gap: 14px; }
+
+/* --- 分区标题（腾讯云叫「组」）--- */
+.tc-sec-hd {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin: 2px 0 -2px;
+}
+.tc-sec-hd h2 { font-size: 14px; font-weight: 500; margin: 0; }
+.tc-sec-hd .meta { font-size: 12px; color: var(--tc-text-sub2); }
+
+/* ============ 卡片：紧凑、底部细线、无重阴影 ============ */
+.tc-card {
+  background: var(--tc-bg-card);
+  border: 1px solid var(--tc-border);
+  border-radius: 2px;
+}
+.tc-card-hd {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 11px 16px;
+  border-bottom: 1px solid var(--tc-border);
+  background: var(--tc-bg-head);
+  flex-wrap: wrap;
+}
+.tc-card-hd h3 {
+  font-size: 13.5px;
+  font-weight: 500;
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.tc-card-hd .meta { font-size: 11.5px; color: var(--tc-text-sub2); }
+.tc-card-bd { padding: 14px 16px; }
+
+/* --- 标签 / 徽章 --- */
+.tc-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11.5px;
+  line-height: 1.6;
+  padding: 0 7px;
+  border-radius: 2px;
+  border: 1px solid;
+  white-space: nowrap;
+}
+.tc-tag.blue   { color: var(--tc-blue);   border-color: #c6d9ff; background: var(--tc-blue-light); }
+.tc-tag.green  { color: var(--tc-green);  border-color: #b7eb8f; background: #f0fbf0; }
+.tc-tag.orange { color: var(--tc-orange); border-color: #ffd4b3; background: #fff7f0; }
+.tc-tag.red    { color: var(--tc-red);    border-color: #ffc7cd; background: #fff5f5; }
+.tc-tag.gray   { color: var(--tc-text-sub); border-color: var(--tc-border-2); background: #f7f7f7; }
+
+/* --- 按钮 --- */
+.tc-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 28px;
+  padding: 0 13px;
+  font-size: 12.5px;
+  border: 1px solid var(--tc-border-2);
+  border-radius: 2px;
+  background: #fff;
+  color: var(--tc-text-sub);
+  cursor: pointer;
+  transition: all .15s;
+  font-family: inherit;
+}
+.tc-btn:hover { color: var(--tc-blue); border-color: var(--tc-blue); }
+.tc-btn.primary {
+  background: var(--tc-blue);
+  border-color: var(--tc-blue);
+  color: #fff;
+}
+.tc-btn.primary:hover { background: var(--tc-blue-hover); border-color: var(--tc-blue-hover); }
+.tc-btn:disabled { opacity: .45; cursor: not-allowed; }
+.tc-btn:disabled:hover { color: var(--tc-text-sub); border-color: var(--tc-border-2); }
+
+/* ============ 数据表格（腾讯云控制台的核心密度） ============ */
+.tc-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+.tc-table thead th {
+  background: var(--tc-bg-head);
+  color: var(--tc-text-sub);
+  font-weight: 500;
+  text-align: left;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--tc-border);
+  white-space: nowrap;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+.tc-table tbody td {
+  padding: 9px 12px;
+  border-bottom: 1px solid #f0f0f0;
+  color: var(--tc-text);
+}
+.tc-table tbody tr:hover { background: var(--tc-bg-hover); }
+.tc-table tbody tr:last-child td { border-bottom: none; }
+.tc-table .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.tc-table .tc-pos { color: var(--tc-green); }
+.tc-table .tc-neg { color: var(--tc-red); }
+.tc-table .tc-flat { color: var(--tc-text-sub2); }
+
+/* --- 关键指标大数字 --- */
+.tc-metric { display: flex; flex-direction: column; gap: 3px; }
+.tc-metric .v {
+  font-size: 24px;
+  font-weight: 500;
+  line-height: 1.15;
+  font-variant-numeric: tabular-nums;
+}
+.tc-metric .k { font-size: 11.5px; color: var(--tc-text-sub2); }
+.tc-metric .v.up { color: var(--tc-green); }
+.tc-metric .v.down { color: var(--tc-red); }
+
+/* --- 指标网格（4 列 KPI）--- */
+.tc-kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 1px;
+  background: var(--tc-border);
+  border: 1px solid var(--tc-border);
+}
+.tc-kpi {
+  background: #fff;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.tc-kpi .k { font-size: 11.5px; color: var(--tc-text-sub2); }
+.tc-kpi .v {
+  font-size: 20px; font-weight: 500; font-variant-numeric: tabular-nums; line-height: 1.2;
+}
+.tc-kpi .d { font-size: 11.5px; color: var(--tc-text-sub2); }
+
+/* --- 双栏 split --- */
+.tc-split {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  align-items: start;
+}
+.tc-split > * { min-width: 0; }
+
+/* --- 空态 --- */
+.tc-empty {
+  padding: 28px 16px;
+  text-align: center;
+  color: var(--tc-text-sub2);
+  font-size: 12.5px;
+}
+
+/* --- 响应式 --- */
+@media (max-width: 1100px) {
+  .tc-kpi-grid { grid-template-columns: repeat(2, 1fr); }
+  .tc-split { grid-template-columns: 1fr; }
+}
+@media (max-width: 780px) {
+  .tc-top { height: auto; padding: 8px 12px; flex-wrap: wrap; gap: 10px; }
+  .tc-top .tc-nav { overflow-x: auto; }
+  .tc-body { flex-direction: column; }
+  .tc-side {
+    width: 100%; height: auto; position: static;
+    border-right: none; border-bottom: 1px solid var(--tc-border);
+    padding: 6px 0;
+  }
+  .tc-side .tc-nav { flex-direction: row; overflow-x: auto; }
+  .tc-side .tc-nav a { border-left: none; border-bottom: 2px solid transparent; white-space: nowrap; }
+  .tc-side .tc-nav a.active { border-left: none; border-bottom-color: var(--tc-blue); }
+  .tc-side .tc-group, .tc-side .tc-foot { display: none; }
+  .tc-content { padding: 12px; }
+  .tc-page-hd { padding: 12px; }
+  .tc-kpi-grid { grid-template-columns: 1fr; }
+}
+
+
+/* ============ 旧 .card/.card-hd → 腾讯云视觉（结构不动，只改外观） ============ */
+.tc .card {
+  background: var(--tc-bg-card);
+  border: 1px solid var(--tc-border);
+  border-radius: 2px;
+  box-shadow: none;
+}
+.tc .card-hd {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 11px 16px;
+  margin-bottom: 0;
+  border-bottom: 1px solid var(--tc-border);
+  background: var(--tc-bg-head);
+  flex-wrap: wrap;
+}
+.tc .card-hd h3 {
+  font-size: 13.5px;
+  font-weight: 500;
+  margin: 0;
+  color: var(--tc-text);
+}
+/* 卡片正文统一内边距（原来靠 .card > * 的 margin 撑开） */
+.tc .card > .hero,
+.tc .card > .tile-row,
+.tc .card > .split,
+.tc .card > .chart-wrap,
+.tc .card > .chart-legend,
+.tc .card > .ai-box,
+.tc .card > .levels-list,
+.tc .card > .tf-table,
+.tc .card > div:not([class]) { padding: 14px 16px; }
+.tc .card > .chart-wrap { padding: 10px 12px 4px; }
+.tc .card > .chart-legend { padding: 0 12px 10px; }
+.tc .card > .tile-row { padding: 0; border-top: 1px solid var(--tc-border); }
+.tc .card > .split { padding: 0; }
+.tc .card > .split > .card { border: none; border-top: 1px solid var(--tc-border); }
+/* 按钮 */
+.tc button {
+  height: 28px;
+  padding: 0 12px;
+  font-size: 12.5px;
+  border: 1px solid var(--tc-border-2);
+  border-radius: 2px;
+  background: #fff;
+  color: var(--tc-text-sub);
+  cursor: pointer;
+  font-family: inherit;
+  transition: all .15s;
+}
+.tc button:hover { color: var(--tc-blue); border-color: var(--tc-blue); }
+.tc button.active,
+.tc .tf-tabs button.active {
+  background: var(--tc-blue); border-color: var(--tc-blue); color: #fff;
+}
+/* 元信息 */
+.tc .meta { color: var(--tc-text-sub2); font-size: 11.5px; }
+/* 数值等宽 */
+.tc .hero-price .big,
+.tc .tile .t-val,
+.tc .verdict-badge,
+.tc .norm-marker { font-variant-numeric: tabular-nums; }
+/* 链接 */
+.tc a { color: var(--tc-blue); }
+/* 滚动条留白 */
+.tc-content { padding-bottom: 56px; }
+
+/* ============ 腾讯云表格：关键位 / 多周期 ============ */
+.tc .tc-table { font-size: 12.5px; }
+.tc .tc-table thead th {
+  background: var(--tc-bg-head);
+  color: var(--tc-text-sub);
+  font-weight: 500;
+  text-align: left;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--tc-border);
+  white-space: nowrap;
+}
+.tc .tc-table tbody td {
+  padding: 8px 12px;
+  border-bottom: 1px solid #f0f0f0;
+}
+.tc .tc-table tbody tr:hover { background: var(--tc-bg-hover); }
+.tc .tc-table tbody tr:last-child td { border-bottom: none; }
+.tc .tc-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+.tc .tc-table .tc-pos { color: var(--tc-green); }
+.tc .tc-table .tc-neg { color: var(--tc-red); }
+.tc .tc-table .tc-flat { color: var(--tc-text-sub2); }
+/* 关键位行：左侧色条（腾讯云列表常见做法） */
+.tc .lv-table td:first-child { border-left: 3px solid var(--tc-border-2); }
+.tc .lv-table tr[data-kind="resist"] td:first-child { border-left-color: var(--tc-red); }
+.tc .lv-table tr[data-kind="support"] td:first-child { border-left-color: var(--tc-green); }
+.tc .lv-table tr[data-kind="pullback"] td:first-child { border-left-color: var(--tc-blue); }
+.tc .lv-table tr[data-kind="current"] td:first-child { border-left-color: var(--tc-orange); }
+
+/* ============ 腾讯云 KPI 网格内的条形 ============ */
+.tc .tc-kpi .t-lbl { font-size: 11.5px; color: var(--tc-text-sub2); }
+.tc .tc-kpi .t-val { font-size: 20px; font-weight: 500; line-height: 1.2; }
+.tc .tc-kpi .t-sub { font-size: 11.5px; color: var(--tc-text-sub2); }
+.tc .tc-kpi .t-bar {
+  height: 4px;
+  background: #eee;
+  border-radius: 2px;
+  overflow: hidden;
+  margin-top: 6px;
+}
+.tc .tc-kpi .t-bar > i { display: block; height: 100%; border-radius: 2px; }
+/* 环境结论：腾讯云大数字 + 徽章 */
+.tc .hero { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; align-items: start; }
+.tc .hero .lbl { font-size: 11.5px; color: var(--tc-text-sub2); margin-bottom: 4px; }
+.tc .hero-price .big { font-size: 30px; font-weight: 500; font-variant-numeric: tabular-nums; line-height: 1.1; }
+.tc .hero-price .chg { font-size: 13px; font-variant-numeric: tabular-nums; margin-top: 2px; }
+.tc .verdict-badge {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 16px; font-weight: 500;
+  padding: 6px 12px; border-radius: 2px;
+  border: 1px solid var(--tc-border-2);
+  background: #f7f7f7; color: var(--tc-text);
+}
+.tc .verdict-badge.v-bull { color: var(--tc-red); border-color: #ffc7cd; background: #fff5f5; }
+.tc .verdict-badge.v-bear { color: var(--tc-green); border-color: #b7eb8f; background: #f0fbf0; }
+.tc .verdict-badge.v-neu  { color: var(--tc-text-sub); }
+@media (max-width: 900px) { .tc .hero { grid-template-columns: 1fr; } }
 </style>
 </head>
 <body>
-<div class="wb">
+<div class="tc">
 
-  <aside class="wb-side">
-    <div class="wb-logo">
-      <b>⬛ BTC 行情环境</b>
-      <small>多周期 · 一眼判读</small>
-    </div>
-    <nav class="wb-nav">
-      <a href="#sec-verdict" class="active"><span class="nav-dot"></span>环境结论</a>
-      <a href="#sec-chart"><span class="nav-dot"></span>价格主图</a>
-      <a href="#sec-tf"><span class="nav-dot"></span>多周期</a>
-      <a href="#sec-levels"><span class="nav-dot"></span>关键位</a>
-      <a href="#sec-advisory"><span class="nav-dot"></span>交易员判读</a>
+  <!-- 深色顶部导航条（腾讯云控制台风格）-->
+  <header class="tc-top">
+    <div class="tc-logo"><span class="tc-mark">B</span>BTC 策略控制台</div>
+    <nav class="tc-nav">
+      <a href="/">策略工作台</a>
+      <a href="/market" class="active">行情环境大图</a>
     </nav>
-    <div class="wb-side-foot">
-      行情刷新 30s · AI 判读 15min<br>
-      <a href="/">← 返回策略工作台</a>
+    <div class="tc-tools">
+      <span class="tc-chip" id="updated">加载中…</span>
+      <a href="/">← 返回工作台</a>
     </div>
-  </aside>
+  </header>
 
-  <div class="wb-main">
-    <header class="wb-top">
-      <h1>BTC 当前市场环境</h1>
-      <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap">
-        <div class="meta" id="updated">加载中…</div>
-        <button onclick="loadBoard(true)">↻ 刷新</button>
+  <div class="tc-body">
+
+    <aside class="tc-side">
+      <div class="tc-group">行情环境</div>
+      <nav class="tc-nav">
+        <a href="#sec-verdict" class="active"><span class="nav-dot"></span>环境结论</a>
+        <a href="#sec-chart"><span class="nav-dot"></span>价格主图</a>
+        <a href="#sec-tf"><span class="nav-dot"></span>多周期</a>
+        <a href="#sec-levels"><span class="nav-dot"></span>关键位</a>
+        <a href="#sec-advisory"><span class="nav-dot"></span>交易员判读</a>
+      </nav>
+      <div class="tc-foot">
+        行情刷新 30s · AI 判读 15min<br>
+        <a href="/">策略工作台</a>
       </div>
-    </header>
+    </aside>
 
-    <div class="wb-content">
+    <div class="tc-main">
+
+      <!-- 面包屑 + 页头 -->
+      <div class="tc-page-hd">
+        <div class="tc-crumb">
+          <a href="/">BTC 策略控制台</a><span class="sep">/</span>
+          <a href="/market">行情环境</a><span class="sep">/</span>
+          <span>当前市场环境</span>
+        </div>
+        <div class="tc-h1-row">
+          <h1>BTC 当前市场环境</h1>
+          <div class="tc-actions">
+            <span class="tc-sub">多周期综合判读 · 一眼看清现在该多该空</span>
+            <button class="tc-btn" onclick="loadBoard(true)">↻ 刷新</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="tc-content">
 
       <!-- 1. 环境结论 -->
       <div class="card" id="sec-verdict">
@@ -290,29 +808,29 @@
           </div>
         </div>
 
-        <div class="tile-row" style="margin-top:14px">
-          <div class="tile">
-            <div class="t-lbl">波动率（1h 平均真实波幅）</div>
-            <div class="t-val" id="t-vol">—</div>
-            <div class="t-sub" id="t-vol-sub">—</div>
+        <div class="tc-kpi-grid" style="margin-top:14px">
+          <div class="tc-kpi">
+            <div class="k t-lbl">波动率（1h 平均真实波幅）</div>
+            <div class="v t-val" id="t-vol">—</div>
+            <div class="d t-sub" id="t-vol-sub">—</div>
             <div class="t-bar" id="t-vol-bar"></div>
           </div>
-          <div class="tile">
-            <div class="t-lbl">资金费率（8 小时）</div>
-            <div class="t-val" id="t-fund">—</div>
-            <div class="t-sub" id="t-fund-sub">—</div>
+          <div class="tc-kpi">
+            <div class="k t-lbl">资金费率（8 小时）</div>
+            <div class="v t-val" id="t-fund">—</div>
+            <div class="d t-sub" id="t-fund-sub">—</div>
             <div class="t-bar" id="t-fund-bar"></div>
           </div>
-          <div class="tile">
-            <div class="t-lbl">量能（5 根 / 20 根 均量比）</div>
-            <div class="t-val" id="t-vol-2">—</div>
-            <div class="t-sub" id="t-vol2-sub">—</div>
+          <div class="tc-kpi">
+            <div class="k t-lbl">量能（5 根 / 20 根 均量比）</div>
+            <div class="v t-val" id="t-vol-2">—</div>
+            <div class="d t-sub" id="t-vol2-sub">—</div>
             <div class="t-bar" id="t-vol2-bar"></div>
           </div>
-          <div class="tile">
-            <div class="t-lbl">v2.1 开仓闸门（5 日波动）</div>
-            <div class="t-val" id="t-gate">—</div>
-            <div class="t-sub" id="t-gate-sub">—</div>
+          <div class="tc-kpi">
+            <div class="k t-lbl">v2.1 开仓闸门（5 日波动）</div>
+            <div class="v t-val" id="t-gate">—</div>
+            <div class="d t-sub" id="t-gate-sub">—</div>
             <div class="t-bar" id="t-gate-bar"></div>
           </div>
         </div>
@@ -364,9 +882,10 @@
         </div>
       </div>
 
-    </div>
-  </div>
-</div>
+      </div><!-- /tc-content -->
+    </div><!-- /tc-main -->
+  </div><!-- /tc-body -->
+</div><!-- /tc -->
 
 <script>
 "use strict";
@@ -594,11 +1113,11 @@ function renderTfMatrix(d) {
         <span class="tf-w">权重 ×${weights[tf]} · 得分 ${_fmtNum(t.score_trend + t.score_momentum + t.score_volatility, 0)}</span>
       </div>
       <div class="tf-tags">
-        <span class="tag ${trendCls}">趋势 ${t.trend || "—"}</span>
-        <span class="tag ${macdCls}">动能 ${t.macd_state || "—"}</span>
-        <span class="tag ${rsiCls}">相对强弱 ${_fmtNum(t.rsi, 0)} ${t.rsi_state || ""}</span>
-        <span class="tag ${volCls}">量能 ${t.vol_regime || "—"}</span>
-        <span class="tag ${structCls}">结构 ${t.structure || "—"}</span>
+        <span class="tc-tag ${_tcTagCls(trendCls)}">趋势 ${t.trend || "—"}</span>
+        <span class="tc-tag ${_tcTagCls(macdCls)}">动能 ${t.macd_state || "—"}</span>
+        <span class="tc-tag ${_tcTagCls(rsiCls)}">相对强弱 ${_fmtNum(t.rsi, 0)} ${t.rsi_state || ""}</span>
+        <span class="tc-tag ${_tcTagCls(volCls)}">量能 ${t.vol_regime || "—"}</span>
+        <span class="tc-tag ${_tcTagCls(structCls)}">结构 ${t.structure || "—"}</span>
       </div>
       <div class="dims">
         ${_dimBar("趋势", t.score_trend)}
@@ -615,6 +1134,10 @@ function renderTfMatrix(d) {
   const agg = d.aggregate || {};
   document.getElementById("tf-meta").textContent =
     agg.consensus ? `一致性 ${agg.consensus}` : "";
+}
+function _tcTagCls(cls) {
+  // 旧 .tag 的 g/r/a 配色 → 腾讯云 .tc-tag 配色
+  return { g: "green", r: "red", a: "orange" }[cls] || "gray";
 }
 function _dimBar(label, score) {
   const s = score === null || score === undefined ? 0 : score;
@@ -660,14 +1183,16 @@ function renderLevels(d) {
 
   rows.sort((a, b) => b.px - a.px);
 
-  let html = `<table class="lv-table">
+  let html = `<table class="tc-table lv-table">
     <thead><tr><th>性质</th><th>位置</th><th style="text-align:right">价位</th><th style="text-align:right">距现价</th></tr></thead><tbody>`;
   for (const r of rows) {
-    html += `<tr>
+    // data-kind 供 CSS 左侧色条（腾讯云列表风格）：阻力=红 支撑=绿 回调位=蓝
+    const kind = r.cls === "res" ? "resist" : (r.cls === "sup" ? "support" : "pullback");
+    html += `<tr data-kind="${kind}">
       <td><span class="lv-tag ${r.cls}">${r.tag}</span></td>
       <td>${r.label}</td>
-      <td class="r">${_fmtPx(r.px, 1)}</td>
-      <td class="r ${_cls(r.dist)}">${r.dist === null ? "—" : _sign(r.dist) + _fmtNum(r.dist, 2) + "%"}</td>
+      <td class="num">${_fmtPx(r.px, 1)}</td>
+      <td class="num ${_cls(r.dist)}">${r.dist === null ? "—" : _sign(r.dist) + _fmtNum(r.dist, 2) + "%"}</td>
     </tr>`;
   }
   html += `</tbody></table>`;

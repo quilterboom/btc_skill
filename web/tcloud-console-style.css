@@ -1,0 +1,385 @@
+<!--
+  腾讯云控制台风格 CSS 片段（2026-10-27 liusir：参考 console.cloud.tencent.com）
+  ---------------------------------------------------------------------------
+  用法：贴在页面 <style> 里，把原来的 .wb-* 壳样式换成下面的 .tc-* 即可。
+
+  与原 .wb 工作台的差异（腾讯云控制台的视觉特征）：
+    1. 顶部是**深色横向导航条**（含 logo / 主导航 / 工具区），不是左侧深色栏
+    2. 左侧栏是**白底 + 分组标题 + 细边框**，选中项是**蓝色左边框 + 浅蓝底**
+    3. 内容区有**面包屑**（产品 / 模块 / 当前页）
+    4. 卡片更紧凑：标题栏小一号、带**底部细分隔线**，无圆角阴影堆叠
+    5. 数据区用**表格**（表头浅灰底、斑马纹、数字右对齐等宽）
+
+  注意：本片段只改视觉，不动 DOM 结构 → 现有 JS 选择器（#sec-* / .card / .panel）
+  全部不受影响。
+-->
+
+<style>
+/* ============ 腾讯云控制台配色 ============ */
+:root {
+  --tc-blue: #0052d9;           /* 腾讯云主蓝 */
+  --tc-blue-hover: #003cab;
+  --tc-blue-light: #ecf2fe;
+  --tc-green: #00a400;
+  --tc-orange: #ff7200;
+  --tc-red: #e34d59;
+  --tc-text: #000;
+  --tc-text-2: #000;            /* 二级文字用 opacity 而非灰 */
+  --tc-text-sub: rgba(0,0,0,.6);
+  --tc-text-sub2: rgba(0,0,0,.4);
+  --tc-border: #e5e5e5;
+  --tc-border-2: #dcdcdc;
+  --tc-bg: #f3f3f3;             /* 页面底色 */
+  --tc-bg-card: #fff;
+  --tc-bg-hover: #f5f7fa;
+  --tc-bg-head: #fafafa;        /* 表头 / 标题栏底 */
+}
+
+/* ============ 顶层壳：深色顶栏 + 白底左栏 ============ */
+.tc {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  background: var(--tc-bg);
+}
+
+/* --- 深色顶部导航条 --- */
+.tc-top {
+  height: 50px;
+  background: #0d1a2b;          /* 腾讯云控制台深蓝黑 */
+  color: #fff;
+  display: flex;
+  align-items: center;
+  padding: 0 20px;
+  gap: 24px;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+.tc-top .tc-logo {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: .3px;
+  white-space: nowrap;
+}
+.tc-top .tc-logo .tc-mark {
+  width: 22px; height: 22px;
+  border-radius: 4px;
+  background: linear-gradient(135deg, #0052d9, #00a4ff);
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 12px; font-weight: 700;
+}
+.tc-top .tc-nav { display: flex; gap: 4px; }
+.tc-top .tc-nav a {
+  color: rgba(255,255,255,.78);
+  text-decoration: none;
+  font-size: 13px;
+  padding: 6px 12px;
+  border-radius: 3px;
+  transition: background .15s, color .15s;
+}
+.tc-top .tc-nav a:hover { background: rgba(255,255,255,.1); color: #fff; }
+.tc-top .tc-nav a.active { background: var(--tc-blue); color: #fff; }
+.tc-top .tc-tools {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  font-size: 12.5px;
+  color: rgba(255,255,255,.72);
+}
+.tc-top .tc-tools .tc-chip {
+  padding: 3px 9px;
+  border: 1px solid rgba(255,255,255,.2);
+  border-radius: 3px;
+  font-variant-numeric: tabular-nums;
+}
+.tc-top .tc-tools a { color: rgba(255,255,255,.78); text-decoration: none; }
+.tc-top .tc-tools a:hover { color: #fff; }
+
+/* --- 主体：左栏 + 内容 --- */
+.tc-body { display: flex; flex: 1; min-height: 0; }
+
+/* --- 白底左侧栏 --- */
+.tc-side {
+  width: 208px;
+  flex: none;
+  background: var(--tc-bg-card);
+  border-right: 1px solid var(--tc-border);
+  padding: 12px 0;
+  position: sticky;
+  top: 50px;
+  height: calc(100vh - 50px);
+  overflow-y: auto;
+}
+.tc-side .tc-group {
+  font-size: 11.5px;
+  color: var(--tc-text-sub2);
+  padding: 10px 20px 6px;
+  letter-spacing: .5px;
+}
+.tc-side .tc-nav { display: flex; flex-direction: column; }
+.tc-side .tc-nav a {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 20px;
+  font-size: 13px;
+  color: var(--tc-text-sub);
+  text-decoration: none;
+  border-left: 3px solid transparent;
+  transition: background .12s, color .12s;
+}
+.tc-side .tc-nav a:hover { background: var(--tc-bg-hover); color: var(--tc-text); }
+.tc-side .tc-nav a.active {
+  background: var(--tc-blue-light);
+  color: var(--tc-blue);
+  border-left-color: var(--tc-blue);
+  font-weight: 500;
+}
+.tc-side .tc-nav .nav-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: #c4c4c4; flex: none;
+}
+.tc-side .tc-nav a.active .nav-dot { background: var(--tc-blue); }
+.tc-side .tc-foot {
+  margin-top: auto;
+  padding: 14px 20px 4px;
+  font-size: 11.5px;
+  color: var(--tc-text-sub2);
+  border-top: 1px solid var(--tc-border);
+  margin-top: 24px;
+}
+.tc-side .tc-foot a { color: var(--tc-blue); text-decoration: none; }
+
+/* --- 右侧内容区 --- */
+.tc-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+
+/* --- 面包屑 + 页头 --- */
+.tc-page-hd {
+  background: var(--tc-bg-card);
+  border-bottom: 1px solid var(--tc-border);
+  padding: 14px 24px 12px;
+}
+.tc-crumb {
+  font-size: 12px;
+  color: var(--tc-text-sub2);
+  margin-bottom: 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.tc-crumb a { color: var(--tc-text-sub); text-decoration: none; }
+.tc-crumb a:hover { color: var(--tc-blue); }
+.tc-crumb .sep { color: #ccc; }
+.tc-page-hd .tc-h1-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.tc-page-hd h1 {
+  font-size: 18px;
+  font-weight: 500;
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.tc-page-hd .tc-sub { font-size: 12px; color: var(--tc-text-sub); }
+.tc-page-hd .tc-actions { display: flex; align-items: center; gap: 10px; }
+
+/* --- 内容容器 --- */
+.tc-content { padding: 16px 24px 48px; display: flex; flex-direction: column; gap: 14px; }
+
+/* --- 分区标题（腾讯云叫「组」）--- */
+.tc-sec-hd {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin: 2px 0 -2px;
+}
+.tc-sec-hd h2 { font-size: 14px; font-weight: 500; margin: 0; }
+.tc-sec-hd .meta { font-size: 12px; color: var(--tc-text-sub2); }
+
+/* ============ 卡片：紧凑、底部细线、无重阴影 ============ */
+.tc-card {
+  background: var(--tc-bg-card);
+  border: 1px solid var(--tc-border);
+  border-radius: 2px;
+}
+.tc-card-hd {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 11px 16px;
+  border-bottom: 1px solid var(--tc-border);
+  background: var(--tc-bg-head);
+  flex-wrap: wrap;
+}
+.tc-card-hd h3 {
+  font-size: 13.5px;
+  font-weight: 500;
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.tc-card-hd .meta { font-size: 11.5px; color: var(--tc-text-sub2); }
+.tc-card-bd { padding: 14px 16px; }
+
+/* --- 标签 / 徽章 --- */
+.tc-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11.5px;
+  line-height: 1.6;
+  padding: 0 7px;
+  border-radius: 2px;
+  border: 1px solid;
+  white-space: nowrap;
+}
+.tc-tag.blue   { color: var(--tc-blue);   border-color: #c6d9ff; background: var(--tc-blue-light); }
+.tc-tag.green  { color: var(--tc-green);  border-color: #b7eb8f; background: #f0fbf0; }
+.tc-tag.orange { color: var(--tc-orange); border-color: #ffd4b3; background: #fff7f0; }
+.tc-tag.red    { color: var(--tc-red);    border-color: #ffc7cd; background: #fff5f5; }
+.tc-tag.gray   { color: var(--tc-text-sub); border-color: var(--tc-border-2); background: #f7f7f7; }
+
+/* --- 按钮 --- */
+.tc-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 28px;
+  padding: 0 13px;
+  font-size: 12.5px;
+  border: 1px solid var(--tc-border-2);
+  border-radius: 2px;
+  background: #fff;
+  color: var(--tc-text-sub);
+  cursor: pointer;
+  transition: all .15s;
+  font-family: inherit;
+}
+.tc-btn:hover { color: var(--tc-blue); border-color: var(--tc-blue); }
+.tc-btn.primary {
+  background: var(--tc-blue);
+  border-color: var(--tc-blue);
+  color: #fff;
+}
+.tc-btn.primary:hover { background: var(--tc-blue-hover); border-color: var(--tc-blue-hover); }
+.tc-btn:disabled { opacity: .45; cursor: not-allowed; }
+.tc-btn:disabled:hover { color: var(--tc-text-sub); border-color: var(--tc-border-2); }
+
+/* ============ 数据表格（腾讯云控制台的核心密度） ============ */
+.tc-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+.tc-table thead th {
+  background: var(--tc-bg-head);
+  color: var(--tc-text-sub);
+  font-weight: 500;
+  text-align: left;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--tc-border);
+  white-space: nowrap;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+.tc-table tbody td {
+  padding: 9px 12px;
+  border-bottom: 1px solid #f0f0f0;
+  color: var(--tc-text);
+}
+.tc-table tbody tr:hover { background: var(--tc-bg-hover); }
+.tc-table tbody tr:last-child td { border-bottom: none; }
+.tc-table .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.tc-table .tc-pos { color: var(--tc-green); }
+.tc-table .tc-neg { color: var(--tc-red); }
+.tc-table .tc-flat { color: var(--tc-text-sub2); }
+
+/* --- 关键指标大数字 --- */
+.tc-metric { display: flex; flex-direction: column; gap: 3px; }
+.tc-metric .v {
+  font-size: 24px;
+  font-weight: 500;
+  line-height: 1.15;
+  font-variant-numeric: tabular-nums;
+}
+.tc-metric .k { font-size: 11.5px; color: var(--tc-text-sub2); }
+.tc-metric .v.up { color: var(--tc-green); }
+.tc-metric .v.down { color: var(--tc-red); }
+
+/* --- 指标网格（4 列 KPI）--- */
+.tc-kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 1px;
+  background: var(--tc-border);
+  border: 1px solid var(--tc-border);
+}
+.tc-kpi {
+  background: #fff;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.tc-kpi .k { font-size: 11.5px; color: var(--tc-text-sub2); }
+.tc-kpi .v {
+  font-size: 20px; font-weight: 500; font-variant-numeric: tabular-nums; line-height: 1.2;
+}
+.tc-kpi .d { font-size: 11.5px; color: var(--tc-text-sub2); }
+
+/* --- 双栏 split --- */
+.tc-split {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  align-items: start;
+}
+.tc-split > * { min-width: 0; }
+
+/* --- 空态 --- */
+.tc-empty {
+  padding: 28px 16px;
+  text-align: center;
+  color: var(--tc-text-sub2);
+  font-size: 12.5px;
+}
+
+/* --- 响应式 --- */
+@media (max-width: 1100px) {
+  .tc-kpi-grid { grid-template-columns: repeat(2, 1fr); }
+  .tc-split { grid-template-columns: 1fr; }
+}
+@media (max-width: 780px) {
+  .tc-top { height: auto; padding: 8px 12px; flex-wrap: wrap; gap: 10px; }
+  .tc-top .tc-nav { overflow-x: auto; }
+  .tc-body { flex-direction: column; }
+  .tc-side {
+    width: 100%; height: auto; position: static;
+    border-right: none; border-bottom: 1px solid var(--tc-border);
+    padding: 6px 0;
+  }
+  .tc-side .tc-nav { flex-direction: row; overflow-x: auto; }
+  .tc-side .tc-nav a { border-left: none; border-bottom: 2px solid transparent; white-space: nowrap; }
+  .tc-side .tc-nav a.active { border-left: none; border-bottom-color: var(--tc-blue); }
+  .tc-side .tc-group, .tc-side .tc-foot { display: none; }
+  .tc-content { padding: 12px; }
+  .tc-page-hd { padding: 12px; }
+  .tc-kpi-grid { grid-template-columns: 1fr; }
+}
+</style>

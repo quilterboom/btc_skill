@@ -83,7 +83,7 @@ function check(name, cond, extra) {
   check("归一化指针有位置", markerL && markerL !== "50%", "left=" + markerL);
 
   console.log("\n【2】指标小卡（4 张）");
-  const tiles = qa(".tile");
+  const tiles = qa(".tile, .tc-kpi");
   check("4 张指标卡", tiles.length === 4, "实际 " + tiles.length);
   check("波动率卡有 %", q("#t-vol").textContent.includes("%"), q("#t-vol").textContent);
   check("资金费率卡有 %", q("#t-fund").textContent.includes("%"), q("#t-fund").textContent);
@@ -97,7 +97,8 @@ function check(name, cond, extra) {
   const names = qa(".tf-name").map(e => e.textContent.trim());
   check("周期名是中文（4 小时/1 小时/15 分钟）",
     names.join("|") === "4 小时|1 小时|15 分钟", names.join("|"));
-  check("每行有趋势标签", qa(".tf-row .tag").length >= 9, "tag 数 " + qa(".tf-row .tag").length);
+  const tfTags = qa(".tf-row .tag, .tf-row .tc-tag");
+  check("每行有趋势标签", tfTags.length >= 9, "tag 数 " + tfTags.length);
   check("每行有 3 个维度条", qa(".dim").length === 9, "dim 数 " + qa(".dim").length);
   check("维度条有比例宽度", qa(".dim .d-bar i").every(e => /%$/.test(e.style.width || "")),
     qa(".dim .d-bar i").map(e => e.style.width).join(","));
@@ -107,7 +108,7 @@ function check(name, cond, extra) {
   check("关键位有数据行", lvRows.length >= 4, "实际 " + lvRows.length);
   check("关键位区分阻力/支撑", qa(".lv-tag.res").length >= 1 && qa(".lv-tag.sup").length >= 1,
     "res=" + qa(".lv-tag.res").length + " sup=" + qa(".lv-tag.sup").length);
-  check("关键位有距现价百分比", qa(".lv-table td.r").some(e => e.textContent.includes("%")));
+  check("关键位有距现价百分比", qa(".lv-table td.r, .lv-table td.num").some(e => e.textContent.includes("%")));
 
   console.log("\n【5】交易员判读");
   const ai = q(".ai-body");
@@ -134,7 +135,7 @@ function check(name, cond, extra) {
 
   console.log("\n【7】中文化（用户可见标签不得出现英文缩写）");
   const banned = /\b(WR|DD|PF|ES|PnL|OI|SR|TP1|TP2|SL|Long|Short)\b/;
-  const visibleText = q(".wb-content").textContent;
+  const visibleText = q(".tc-content, .wb-content").textContent;
   const bannedHit = visibleText.match(banned);
   check("主视图无英文指标缩写", bannedHit === null, bannedHit ? bannedHit.join(",") : "无");
   check("维度标签是中文（趋势/动能/波动）",
@@ -147,10 +148,10 @@ function check(name, cond, extra) {
   check("没有 [object Object]", !visibleText.includes("[object Object]"));
 
   console.log("\n【9】侧栏导航锚点齐全");
-  const anchors = qa(".wb-nav a").map(a => a.getAttribute("href"));
+  const anchors = qa(".tc-side .tc-nav a, .wb-nav a").map(a => a.getAttribute("href"));
   const targets = anchors.map(h => h.replace("#", ""));
   check("锚点都有对应元素", targets.every(t => doc.getElementById(t) !== null), targets.join(","));
-  check("有返回工作台链接", qa(".wb-side-foot a").some(a => a.getAttribute("href") === "/"));
+  check("有返回工作台链接", qa(".tc-foot a, .wb-side-foot a").some(a => a.getAttribute("href") === "/"));
 
   console.log("\n【10】周期切换不报错");
   let err = null;
