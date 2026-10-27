@@ -765,19 +765,21 @@
       display: flex; justify-content: space-between; font-size: 10px; color: var(--muted); margin-top: 4px;
       font-variant-numeric: tabular-nums;
     }
-    .pnl-extremes {
-      display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 4px;
+    /* P&L 日历 hover tooltip（2026-10-27 替代底部静态汇总行） */
+    .pnl-bar-row { position: relative; }
+    .pnl-tip {
+      position: absolute; z-index: 20; pointer-events: none;
+      background: #1f2937; color: #fff; border-radius: 6px;
+      padding: 7px 10px; font-size: 11.5px; line-height: 1.5;
+      box-shadow: 0 4px 14px rgba(0,0,0,.22);
+      white-space: nowrap;
     }
-    .pnl-extreme {
-      padding: 8px 10px; background: #f8fafc; border-radius: 6px; font-size: 12px;
-      border-left: 3px solid transparent;
-    }
-    .pnl-extreme.win { border-left-color: var(--green); }
-    .pnl-extreme.lose { border-left-color: var(--red); }
-    .pnl-extreme .v { font-weight: 700; font-variant-numeric: tabular-nums; }
-    .pnl-extreme.win .v { color: var(--green); }
-    .pnl-extreme.lose .v { color: var(--red); }
-    .pnl-extreme .d { color: var(--muted); font-size: 11px; margin-left: 4px; }
+    .pnl-tip[hidden] { display: none; }
+    .pnl-tip .t-date { color: #9ca3af; font-size: 10.5px; }
+    .pnl-tip .t-pnl { font-weight: 700; font-variant-numeric: tabular-nums; font-size: 13px; }
+    .pnl-tip .t-pnl.up { color: #34d399; }
+    .pnl-tip .t-pnl.down { color: #f87171; }
+    .pnl-tip .t-meta { color: #d1d5db; }
 
     /* 错误归因：横向条形 + 列表 */
     .ms-board { display: flex; flex-direction: column; gap: 10px; flex: 1; }
@@ -2362,13 +2364,21 @@ function renderPnlCalendar(cal, elId = "pnl-calendar") {
   const slots = Math.max(30, days.length);
   const emptyCount = slots - days.length;
 
+  // ★ 2026-10-27 liusir：「删除底部的 -62.99U 2026-10-08 这一行的数据，
+  //   改为鼠标移动到 pnl-bar-day pos 元素上，展示对应的数据」
+  //   → 去掉静态的 .pnl-extremes 汇总行，改成 hover tooltip。
+  //   数据挂在 data-* 上，tooltip 由 #pnl-tip 统一渲染（比原生 title 快且可控）。
   const cell = d => {
     const p = d.pnl;
     const cls = p > 0 ? "pos" : p < 0 ? "neg" : "";
     const h = Math.max(8, Math.abs(p) / maxAbs * 100);
-    return `<div class="pnl-bar-day ${cls}" title="${d.date}: ${p >= 0 ? "+" : ""}${p.toFixed(2)}U · ${d.n_trades} 笔 (${d.wins} 盈 ${d.losses} 亏)"
-      style="flex-grow:${Math.max(h, 8)}; height:100%"
-      ></div>`;
+    return `<div class="pnl-bar-day ${cls}"
+      data-date="${d.date}"
+      data-pnl="${(p >= 0 ? "+" : "") + p.toFixed(2)}U"
+      data-n="${d.n_trades}"
+      data-wins="${d.wins}"
+      data-losses="${d.losses}"
+      style="flex-grow:${Math.max(h, 8)}; height:100%"></div>`;
   };
 
   const html = `
@@ -2389,12 +2399,34 @@ function renderPnlCalendar(cal, elId = "pnl-calendar") {
         <span>${days[0]?.date || ""}</span>
         <span>${today ? "今天 " + today.date : ""}</span>
       </div>
-      <div class="pnl-extremes">
-        ${cal.max_win_day ? `<div class="pnl-extreme win"><b class="v">+${cal.max_win_day.pnl.toFixed(2)}U</b><span class="d">${cal.max_win_day.date}</span></div>` : ""}
-        ${cal.max_loss_day ? `<div class="pnl-extreme lose"><b class="v">${cal.max_loss_day.pnl.toFixed(2)}U</b><span class="d">${cal.max_loss_day.date}</span></div>` : ""}
-      </div>
+      <div id="pnl-tip" class="pnl-tip" hidden></div>
     </div>`;
   el.innerHTML = html;
+
+  // hover tooltip：移到条形上展示当日数据
+  const tip = el.querySelector("#pnl-tip");
+  if (!tip) return;
+  el.querySelectorAll(".pnl-bar-day[data-date]").forEach(bar => {
+    bar.addEventListener("mouseenter", () => {
+      tip.innerHTML =
+        `<div class="t-date">${bar.dataset.date}</div>` +
+        `<div class="t-pnl ${bar.classList.contains("pos") ? "up" : bar.classList.contains("neg") ? "down" : ""}">${bar.dataset.pnl}</div>` +
+        `<div class="t-meta">${bar.dataset.n} 笔 · ${bar.dataset.wins} 盈 ${bar.dataset.losses} 亏</div>`;
+      tip.hidden = false;
+    });
+    bar.addEventListener("mousemove", (e) => {
+      const box = el.getBoundingClientRect();
+      const x = e.clientX - box.left;
+      const y = e.clientY - box.top;
+      // 贴着鼠标放，靠边时翻转避免被裁掉；再钳制到容器内
+      const w = tip.offsetWidth || 150;
+      let left = (x + w + 20 > box.width ? x - w - 12 : x + 12);
+      left = Math.max(0, Math.min(left, Math.max(0, box.width - w)));
+      tip.style.left = left + "px";
+      tip.style.top = Math.max(0, y - 12) + "px";
+    });
+    bar.addEventListener("mouseleave", () => { tip.hidden = true; });
+  });
 }
 
 function renderMistakes(ms, elId = "mistakes-summary") {
