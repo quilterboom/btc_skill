@@ -303,21 +303,6 @@ def _winrate() -> dict:
     }
 
 
-def _winrate_by_era() -> list:
-    """★ 2026-10-26 新增：分代胜率/净利（旧代不再污染当前代判断）。
-
-    数据源是 journal（比 events 更全，含未进场的判定），按 era_split 切分。
-    """
-    import sys as _sys
-    _p = str(Path(__file__).resolve().parent.parent / "scripts")
-    if _p not in _sys.path:
-        _sys.path.insert(0, _p)
-    try:
-        from era_split import era_summary
-    except Exception:
-        return []
-    trades = _read_jsonl(DATA_DIR / "journal.jsonl")
-    return era_summary(trades)
 
 
 def _is_test_id(rid: str) -> bool:
@@ -572,7 +557,6 @@ def build_status() -> dict:
         "strategy": _journal_state(),
         "winrate": _winrate(),
         # ★ 2026-10-26 新增：分代明细（旧代不再污染当前代判断，但保留可见）
-        "winrate_by_era": _winrate_by_era(),
         # 2026-10-17 liusir: 借鉴 LuxAlgo/trade-journal
         "edge_score": _edge_score(),
         "pnl_calendar": _pnl_calendar(),

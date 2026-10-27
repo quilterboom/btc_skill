@@ -148,7 +148,7 @@ function check(name, cond, extra) {
   check("没有 [object Object]", !visibleText.includes("[object Object]"));
 
   console.log("\n【9】侧栏导航锚点齐全");
-  const anchors = qa(".tc-side .tc-nav a, .wb-nav a").map(a => a.getAttribute("href"));
+  const anchors = qa(".tc-sidebar .tc-nav a, .wb-nav a").map(a => a.getAttribute("href"));
   const targets = anchors.map(h => h.replace("#", ""));
   check("锚点都有对应元素", targets.every(t => doc.getElementById(t) !== null), targets.join(","));
   check("有返回工作台链接", qa(".tc-foot a, .wb-side-foot a").some(a => a.getAttribute("href") === "/"));
