@@ -1289,6 +1289,127 @@
 /* 网格间距收紧（腾讯云控制台更紧凑）*/
 .tc .grid { gap: 14px; }
 .tc .data-grid { gap: 14px; }
+
+/* ============ 顶栏右侧元素：深色底上的覆盖（修背景异常） ============
+   根因：页面旧 .tc-chip（浅底 / 红绿边框）和 .env-toggle（白底按钮）
+   在深色顶栏上露出浅底 → 背景异常。这里统一覆盖为深色风格。
+   放在最后 + .tc-top 前缀 + !important 保证胜过前面的旧规则。 */
+.tc-top .tc-chip {
+  background: transparent !important;
+  border: 1px solid rgba(255,255,255,.22) !important;
+  color: rgba(255,255,255,.78) !important;
+}
+.tc-top .tc-chip .chip-lbl,
+.tc-top .tc-chip .chip-val { color: rgba(255,255,255,.82) !important; }
+.tc-top .env-toggle {
+  display: inline-flex !important;
+  border: 1px solid rgba(255,255,255,.22) !important;
+  border-radius: 3px !important;
+  overflow: hidden !important;
+  background: transparent !important;
+}
+.tc-top .env-toggle button {
+  height: 24px !important;
+  padding: 0 12px !important;
+  font-size: 12px !important;
+  border: none !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  color: rgba(255,255,255,.7) !important;
+}
+.tc-top .env-toggle button + button {
+  border-left: 1px solid rgba(255,255,255,.22) !important;
+}
+.tc-top .env-toggle button.active {
+  background: var(--tc-blue) !important;
+  color: #fff !important;
+}
+.tc-top .env-toggle button:hover:not(.active) {
+  background: rgba(255,255,255,.12) !important;
+  color: #fff !important;
+}
+.tc-top .env-badge {
+  background: rgba(255,255,255,.12) !important;
+  border-color: rgba(255,255,255,.22) !important;
+  color: rgba(255,255,255,.85) !important;
+}
+.tc-top .env-badge.training {
+  background: rgba(255,114,0,.18) !important;
+  border-color: rgba(255,114,0,.5) !important;
+  color: #ffb86b !important;
+}
+
+/* ============ 交易明细：固定高度 + 滚动（2026-10-27 liusir） ============
+   liusir：「交易明细展示的很丑，你固定一个高度，超过这个高度的可以滚动」
+   根因：两个面板行数不一样（老师单 19 行 vs 结算单 2 行），高度参差
+   → 做成统一固定高度 + 内部滚动，表头 sticky，观感整齐。 */
+.tc .split-grid > .panel {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  /* 高度不再固定：列表已固定 520px，面板其余部分（标题/工具栏/分页条）
+     随内容自适应，避免标题换行时被压缩。 */
+}
+.tc .panel .trade-list {
+  display: block !important;
+  width: 100% !important;
+  /* ★ liusir：「固定一个高度，超过这个高度的可以滚动」
+     直接给固定像素高度（不用 flex:1）—— 面板内其它元素高度随内容变化
+     （标题 meta 会换行、工具栏 chip 数不同），flex:1 会让两边列表差 29px。
+     固定 520px 保证两个列表严格等高对齐。 */
+  height: 520px;
+  flex: none;
+  overflow-y: auto;
+  overflow-x: hidden;
+  background: #fff;
+  border: 1px solid var(--tc-border);
+  border-radius: 2px;
+}
+@media (max-width: 1100px) {
+  .tc .panel .trade-list { height: 420px; }
+}
+/* 表头吸顶（滚动时列名不消失）*/
+.tc .panel .trade-list .tl-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--tc-bg-head);
+}
+.tc .panel .trade-list .tl-table thead th.tl-right { text-align: right; }
+/* 滚动条细一点，不抢戏 */
+.tc .panel .trade-list::-webkit-scrollbar { width: 8px; height: 8px; }
+.tc .panel .trade-list::-webkit-scrollbar-thumb {
+  background: #c9cdd4; border-radius: 4px;
+}
+.tc .panel .trade-list::-webkit-scrollbar-thumb:hover { background: #a8adb5; }
+.tc .panel .trade-list::-webkit-scrollbar-track { background: #f5f5f5; }
+/* ★ 两边面板的工具栏/统计条行数不同（344 vs 375px）→ 列表高度不齐。
+   统一固定高度，让两个列表严格等高对齐。 */
+.tc .panel .panel-stats,
+.tc .panel .trade-toolbar {
+  flex: none;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+}
+.tc .panel .trade-toolbar {
+  min-height: 38px;
+  padding: 4px 12px;
+}
+/* 分页条固定在面板底部（不随列表滚动）*/
+.tc .panel .panel-pager {
+  flex: none;
+  min-height: 42px;
+  border: 1px solid var(--tc-border);
+  border-top: 1px solid var(--tc-border-2);
+  background: var(--tc-bg-head);
+  border-radius: 0 0 2px 2px;
+}
+/* 交易明细区块：左右两栏等高 */
+.tc #sec-trades + .split-grid,
+.tc .split-grid#sec-trades-grid {
+  align-items: stretch;
+}
 </style>
 </head>
 <body>
