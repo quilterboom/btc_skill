@@ -677,12 +677,18 @@ class TestNotifyCloseNoiseGate(unittest.TestCase):
         }
 
     def _run(self, sig, res):
-        """跑 _notify_close，mock push_telegram + load_token/chat"""
+        """跑 _notify_close，mock push_telegram + load_token/chat
+
+        ★ 2026-10-27：_notify_close 改走 _push_once（幂等推送），
+          所以要同时 mock push_once_telegram，否则会真的发 Telegram。
+        """
         with patch("position_tracker.push_telegram") as mock_push, \
+             patch("position_tracker.push_once_telegram") as mock_push_once, \
              patch("position_tracker.load_token", return_value="fake"), \
              patch("position_tracker.load_chat", return_value="fake"):
             pt._notify_close(sig, res)
-        return mock_push
+        # 兼容两种实现：返回实际被调用的那个 mock
+        return mock_push_once if mock_push_once.called else mock_push
 
     def test_be_stopped_zero_displacement_gets_skipped(self):
         """今晚错卡：exit_px=entry=82930.5, 距 entry < 5 点 → 跳过噪音门"""

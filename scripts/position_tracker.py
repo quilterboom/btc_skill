@@ -46,7 +46,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from gate_fetch import DATA_DIR, fetch_ohlcv
 from indicators import ema as _ema_func
-from telegram import load_token, load_chat, push as push_telegram
+from telegram import load_token, load_chat, push as push_telegram, push_once as push_once_telegram
 try:
     from config import PARTIAL_CLOSE_AFTER_SEC, PARTIAL_CLOSE_RATIO
 except ImportError:
@@ -637,7 +637,7 @@ def _notify_fill(sig: Dict, fill_px: float, contracts: int, ts: int) -> None:
         f"TP1 <b>{tp1:,.1f}</b> ｜ TP2 <b>{tp2:,.1f}</b> ｜ SL <b>{sl:,.1f}</b>\n"
         f"等待 TP1 / TP2 触发，或 SL 出局"
     )
-    _push(card)
+    _push_once(f"{sig.get('id')}:fill", card)
 
 
 def _notify_partial(sig: Dict, label: str, px: float, contracts: int, ts: int) -> None:
@@ -657,7 +657,7 @@ def _notify_partial(sig: Dict, label: str, px: float, contracts: int, ts: int) -
         f"止损上移到 <b>{sl_cn}</b>\n"
         f"持仓继续监控，按 TP2/TP3 推进"
     )
-    _push(card)
+    _push_once(f"{sig.get('id')}:partial:{label}", card)
 
 
 def _notify_close(sig: Dict, res: Dict) -> None:
@@ -706,7 +706,7 @@ def _notify_close(sig: Dict, res: Dict) -> None:
         f"出场 @ <b>{res['exit_px']:,.1f}</b> ｜ 净利 <b>{net:+.2f}U</b>（含 4.85U 手续费）\n"
         f"类目：{cat} ｜ 部分止盈 {res.get('partial_exits', 0)} 次"
     )
-    _push(card)
+    _push_once(f"{sig.get('id')}:close", card)
 
     # 2026-10-11 风控安全阀触发告警（不改参数，只加风控机制）
     if res.get("safety_break"):
@@ -722,7 +722,7 @@ def _notify_close(sig: Dict, res: Dict) -> None:
             f"  2. 单笔超过 -30U 后暂停开新仓，等 v5 验证后再重启\n"
             f"  3. 账户级风控：累计 -50U 时强制全停"
         )
-        _push(alert)
+        _push_once(f"{sig.get('id')}:safety_break", alert)
 
 
 def _push(text: str) -> None:
@@ -731,6 +731,20 @@ def _push(text: str) -> None:
     chat = load_chat()
     if tok:
         push_telegram(text, tok, chat)
+
+
+def _push_once(key: str, text: str) -> None:
+    """幂等推送（2026-10-27 加，防刷屏）。
+
+    key = f"{持仓id}:{事件类型}" —— 同一笔单的同一类事件只推一次。
+    根因：risk_guard 每轮巡检都把「status 卡 pending 的老单」当持仓处理，
+          反复触发 TP1/EMA 部分止盈推送（10-27 40 秒内推了 19 条），
+          入场提醒被淹没。不同持仓 / 不同事件类型照常推。
+    """
+    tok = load_token()
+    chat = load_chat()
+    if tok:
+        push_once_telegram(key, text, tok, chat)
 
 
 # ============================ 5m/15m EMA 突破预警 ============================
@@ -942,7 +956,7 @@ def _notify_ema_warning(sig: Dict, partial: int, px: float, side: str,
         f"\n⚠️ 5m + 15m {break_word} EMA144/169 → {structure_word}；保留 30% 跑趋势反转\n"
         f"出场后会按走完整价 + 4.85U 手续费最终结算"
     )
-    _push(card)
+    _push_once(f"{sig.get('id')}:ema", card)
 
 
 # ============================ 主流程 ============================

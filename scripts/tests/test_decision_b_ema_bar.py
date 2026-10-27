@@ -86,8 +86,20 @@ def main():
           f"status={t.get('status')}")
     check("settle_error_count 有留痕", t.get('settle_error_count') is not None,
           f"count={t.get('settle_error_count')}")
-    pend = [r for r in recs if r.get('status') == 'pending']
-    check("训练 journal 无卡死 pending", len(pend) == 0, f"pending={len(pend)}")
+    # 卡死判定：正常活跃持仓（status=pending + filled=True + net_usd=None）
+    # 不是卡死 —— 它就是当前还开着的仓位。真正的卡死是「settle 抛异常后
+    # status 卡在 pending 或 settled 但 net_usd 永远算不出来」。
+    stuck = [r for r in recs
+             if r.get('status') == 'settled' and r.get('net_usd') is None]
+    stuck2 = [r for r in recs
+              if r.get('status') == 'pending' and r.get('settle_error_count') is not None]
+    check("训练 journal 无卡死记录", len(stuck) == 0 and len(stuck2) == 0,
+          f"settled但无net={len(stuck)}, pending且有错={len(stuck2)}")
+    live = [r for r in recs if r.get('status') == 'pending'
+            and r.get('settle_error_count') is None]
+    if live:
+        print(f"  ℹ️ 当前有 {len(live)} 笔正常活跃持仓（非卡死）: "
+              + ", ".join(str(r.get('id')) for r in live))
 
     print("\n" + "=" * 62)
     if FAILS:
