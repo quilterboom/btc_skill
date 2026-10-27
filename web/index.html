@@ -33,6 +33,14 @@
     grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
     gap: 16px;
   }
+  /* 2026-10-27 liusir：「胜率卡片没有占满一整行」
+     .grid 是 auto-fit minmax(260px,1fr)，宽容器能排 4 列 →
+     3 张胜率卡只占前 3 列，第 4 列留空。改成固定 3 列 = 严格占满整行。 */
+  #sec-winrate.grid {
+    grid-template-columns: repeat(3, 1fr);
+    gap: 16px;
+  }
+  @media (max-width: 900px) { #sec-winrate.grid { grid-template-columns: 1fr; } }
   /* 概览专用 4 列：强制撑满，< 1100px 退 2x2，< 600px 单列 */
   #sec-overview.grid {
     grid-template-columns: repeat(4, 1fr);
@@ -326,7 +334,9 @@
   .tc-pnl.flat   { color: #6b7280;      background: #f3f4f6; }
   .tc-pnl.open   { color: #92400e;      background: #fef3c7; }
 
-  /* 方向 chip：L=绿底，S=红底 */
+  /* 方向 chip：L=绿底，S=红底
+     ★ 2026-10-27 注意：这个类名是 .tc-side（交易方向徽章），
+     与腾讯云侧栏 .tc-sidebar 是两个不同的东西，别再混。 */
   .tc-side {
     display: inline-block; padding: 2px 8px; border-radius: 4px;
     font-size: 11px; font-weight: 600; letter-spacing: 0.5px;
@@ -432,12 +442,12 @@
   }
 
   /* 操作按钮（teacher 卡片底部） */
-  .tc-actions { padding: 6px 12px; border-top: 1px solid #f1f5f9; }
-  .tc-actions button {
+  .tc-hd-actions { padding: 6px 12px; border-top: 1px solid #f1f5f9; }
+  .tc-hd-actions button {
     font-size: 12px; padding: 4px 10px; border: 1px solid var(--border);
     background: #fff; border-radius: 4px; cursor: pointer;
   }
-  .tc-actions button:hover { background: #f3f4f6; }
+  .tc-hd-actions button:hover { background: #f3f4f6; }
 
   /* 空状态 */
   .trade-cards .empty-card {
@@ -558,11 +568,13 @@
   .tl-table thead th {
     background: #f8fafc; color: var(--muted); font-size: 11px; font-weight: 600;
     text-transform: uppercase; letter-spacing: 0.4px; white-space: nowrap;
-    padding: 9px 10px; border-bottom: 1px solid var(--border); text-align: left;
+    padding: 6px 10px; border-bottom: 1px solid var(--border); text-align: left;
   }
   .tl-table thead th.tl-right { text-align: right; }
   .tl-table td {
-    padding: 9px 10px; border-bottom: 1px solid #f1f5f9; vertical-align: middle;
+    /* 2026-10-27 liusir：「交易明细列高太大了」→ 压缩行高 */
+    padding: 5px 10px; border-bottom: 1px solid #f1f5f9; vertical-align: middle;
+    height: 32px;
   }
   .tl-table tbody tr:last-child td { border-bottom: none; }
   .tl-row { cursor: pointer; }
@@ -927,7 +939,7 @@
 .tc-body { display: flex; flex: 1; min-height: 0; }
 
 /* --- 白底左侧栏 --- */
-.tc-side {
+.tc-sidebar {
   width: 208px;
   flex: none;
   background: var(--tc-bg-card);
@@ -938,14 +950,14 @@
   height: calc(100vh - 50px);
   overflow-y: auto;
 }
-.tc-side .tc-group {
+.tc-sidebar .tc-group {
   font-size: 11.5px;
   color: var(--tc-text-sub2);
   padding: 10px 20px 6px;
   letter-spacing: .5px;
 }
-.tc-side .tc-nav { display: flex; flex-direction: column; }
-.tc-side .tc-nav a {
+.tc-sidebar .tc-nav { display: flex; flex-direction: column; }
+.tc-sidebar .tc-nav a {
   display: flex;
   align-items: center;
   gap: 9px;
@@ -956,19 +968,19 @@
   border-left: 3px solid transparent;
   transition: background .12s, color .12s;
 }
-.tc-side .tc-nav a:hover { background: var(--tc-bg-hover); color: var(--tc-text); }
-.tc-side .tc-nav a.active {
+.tc-sidebar .tc-nav a:hover { background: var(--tc-bg-hover); color: var(--tc-text); }
+.tc-sidebar .tc-nav a.active {
   background: var(--tc-blue-light);
   color: var(--tc-blue);
   border-left-color: var(--tc-blue);
   font-weight: 500;
 }
-.tc-side .tc-nav .nav-dot {
+.tc-sidebar .tc-nav .nav-dot {
   width: 6px; height: 6px; border-radius: 50%;
   background: #c4c4c4; flex: none;
 }
-.tc-side .tc-nav a.active .nav-dot { background: var(--tc-blue); }
-.tc-side .tc-foot {
+.tc-sidebar .tc-nav a.active .nav-dot { background: var(--tc-blue); }
+.tc-sidebar .tc-foot {
   margin-top: auto;
   padding: 14px 20px 4px;
   font-size: 11.5px;
@@ -976,7 +988,7 @@
   border-top: 1px solid var(--tc-border);
   margin-top: 24px;
 }
-.tc-side .tc-foot a { color: var(--tc-blue); text-decoration: none; }
+.tc-sidebar .tc-foot a { color: var(--tc-blue); text-decoration: none; }
 
 /* --- 右侧内容区 --- */
 .tc-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
@@ -1192,15 +1204,15 @@
   .tc-top { height: auto; padding: 8px 12px; flex-wrap: wrap; gap: 10px; }
   .tc-top .tc-nav { overflow-x: auto; }
   .tc-body { flex-direction: column; }
-  .tc-side {
+  .tc-sidebar {
     width: 100%; height: auto; position: static;
     border-right: none; border-bottom: 1px solid var(--tc-border);
     padding: 6px 0;
   }
-  .tc-side .tc-nav { flex-direction: row; overflow-x: auto; }
-  .tc-side .tc-nav a { border-left: none; border-bottom: 2px solid transparent; white-space: nowrap; }
-  .tc-side .tc-nav a.active { border-left: none; border-bottom-color: var(--tc-blue); }
-  .tc-side .tc-group, .tc-side .tc-foot { display: none; }
+  .tc-sidebar .tc-nav { flex-direction: row; overflow-x: auto; }
+  .tc-sidebar .tc-nav a { border-left: none; border-bottom: 2px solid transparent; white-space: nowrap; }
+  .tc-sidebar .tc-nav a.active { border-left: none; border-bottom-color: var(--tc-blue); }
+  .tc-sidebar .tc-group, .tc-side .tc-foot { display: none; }
   .tc-content { padding: 12px; }
   .tc-page-hd { padding: 12px; }
   .tc-kpi-grid { grid-template-columns: 1fr; }
@@ -1410,6 +1422,58 @@
 .tc .split-grid#sec-trades-grid {
   align-items: stretch;
 }
+
+/* ============ 交易明细表格：适配面板宽度 + 紧凑行（2026-10-27 liusir） ============
+   liusir：「td 太宽了，小点」
+   实测病因两个：
+     1) 表格实际宽 1162px，面板只有 486px → 横向溢出，单元格被撑得巨大
+        （table-layout:auto + 内部 flex 元素 flex:1 会把列宽无限放大）
+     2) 行高 550px —— 内容里的模板字面量换行在 pre-wrap 下渲染成多行
+   治法：table-layout:fixed 强制列宽=面板宽/列数，nowrap+ellipsis 压成单行，
+   行高随内容自然收紧。 */
+.tc .panel .trade-list .tl-table {
+  table-layout: fixed;
+  width: 100% !important;
+  font-size: 11.5px;
+}
+.tc .panel .trade-list .tl-table th,
+.tc .panel .trade-list .tl-table td {
+  padding: 4px 6px !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis;
+  white-space: nowrap !important;
+  line-height: 17px !important;
+  height: auto !important;
+}
+/* 老师单表（10 列）：按内容给列宽百分比，合计 100% */
+#panel-teacher .tl-table th:nth-child(1), #panel-teacher .tl-table td:nth-child(1) { width: 11%; } /* 时间 */
+#panel-teacher .tl-table th:nth-child(2), #panel-teacher .tl-table td:nth-child(2) { width: 8%;  } /* 方向 */
+#panel-teacher .tl-table th:nth-child(3), #panel-teacher .tl-table td:nth-child(3) { width: 13%; } /* 结果 */
+#panel-teacher .tl-table th:nth-child(4), #panel-teacher .tl-table td:nth-child(4) { width: 10%; } /* 入场 */
+#panel-teacher .tl-table th:nth-child(5), #panel-teacher .tl-table td:nth-child(5) { width: 10%; } /* SL */
+#panel-teacher .tl-table th:nth-child(6), #panel-teacher .tl-table td:nth-child(6) { width: 10%; } /* TP1 */
+#panel-teacher .tl-table th:nth-child(7), #panel-teacher .tl-table td:nth-child(7) { width: 10%; } /* TP2 */
+#panel-teacher .tl-table th:nth-child(8), #panel-teacher .tl-table td:nth-child(8) { width: 11%; } /* 移动 */
+#panel-teacher .tl-table th:nth-child(9), #panel-teacher .tl-table td:nth-child(9) { width: 11%; } /* 净盈亏 */
+#panel-teacher .tl-table th:nth-child(10),#panel-teacher .tl-table td:nth-child(10){ width: 6%;  } /* 箭头 */
+/* 结算表（8 列） */
+#panel-settle .tl-table th:nth-child(1), #panel-settle .tl-table td:nth-child(1) { width: 13%; }
+#panel-settle .tl-table th:nth-child(2), #panel-settle .tl-table td:nth-child(2) { width: 9%;  }
+#panel-settle .tl-table th:nth-child(3), #panel-settle .tl-table td:nth-child(3) { width: 15%; }
+#panel-settle .tl-table th:nth-child(4), #panel-settle .tl-table td:nth-child(4) { width: 13%; }
+#panel-settle .tl-table th:nth-child(5), #panel-settle .tl-table td:nth-child(5) { width: 13%; }
+#panel-settle .tl-table th:nth-child(6), #panel-settle .tl-table td:nth-child(6) { width: 16%; }
+#panel-settle .tl-table th:nth-child(7), #panel-settle .tl-table td:nth-child(7) { width: 15%; }
+#panel-settle .tl-table th:nth-child(8), #panel-settle .tl-table td:nth-child(8) { width: 6%;  }
+/* 展开的明细行不套列宽限制（colspan 单元格）*/
+.tc .tl-detail-row td {
+  white-space: normal !important;
+  overflow: visible !important;
+}
+/* 数字列右对齐 */
+.tc .panel .trade-list .tl-table .tl-num,
+.tc .panel .trade-list .tl-table .tl-right,
+.tc .panel .trade-list .tl-table .tl-pnl { text-align: right; font-variant-numeric: tabular-nums; }
 </style>
 </head>
 <body>
@@ -1433,7 +1497,7 @@
 
   <div class="tc-body">
 
-    <aside class="tc-side">
+    <aside class="tc-sidebar">
       <div class="tc-group">策略管理</div>
       <nav class="tc-nav">
         <a href="#sec-weekly" class="active"><span class="nav-dot"></span>周趋势</a>
@@ -1464,7 +1528,7 @@
             <span class="env-badge" id="env-badge-prod">正式</span>
             <span class="env-badge training hidden" id="env-badge-training">训练</span>
           </h1>
-          <div class="tc-actions">
+          <div class="tc-hd-actions">
             <span class="tc-sub">信号 · 结算 · 复盘</span>
             <button class="tc-btn" onclick="load()">手动刷新</button>
           </div>
@@ -1641,14 +1705,6 @@
       <div class="row"><span class="lbl">样本</span><span class="val" id="wr-7d-n">—</span></div>
     </div>
 
-    <!-- ★ 2026-10-26 新增：分代明细（旧代 1h 主信号不再污染当前代判断） -->
-    <details class="card" id="wr-era-card" style="grid-column:1/-1" hidden>
-      <summary style="cursor:pointer; list-style:none">
-        <h3 style="display:inline">分代明细</h3>
-        <span class="meta" style="margin-left:10px">旧代 1h 主信号已停用，不计入当前策略健康度</span>
-      </summary>
-      <div id="wr-era-body" style="margin-top:10px"></div>
-    </details>
   </div>
 
   <!-- 老师直播单（2026-10-14 liusir 拍板：网页端展示 + 录入） -->
@@ -2210,8 +2266,6 @@ function render(d) {
   document.getElementById("wr-7d").textContent = fmtPct(wr.last_7d.winrate_pct);
   document.getElementById("wr-7d-n").textContent = wr.last_7d.total;
 
-  // ★ 2026-10-26 新增：分代明细（旧代 1h 主信号已停用，不计入当前代健康度）
-  renderWinrateByEra(d.winrate_by_era);
 
   // 2026-10-18 redesign: settlement cards now in #settle-cards (replaces #recent-rows)
   // 主列表由分页 fetchSettlements() 接管，这里只兜底（如果卡片元素存在）
@@ -2245,44 +2299,6 @@ function render(d) {
   renderMetricsTrend();
 }
 
-// ★ 2026-10-26 新增：分代明细渲染
-// 背景：生产 journal 里混着两代参数完全不同的策略（旧代 1h 主信号 vs 当前代
-// 15m 形态），混算出来的胜率/净利/边缘分都不反映当前策略的真实健康度。
-// 折叠展示，主卡片只给当前代口径 —— 一页只讲一件事。
-function renderWinrateByEra(rows) {
-  const card = document.getElementById("wr-era-card");
-  const body = document.getElementById("wr-era-body");
-  if (!card || !body) return;
-  if (!rows || !rows.length) { card.hidden = true; return; }
-  card.hidden = false;
-  const html = rows.map(r => {
-    const netCls = r.net_usd > 0 ? "pos" : r.net_usd < 0 ? "neg" : "";
-    const pfTxt = r.profit_factor != null ? r.profit_factor.toFixed(2) : "—";
-    const alTxt = r.avg_win_loss ? r.avg_win_loss.toFixed(2) + " : 1" : "—";
-    return `
-      <tr>
-        <td>${r.label}</td>
-        <td class="num">${r.n}</td>
-        <td class="num">${r.win_rate != null ? r.win_rate.toFixed(1) + "%" : "—"}</td>
-        <td class="num ${netCls}">${(r.net_usd > 0 ? "+" : "") + r.net_usd.toFixed(2)}U</td>
-        <td class="num">${pfTxt}</td>
-        <td class="num">${alTxt}</td>
-        <td class="num">${r.max_win ? "+" + r.max_win.toFixed(2) : "—"}</td>
-        <td class="num ${r.max_loss < 0 ? "neg" : ""}">${r.max_loss ? r.max_loss.toFixed(2) : "—"}</td>
-      </tr>`;
-  }).join("");
-  body.innerHTML = `
-    <table class="tl-table">
-      <thead>
-        <tr>
-          <th>策略代</th><th class="num">单数</th><th class="num">胜率</th>
-          <th class="num">净盈亏</th><th class="num">盈亏比</th><th class="num">赢/亏</th>
-          <th class="num">最大单笔赢</th><th class="num">最大单笔亏</th>
-        </tr>
-      </thead>
-      <tbody>${html}</tbody>
-    </table>`;
-}
 
 function renderEdgeScore(es, elId = "edge-score") {
   const el = document.getElementById(elId);
@@ -3313,7 +3329,7 @@ function renderTeacherRows(d) {
 
     // 操作按钮
     const actions = open
-      ? `<div class="tc-actions"><button class="close-btn" data-id="${t.trade_id}">平仓</button></div>`
+      ? `<div class="tc-hd-actions"><button class="close-btn" data-id="${t.trade_id}">平仓</button></div>`
       : "";
 
     return `
