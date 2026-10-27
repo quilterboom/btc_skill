@@ -57,6 +57,8 @@
    ├─ T3 +1000 点触发 → 全平
    └─ SL 触发 → 全平
 ⑤ 24h 未触发任何点位 → 强制平仓
+⑥ Promoter 独立线程（1s/巡）把到期 preview_pending 推到 pending
+   └─ 历史 14.6min 延迟坑已修：见 §3.2.1 废弃说明
 ```
 
 ### 1.5 R:R 与胜率（最关键数字）
@@ -171,34 +173,30 @@ python3 scan.py --brief --target 1000
 - `btc-watch.service` — 主守护
 - `btc-status-web.service` — 3003 端口状态面板
 
-### 3.2.1 预览闸门（2026-10-11 加）：信号→journal 之间的缓冲
+### 3.2.1 preview 闸门：**2026-10-15 已废弃**
 
-> liusir 反馈：信号进入 journal 太快，没看到进场提醒。需要在「信号成立」与「真的挂单」之间加一道缓冲卡片，让用户能取消。
+> ❗ 这块 2026-10-15 推翻。liusir 反馈："下次不用询问，自己成交就行"，
+> 现网生产 + 训练 service 都已去掉 `--preview-secs 30`，信号直接进 journal。
 
-**启用方式**（任一命令加 `--preview-secs N`）：
+**为什么废弃**：
+1. `promote_due_previews` 只在 15m 周期检查顺手扫，实测 **8 条预览全延迟 14.6min**（虽然 `preview_secs=30`）
+2. `BTC_USDT-1792033207-short` preview 11:00:37 到期 → 等到 11:15:14 才 promote，期间价格跌穿 entry 438 点；再延 30min 到 11:44 时偏离 814 点 > 800 阈值 → **MISSED**
+3. preview 30s 实际效果 = **延期 15 分钟**，反而把限价单拖到错过行情
 
-```bash
-# 一次性手动扫描（30 秒预览）
-python3 scan.py --brief --preview-secs 30
+**替代方案**（`scripts/watch/promoter.py`）：
+- 独立 daemon 线程，**1s/巡**调 `journal.promote_due_previews(contract)`
+- 心跳 `promoter_heartbeat.json`（10min 一次，跟 settler 5min 错开）
+- 生产 + 训练 daemon 都起，跑同一函数互不干扰（journal 路径用 DATA_DIR 隔离）
+- **保留字段语义**：即使 `preview_secs=0` 也保留 promoter，以后临时改回低值（5/10s）也不用同步调 timer 频率
 
-# 量能异动/RSI 触发后自动跑 scan 也走预览（需 systemd 服务重启加载新代码）
+**如想"立刻反悔"**：直接 `python3 journal.py cancel <signal_id>`，别再加回 preview_secs。
+
+**状态机**（重写后）：
 ```
-
-**行为**：
-- 信号触发后 → 立即写 journal，但 `status="preview_pending"`（不是 `pending`）
-- TG 推送换成「📋 信号预览 · N 秒后自动执行」卡片
-- `preview_until_ts` 到期 → `scan.py` 主循环结尾自动 `promote_due_previews` 把状态推到 `pending`，下次跑 scan 触发挂单
-- `position_tracker.settle_all` / `force_close_position` 看到 `preview_pending` 直接跳过（不挂单、不能强平）
-- 手动取消：`python3 journal.py cancel [signal_id]`（不带参数列出当前待取消项）
-- 手动 promote：`python3 journal.py promote [signal_id]`（不带参数自动 promote 到期项）
-
-**状态机**：
+trigger → pending → filled → settled
+              └─ 24h 未挂到 MISSED ─┘
 ```
-trigger → preview_pending → (取消 / 到期) → pending → filled → settled
-                └─ CANCELLED ─┘              └─ 24h 未挂到 MISSED ─┘
-```
-
-**默认建议**：`PREVIEW_SECS=30`（刚够瞄一眼 Telegram，多了反而挡信号）。
+不带 `preview_pending` 中间态（除非有人显式 `--preview-secs N`）。
 
 ### 3.3 改代码后必跑
 
@@ -327,14 +325,17 @@ systemctl --user restart btc-status-web.service
 |---|---|
 | `scripts/scan.py` | 一次性扫描（手动跑）|
 | `scripts/watch.py` | 常驻守护（systemd）|
+| `scripts/watch/promoter.py` | preview_pending 自动 promote 守护（1s/巡，2026-10-15 加）|
 | `scripts/position_tracker.py` | 持仓跟踪（TP/SL 判定）|
 | `scripts/journal.py` | 交易记录（append-only）|
+| `scripts/v2_journal.py` | v2 训练模拟开仓（contracts bug 已修于 2026-10-15）|
 | `scripts/telegram.py` | TG 卡片推送 |
 | `scripts/backtest.py` | 策略回测 |
 | `scripts/tests/` | 单元测试（95 个）|
-| `web/server.py` | HTTP API（端口 3003）|
+| `web/server.py` | HTTP API（端口 3003）+ `_compute_trade_net_usd` 自动算 PnL |
 | `web/index.html` | 状态面板前端 |
 | `references/` | 数据源参考（API、字段名）|
+| `references/v2-contracts-zero-bug.md` | v2 contracts=0 bug 复现 & 修法 |
 | `SKILL.md` | 本文档 |
 | `.gitignore` | 排除缓存/.env/日志 |
 
@@ -354,6 +355,9 @@ systemctl --user restart btc-status-web.service
 | 2026-10-04 | Settler 心跳 + 线程守护 | 之前静默死亡 |
 | 2026-10-04 | 加 500 点最小间距 | 防止同向堆叠 |
 | 2026-10-02 | RSI 改定位为"排雷器" | RSI 单独用 EV 为负 |
+| 2026-10-15 | **废弃 preview_secs=30**，改用 Promoter 独立线程 1s/巡 | 8 条预览全延迟 14.6min（preview 30s 实际 = 延期 15min），BTC_USDT-1792033207-short MISSED 即此拖死；liusir 反馈"下次不用询问，自己成交" |
+| 2026-10-15 | **修 v2_journal contracts=0 bug** | 训练 v2 模拟开仓算完 contracts 没写进 sig dict + 公式单位错配（`int(notional * QUANT_MULT)` 错，应 `int(round(notional / (entry * QUANT_MULT)))`）。详见 `references/v2-contracts-zero-bug.md` |
+| 2026-10-15 | **web 加 `_compute_trade_net_usd`** | 录老师口头单时前端自动算 PnL（生产同公式：`contracts × Δpx × QUANT_MULT - 4.85U` 整笔费）。手填 7 单校准后：累计 +47.27U → **+195.26U**（win 7/8），trade #8 全垒打 +100.61U 用的是自动算 |
 
 ---
 

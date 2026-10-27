@@ -279,6 +279,7 @@ def simulate_teacher_TP(journal_entries: list, rows_15m: list, start_ts: int, en
     NOTIONAL = 5000; LEV = 100; FEE = 4.85
     teacher_total = 0.0; v42_total = 0.0
     breakdown = []
+    null_net = []        # ★ 2026-10-25: 已结算但 net_usd 缺失的单，单独暴露不静默计 0
     for e in journal_entries:
         if e.get('status') != 'settled' or e.get('outcome') in (None, ''):
             # pending 跳, 等下期再比
@@ -286,6 +287,19 @@ def simulate_teacher_TP(journal_entries: list, rows_15m: list, start_ts: int, en
         entry = e.get('entry')
         if not entry: continue
         v42_net = e.get('net_usd', 0) or 0
+        # ★ 2026-10-25 修：已结算但 net_usd 为 null 不许默默当 0 计入合计。
+        #   老写法 `e.get('net_usd', 0) or 0` 会把 null 记成 0，v4.2 净利虚高、
+        #   卡片上也看不到这笔（实测 10-24 23:15 那笔 -15.12U 就这样消失）。
+        if e.get('net_usd') is None:
+            null_net.append({
+                'journal_id': e.get('id'),
+                'time_cst': datetime.fromtimestamp(e.get('ts') or 0, CST).strftime('%m-%d %H:%M'),
+                'side': e.get('side'),
+                'outcome': e.get('outcome'),
+                'exit_px': e.get('exit_px'),
+                'exit_ts': e.get('exit_ts'),
+            })
+            continue          # 不计入 v4_2_total / teacher_total，单独列出
         v42_total += v42_net
         # 老师 TP: 找 entry 后最近一根 >= entry*1.006 的 15m (TP1)
         tp1_target = entry * 1.006
@@ -352,6 +366,9 @@ def simulate_teacher_TP(journal_entries: list, rows_15m: list, start_ts: int, en
         'diff_usd': round(teacher_total - v42_total, 2),
         'note': '对照只算不算, 不污染 v4.2',
         'breakdown': breakdown,
+        # ★ 2026-10-25: 显式暴露「已结算但 net 缺失」的单，不静默计 0
+        'null_net_settlements': null_net,
+        'null_net_count': len(null_net),
     }
 
 
@@ -361,8 +378,10 @@ def build_report(date_str: str) -> dict:
     win_15m = filter_window(rows_15m, start, end)
 
     # 行情
+    # ★ 2026-10-25 修：开盘价必须取第一根 15m 的 **open**（win_15m[0][1]），
+    #   原来误用 win_15m[0][4]（第一根的 **close**）→ 开盘价/涨幅全错。
     if win_15m:
-        first_c = win_15m[0][4]
+        first_c = win_15m[0][1]
         last_c = win_15m[-1][4]
         hi = max(r[2] for r in win_15m)
         lo = min(r[3] for r in win_15m)
@@ -473,10 +492,17 @@ def render_md(report: dict) -> str:
     if j['total_entries'] == 0:
         lines.append(f"  → watch 没出信号 = 守门未放行")
     if j['entries']:
-        for e in j['entries'][:5]:
+        # ★ 2026-10-25 修：原来只取前 5 条，10-24 的 23:15 那笔 -15.12U 正好被截掉，
+        #   卡片上看不见亏捧行。改为窗口内全列（上限 10 条），并标注 net 缺失的单。
+        for e in j['entries'][:10]:
             net = e.get('net_usd')
-            net_s = f"{net:+.2f}U" if net is not None else '?'
+            if net is None:
+                net_s = '⚠️ net 缺失' if e.get('status') == 'settled' else '持仓中'
+            else:
+                net_s = f"{net:+.2f}U"
             lines.append(f"    · {e['time_cst']} {e.get('side', '?'):4} {e.get('id', '?')[-15:]} → {e.get('outcome', '?')} ({net_s})")
+        if len(j['entries']) > 10:
+            lines.append(f"    … 共 {len(j['entries'])} 条，仅列前 10")
     lines.append('')
     # 待关注
     followups = []
@@ -567,6 +593,15 @@ def render_md(report: dict) -> str:
             for b in ttp['breakdown'][:3]:
                 jid = (b.get('journal_id') or '?')[-15:]
                 lines.append(f"    · {jid} entry={b.get('entry')} v4.2={b['v4_2_net']:+.2f} 老师={b['teacher_net']:+.2f} {b.get('remain_outcome', '')}")
+        # ★ 2026-10-25：已结算但 net_usd 缺失的单必须显式列出，不许静默当 0
+        nn = ttp.get('null_net_settlements') or []
+        if nn:
+            lines.append(f"  ⚠️ <b>{len(nn)} 笔已结算但 net_usd 缺失</b>（未计入 v4.2 合计）:")
+            for x in nn:
+                lines.append(f"    · {(x.get('journal_id') or '?')[-15:]} {x.get('time_cst')} "
+                             f"{x.get('side')} → {x.get('outcome')} exit={x.get('exit_px')}")
+        else:
+            lines.append(f"  ✅ 已结算单 net_usd 全部齐全（0 笔缺失）")
         lines.append(f"  <i>{ttp['note']}</i>")
     
     lines.append(f'<i>数据时间: {report["generated_at_cst"]} CST</i>')

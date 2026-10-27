@@ -14,7 +14,7 @@ BTC 策略运行状态面板（3003）
 - 文案清晰、状态机明确
 """
 from __future__ import annotations
-import os, sys, json, time, glob, subprocess
+import os, re, sys, json, time, glob, subprocess
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Optional, Tuple
@@ -24,6 +24,7 @@ SKILL_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SKILL_ROOT / "scripts"))
 DATA_DIR = Path("/root/data")           # gate_fetch 默认
 PAGE_PATH = Path(__file__).resolve().parent / "index.html"
+MARKET_PAGE_PATH = Path(__file__).resolve().parent / "market.html"
 
 
 # ============================ 数据聚合 ============================
@@ -227,7 +228,14 @@ def _journal_state_training() -> dict:
 
 def _winrate() -> dict:
     """胜率：从 position_events.jsonl + journal 算（dedupe by id，取最新）
-    规则：category == "profit" 算赢；其它算输
+
+    ★ 2026-10-26 修：原来用 `category == "profit"` 判赢，但 BE_STOPPED（打保本）
+      的净额常常是 **负数**（只够覆盖手续费，实测 5 笔 -0.85/-0.86U），
+      却被标成 category=profit 算「赢」→ 胜率虚高 10.7pp（51.1% vs 真实 40.4%）。
+      判据改为**净额符号**：net_usd > 0 才算赢，= 0 算保本（不算赢也不算输）。
+
+      同时加一个分代口径：主胜率只算**当前代**（15m 形态信号），
+      旧代（1h 主信号，-95.59U）不再污染当前策略的健康度判断。
     """
     ev = _read_jsonl(DATA_DIR / "position_events.jsonl")
     # dedupe by id, 取最新一条（ts 最大）
@@ -240,32 +248,47 @@ def _winrate() -> dict:
 
     # 2026-10-05：过滤掉测试前缀（TEST-/test-）的事件，不进 winrate 统计
     # 2026-10-07 liusir 规则：category=skip（MISSED/未进场）也不进 winrate
+    # 2026-10-25：统一走 _is_test_id()（含合成短数字段 id），不再在这里抄一份过滤条件
     closed = [r for r in by_id.values()
-              if not (r.get("id", "").startswith("TEST")
-                      or r.get("id", "").startswith("test-"))
+              if not _is_test_id(r.get("id", ""))
               and r.get("category") != "skip"]
-    wins = [r for r in closed if r.get("category") == "profit"]
-    losses = [r for r in closed if r.get("category") == "loss"]
-    total = len(closed)
+
+    # ★ 2026-10-26：赢 = 净额 > 0（不看 category）。
+    #   net_usd 为 None 的（结算失败留空的）不计入分母。
+    def _is_win(r: dict) -> bool:
+        n = r.get("net_usd")
+        return n is not None and n > 0
+
+    def _is_loss(r: dict) -> bool:
+        n = r.get("net_usd")
+        return n is not None and n < 0
+
+    counted = [r for r in closed if r.get("net_usd") is not None]
+    wins = [r for r in counted if _is_win(r)]
+    losses = [r for r in counted if _is_loss(r)]
+    breakeven = [r for r in counted if r.get("net_usd") == 0]
+    total = len(counted)
     win_n = len(wins)
 
     # 最近 20 笔胜率
-    closed_sorted = sorted(closed, key=lambda r: r.get("ts", 0), reverse=True)[:20]
-    recent_win = sum(1 for r in closed_sorted if r.get("category") == "profit")
+    closed_sorted = sorted(counted, key=lambda r: r.get("ts", 0), reverse=True)[:20]
+    recent_win = sum(1 for r in closed_sorted if _is_win(r))
 
     # 近 7 天
     week_ago = time.time() - 7 * 86400
-    week = [r for r in closed if r.get("ts", 0) >= week_ago]
-    week_win = sum(1 for r in week if r.get("category") == "profit")
+    week = [r for r in counted if r.get("ts", 0) >= week_ago]
+    week_win = sum(1 for r in week if _is_win(r))
 
     # 累计净盈亏
-    total_pnl = sum(r.get("net_usd", 0) for r in closed)
+    total_pnl = sum(r.get("net_usd", 0) for r in counted)
 
     return {
         "total": total,
         "wins": win_n,
-        "losses": total - win_n,
+        "losses": len(losses),
+        "breakeven": len(breakeven),
         "winrate_pct": round(win_n / total * 100, 1) if total else None,
+        "winrate_basis": "net_usd>0",
         "recent_20": {"total": len(closed_sorted), "wins": recent_win,
                        "winrate_pct": round(recent_win / len(closed_sorted) * 100, 1) if closed_sorted else None},
         "last_7d": {"total": len(week), "wins": week_win,
@@ -275,15 +298,53 @@ def _winrate() -> dict:
             {"id": r.get("id", "")[:35], "outcome": r.get("outcome", "?"),
              "category": r.get("category", "?"), "net_usd": round(r.get("net_usd", 0), 2),
              "ts": r.get("ts")}
-            for r in sorted(closed, key=lambda r: r.get("ts", 0), reverse=True)[:5]
+            for r in sorted(counted, key=lambda r: r.get("ts", 0), reverse=True)[:5]
         ],
     }
 
 
+def _winrate_by_era() -> list:
+    """★ 2026-10-26 新增：分代胜率/净利（旧代不再污染当前代判断）。
+
+    数据源是 journal（比 events 更全，含未进场的判定），按 era_split 切分。
+    """
+    import sys as _sys
+    _p = str(Path(__file__).resolve().parent.parent / "scripts")
+    if _p not in _sys.path:
+        _sys.path.insert(0, _p)
+    try:
+        from era_split import era_summary
+    except Exception:
+        return []
+    trades = _read_jsonl(DATA_DIR / "journal.jsonl")
+    return era_summary(trades)
+
+
 def _is_test_id(rid: str) -> bool:
-    """测试前缀判定：TEST- / test- 开头的 id 都视为测试/演示数据"""
+    """测试/合成 id 判定：不让假数据进胜率统计。
+
+    2026-10-05：TEST- / test- 前缀。
+    2026-10-25 加：**合成 BTC_USDT-<短数字> id**（如 BTC_USDT-1000-short）。
+      背景：单测用这种 id 写过真实 /root/data/position_events.jsonl（patch 被 reload
+      覆盖的 bug），而它们既不带 TEST- 前缀、又以 BTC_USDT- 开头 →
+      同时穿过 _winrate 的前缀过滤和 _all_settled 的白名单，
+      实测把胜率从 38.2%(n=68) 拉成 37.1%(n=70)、合计净利从 +56.78U 虚成 +40.66U。
+      判定规则：生产 id 的数字段是 10 位 unix 秒（≥1e9，形如 1792854921），
+      合成 id 的数字段是短序号（1000/1002/1003…）→ 数字段 < 1e9 一律当测试数据。
+    """
     rid = rid or ""
-    return rid.startswith("TEST") or rid.startswith("test-")
+    if rid.startswith("TEST") or rid.startswith("test-"):
+        return True
+    if "TEST" in rid.upper() and rid.upper().startswith("BTC_USDT-TEST"):
+        return True
+    # 数字段必须是可信的 unix 时间戳（生产 id 都是 10 位秒级）
+    m = re.match(r"^[A-Za-z_]+-(\d+)-", rid)
+    if m:
+        try:
+            return int(m.group(1)) < 1_000_000_000
+        except ValueError:
+            return True
+    return False
 
 
 def _all_settled() -> list:
@@ -298,6 +359,8 @@ def _all_settled() -> list:
         rid = r.get("id")
         if not rid or not rid.startswith("BTC_USDT-"):
             continue   # 防御：非生产前缀的事件一律不进展示
+        if _is_test_id(rid):
+            continue   # 2026-10-25：合成短数字段 id（BTC_USDT-1000-*）也拦下
         ts = r.get("ts", 0)
         if ts >= by_id.get(rid, {}).get("ts", -1):
             by_id[rid] = r
@@ -508,7 +571,55 @@ def build_status() -> dict:
         "btc_meta": _btc_meta(),
         "strategy": _journal_state(),
         "winrate": _winrate(),
+        # ★ 2026-10-26 新增：分代明细（旧代不再污染当前代判断，但保留可见）
+        "winrate_by_era": _winrate_by_era(),
+        # 2026-10-17 liusir: 借鉴 LuxAlgo/trade-journal
+        "edge_score": _edge_score(),
+        "pnl_calendar": _pnl_calendar(),
+        "mistakes": _mistakes_summary(),
     }
+
+
+def _edge_score() -> dict:
+    """Edge Score（参考 trade-journal v2 公式）
+
+    ★ 2026-10-26 改：原来算混代全量（旧代 33 笔 -95.59U 混在里面），
+    分数被拖低看不出当前代真实健康度。改成**只算当前代**（15m 形态信号）。
+    """
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+        from edge_score import compute_edge_score
+        from era_split import split_by_era
+        recs = _read_jsonl(DATA_DIR / "journal.jsonl")
+        cur = (split_by_era(recs).get("current_15m") or [])
+        es = compute_edge_score(cur)
+        out = es.to_dict() if es else {"error": "不足 5 笔有效"}
+        out["scope"] = "current_15m"
+        return out
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def _pnl_calendar() -> dict:
+    """P&L 日历（每日盈亏 + 红/绿/平 + 最大单日）"""
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+        from pnl_calendar import compute_pnl_calendar
+        recs = _read_jsonl(DATA_DIR / "journal.jsonl")
+        return compute_pnl_calendar(recs, days=30)
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def _mistakes_summary() -> dict:
+    """错误归因（按 mistake 分类统计 top3）"""
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+        from mistakes import summarize_mistakes
+        recs = _read_jsonl(DATA_DIR / "journal.jsonl")
+        return summarize_mistakes(recs)
+    except Exception as e:
+        return {"error": str(e)}
 
 
 def _wave_analysis_training() -> dict:
@@ -555,7 +666,107 @@ def build_status_training() -> dict:
             "net_usd": round(net_usd, 2),
         },
         "waves": _wave_analysis_training(),
+        # 2026-10-17 加：训练版缺 btc 实时价，导致训练持仓卡片"最新价"显示的是
+        # signal 触发时的 last 价 (12+ 小时前)，不是当前 BTC 价格
+        "btc": _btc_last(),
+        "btc_meta": _btc_meta(),
+        # 2026-10-18：训练策略-效果矩阵（按 signal_source 聚合）
+        "strategy_matrix": _strategy_matrix_training(),
+        # 2026-10-18：最近 10 笔训练明细（按时间倒序）
+        "recent_training_trades": _recent_training_trades(),
     }
+
+
+def _strategy_matrix_training() -> list:
+    """按 signal_source 聚合 5 objective。
+
+    输出: [{"source": "15m_pattern", "n": 13, "net_usd": -41.05, "win_rate": 0.0,
+            "pf": 0.0, "max_dd_pct": 0.0, "trades": [...ids...]}]
+    """
+    p = Path("/root/data/training/journal.jsonl")
+    if not p.exists():
+        return []
+    groups: dict = {}
+    for line in p.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            r = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if r.get("status") != "settled":
+            continue
+        src = r.get("signal_source") or "uncategorized"
+        g = groups.setdefault(src, {"n": 0, "wins": 0, "gross_profit": 0.0,
+                                     "gross_loss": 0.0, "net_usd": 0.0,
+                                     "dd_sum": 0.0, "dd_n": 0, "ids": []})
+        g["n"] += 1
+        net = r.get("net_usd") or 0
+        g["net_usd"] += net
+        if net > 0:
+            g["wins"] += 1
+            g["gross_profit"] += net
+        else:
+            g["gross_loss"] += abs(net)
+        if r.get("max_drawdown_pct"):
+            g["dd_sum"] += abs(float(r["max_drawdown_pct"]))
+            g["dd_n"] += 1
+        g["ids"].append(r.get("id"))
+    out = []
+    for src, g in sorted(groups.items(), key=lambda kv: -kv[1]["n"]):
+        wr = g["wins"] / g["n"] if g["n"] else 0
+        pf = g["gross_profit"] / g["gross_loss"] if g["gross_loss"] > 0 else (
+            float("inf") if g["gross_profit"] > 0 else 0)
+        dd = g["dd_sum"] / g["dd_n"] if g["dd_n"] else 0
+        out.append({
+            "source": src,
+            "n": g["n"],
+            "net_usd": round(g["net_usd"], 2),
+            "win_rate": round(wr * 100, 1),
+            "pf": round(pf, 2) if isinstance(pf, float) and pf != float("inf") else "∞",
+            "max_dd_pct": round(dd * 100, 2),
+        })
+    return out
+
+
+def _recent_training_trades(n: int = 10) -> list:
+    """训练 journal 最近 n 笔（按 exit_ts 倒序；未结算的按 ts 倒序）"""
+    p = Path("/root/data/training/journal.jsonl")
+    if not p.exists():
+        return []
+    rows = []
+    for line in p.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            r = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        rows.append(r)
+    rows.sort(key=lambda r: r.get("exit_ts") or r.get("ts") or 0, reverse=True)
+    out = []
+    for r in rows[:n]:
+        out.append({
+            "id": r.get("id"),
+            "ts": r.get("ts"),
+            "ts_str": time.strftime("%m-%d %H:%M", time.localtime(r.get("ts"))) if r.get("ts") else "—",
+            "side": r.get("side"),
+            "status": r.get("status"),
+            "outcome": r.get("outcome"),
+            "entry": r.get("entry"),
+            "sl": r.get("sl"),
+            "tp1": r.get("tp1"),
+            "tp2": r.get("tp2"),
+            "exit_px": r.get("exit_px"),
+            "exit_ts": r.get("exit_ts"),
+            "exit_ts_str": time.strftime("%m-%d %H:%M", time.localtime(r.get("exit_ts"))) if r.get("exit_ts") else "—",
+            "net_usd": r.get("net_usd"),
+            "category": r.get("category"),
+            "signal_source": r.get("signal_source"),
+        })
+    return out
 
 
 def _heartbeat_age_sec_training() -> float | None:
@@ -612,11 +823,26 @@ def _write_teacher_trades(trades: list) -> None:
     os.replace(tmp, TEACHER_TRADES_PATH)
 
 
-def build_status_teacher() -> dict:
+def build_status_teacher(path: str = "") -> dict:
     """老师口头单状态聚合（前端老师单卡片用）
+
+    2026-10-18 加：支持 ?page=&size=&cat=&side=&sort= 参数
+      cat:  all | profit | loss | flat | open
+      side: all | long | short
+      sort: time_desc | time_asc | pnl_desc | pnl_asc | move_desc | move_asc
+    返回 {ts, ts_str, total, settled, pending, net_usd, win_rate, trades,
+          page, size, has_more, filtered_n}
 
     老数据 result.open 可能缺失：用 net_usd != None 视为已结算兜底。
     """
+    from urllib.parse import urlparse, parse_qs
+    q = parse_qs(urlparse(path).query) if path else {}
+    page = max(1, int(q.get("page", ["1"])[0]))
+    size = min(100, max(1, int(q.get("size", ["20"])[0])))
+    cat = (q.get("cat", ["all"])[0] or "all").lower()
+    side = (q.get("side", ["all"])[0] or "all").lower()
+    sort = (q.get("sort", ["time_desc"])[0] or "time_desc").lower()
+
     trades = _read_teacher_trades()
 
     def _is_open(t):
@@ -627,10 +853,61 @@ def build_status_teacher() -> dict:
             return False
         return True
 
+    # 分类：profit/loss/flat/open —— 单笔维度，全程统计不受过滤影响
+    def _cat_of(t):
+        if _is_open(t):
+            return "open"
+        n = ((t.get("result") or {}).get("net_usd"))
+        if n is None:
+            return "flat"
+        return "profit" if n > 0 else "loss" if n < 0 else "flat"
+
+    # 应用过滤
+    filtered = [t for t in trades if (cat == "all" or _cat_of(t) == cat) and (side == "all" or t.get("side") == side)]
+    filtered_n = len(filtered)
+
+    # 排序
+    def _sort_key(t):
+        r = t.get("result") or {}
+        if sort == "pnl_desc":
+            return -(r.get("net_usd") or 0)
+        if sort == "pnl_asc":
+            return r.get("net_usd") or 0
+        if sort == "time_asc":
+            return -(t.get("trade_id") or 0)  # asc 用 trade_id 反向
+        if sort == "move_desc":
+            entry = t.get("fill_price") or t.get("entry_zone")
+            evs = t.get("events") or []
+            last = evs[-1] if evs else {}
+            px = last.get("px") if isinstance(last, dict) else None
+            try:
+                e = float(entry) if entry is not None else 0
+                p = float(px) if px is not None else e
+                raw = p - e
+                signed = -raw if t.get("side") == "short" else raw
+                return -abs(signed / e * 100) if e else 0
+            except Exception:
+                return 0
+        # 默认 time_desc
+        return -(t.get("trade_id") or 0)
+
+    if sort == "move_asc":
+        # move_asc: abs 从小到大 → 取负号的反向
+        filtered.sort(key=lambda t: -_sort_key(t))
+    else:
+        filtered.sort(key=_sort_key)
+
+    # 分页
+    start = (page - 1) * size
+    end = start + size
+    page_items = filtered[start:end]
+
+    # 顶部分类/胜率/累计净利（始终基于已结算全集，不受过滤影响）
     settled = [t for t in trades if not _is_open(t)]
     pending = [t for t in trades if _is_open(t)]
     net_usd = sum((t.get("result") or {}).get("net_usd") or 0 for t in settled)
     wins = sum(1 for t in settled if (t.get("result") or {}).get("win"))
+
     return {
         "ts": int(time.time()),
         "ts_str": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -639,7 +916,11 @@ def build_status_teacher() -> dict:
         "pending": len(pending),
         "net_usd": round(net_usd, 2),
         "win_rate": f"{wins}/{len(settled)}" if settled else "0/0",
-        "trades": trades,   # 完整列表（前端表格渲染）
+        "trades": page_items,
+        "page": page,
+        "size": size,
+        "has_more": end < filtered_n,
+        "filtered_n": filtered_n,
     }
 
 
@@ -669,16 +950,21 @@ def teacher_add_trade(payload: dict) -> tuple[int, dict]:
     tp2 = payload.get("tp2")
     tp2_f = float(tp2) if tp2 is not None else None
     sl_initial = payload.get("sl_initial")
-    sl_initial_f = float(sl_initial) if sl_initial is not None else entry  # 默认保本
+    # ★ 2026-10-24 修：原来 sl_initial 缺省直接落成 entry（保本价），
+    #   导致老师**原始止损在录入那一刻就丢了** —— 事后看每一单都像
+    #   "SL=entry、风险 0 点"，得出"老师从不设真止损"的错误结论。
+    #   现在改成显式 null（=老师没给初始止损），由后续 TP1 事件单独记录
+    #   "挪到保本"这件事（sl_after_tp1），两者不再互相覆盖。
+    sl_initial_f = float(sl_initial) if sl_initial is not None else None
 
     if payload["side"] == "long":
         tp1_pct = (tp1 - entry) / entry * 100
         tp2_pct = ((tp2_f - entry) / entry * 100) if tp2_f else None
-        sl_pct_initial = ((sl_initial_f - entry) / entry * 100) if sl_initial_f else 0.0
+        sl_pct_initial = ((sl_initial_f - entry) / entry * 100) if sl_initial_f else None
     else:
         tp1_pct = (entry - tp1) / entry * 100
         tp2_pct = ((entry - tp2_f) / entry * 100) if tp2_f else None
-        sl_pct_initial = ((entry - sl_initial_f) / entry * 100) if sl_initial_f else 0.0
+        sl_pct_initial = ((entry - sl_initial_f) / entry * 100) if sl_initial_f else None
 
     sig = {
         "trade_id": new_id,
@@ -850,7 +1136,432 @@ def _compute_trade_net_usd(t: dict) -> Optional[float]:
     return round(net, 2)
 
 
-# ============================ HTTP ============================
+# ============================ 行情分析（BTC 多周期 4 维） ============================
+# 2026-10-18 liusir 要求：在 BTC 现价右侧展示当前行情分析卡，每 15min 一次（前端定时）
+# + 手动 button。服务端不缓存（按需 4 个 gate 公共 API，~1-2s 一次），前端缓存 15min。
+#
+# 4 维：
+#   1) 趋势（15m + 1h + 4h EMA 方向 + 收敛发散）
+#   2) 波动率（1h 真实波幅 ATR-14 vs 长期均值，%）
+#   3) 关键位（24h 最高最低 + 距现价，+1% / -1% 阈值）
+#   4) 资金费率（最新 + 上次，方向）
+
+def _ema(values, n):
+    if not values:
+        return None
+    k = 2 / (n + 1)
+    e = values[0]
+    for v in values[1:]:
+        e = v * k + e * (1 - k)
+    return e
+
+
+def _atr(klines, n):
+    """Average True Range（n 周期）。klines: [[t, o, h, l, c, v], ...]。"""
+    if len(klines) < 2:
+        return None
+    trs = []
+    prev_c = float(klines[0][4])
+    for k in klines[1:]:
+        h, l, c = float(k[2]), float(k[3]), float(k[4])
+        tr = max(h - l, abs(h - prev_c), abs(l - prev_c))
+        trs.append(tr)
+        prev_c = c
+    if not trs:
+        return None
+    return sum(trs[-n:]) / min(n, len(trs))
+
+
+def _v2_gate_safe() -> dict:
+    """
+    ★ 2026-10-24：取 v2.1 开仓闸门状态，失败也不拖垮行情分析端点。
+    v2_journal 只在训练环境跑（TRAINING_MODE=1），但面板要显示闸门状态，
+    所以这里只读取值，不下单、不写任何 journal。
+    """
+    try:
+        import v2_journal
+        st = v2_journal.gate_status()
+        st["ok"] = True
+        return st
+    except Exception as e:
+        return {"ok": False, "error": f"闸门状态读取失败: {e}",
+                "vol_5d_pct": None, "vol_min_pct": None, "vol_pass": None,
+                "blocked_24h": None}
+
+
+def build_market_analysis() -> dict:
+    """BTC 行情多周期分析（4 维）。详见模块顶部注释。"""
+    try:
+        sys.path.insert(0, str(SKILL_ROOT / "scripts"))
+        from gate_fetch import fetch_public, fetch_ticker
+    except Exception as e:
+        return {"error": f"gate_fetch 不可用：{e}",
+                "ts": int(time.time()), "ts_str": time.strftime("%Y-%m-%d %H:%M:%S")}
+
+    def _klines(interval, limit):
+        try:
+            data = fetch_public(
+                "/futures/usdt/candlesticks",
+                {"contract": "BTC_USDT", "interval": interval, "limit": limit},
+            )
+            out = []
+            for k in data:
+                out.append([
+                    float(k["t"]),
+                    float(k["o"]),
+                    float(k["h"]),
+                    float(k["l"]),
+                    float(k["c"]),
+                    float(k.get("v", 0)),
+                ])
+            return out
+        except Exception:
+            return []
+
+    def _trend_from(closes):
+        if len(closes) < 30:
+            return "flat", None, None
+        ema20 = _ema(closes, 20)
+        ema50 = _ema(closes, 50) if len(closes) >= 50 else ema20
+        diff_pct = (ema20 - ema50) / ema50 * 100 if ema50 else 0
+        if diff_pct > 0.15:
+            return "up", ema20, ema50
+        if diff_pct < -0.15:
+            return "down", ema20, ema50
+        return "flat", ema20, ema50
+
+    k15 = _klines("15m", 60)
+    k1h = _klines("1h", 60)
+    k4h = _klines("4h", 60)
+
+    trend_15m, _, _ = _trend_from([k[4] for k in k15])
+    trend_1h, ema20_1h, ema50_1h = _trend_from([k[4] for k in k1h])
+    trend_4h, ema20_4h, ema50_4h = _trend_from([k[4] for k in k4h])
+
+    trends = [trend_15m, trend_1h, trend_4h]
+    if len(set(trends)) == 1:
+        convergence = "converging" if trends[0] != "flat" else "flat"
+    else:
+        convergence = "diverging"
+
+    atr_1h = _atr(k1h, 14)
+    last_px = float(k1h[-1][4]) if k1h else None
+    atr_pct = (atr_1h / last_px * 100) if (atr_1h and last_px) else None
+    if atr_pct is not None:
+        if atr_pct < 0.30:
+            regime = "low"
+        elif atr_pct > 1.00:
+            regime = "high"
+        else:
+            regime = "normal"
+    else:
+        regime = "normal"
+
+    key_levels = {"high_24h": None, "low_24h": None,
+                  "dist_to_high_pct": None, "dist_to_low_pct": None,
+                  "near_resistance": False, "near_support": False}
+    try:
+        tk = fetch_ticker("BTC_USDT")
+        if tk:
+            t = tk[0]
+            hi = float(t.get("high_24h") or 0)
+            lo = float(t.get("low_24h") or 0)
+            last_tk = float(t.get("last") or 0) or last_px
+            key_levels["high_24h"] = hi
+            key_levels["low_24h"] = lo
+            if hi and last_tk:
+                d_hi = (hi - last_tk) / last_tk * 100
+                key_levels["dist_to_high_pct"] = round(d_hi, 2)
+                key_levels["near_resistance"] = 0 < d_hi < 0.5
+            if lo and last_tk:
+                d_lo = (last_tk - lo) / last_tk * 100
+                key_levels["dist_to_low_pct"] = round(d_lo, 2)
+                key_levels["near_support"] = 0 < d_lo < 0.5
+    except Exception:
+        pass
+
+    funding = {"current": None, "previous": None, "sign": "neutral"}
+    try:
+        from gate_fetch import fetch_funding_rate
+        fr = fetch_funding_rate("BTC_USDT", limit=2)
+        if len(fr) >= 1:
+            funding["current"] = float(fr[0].get("r", 0))
+        if len(fr) >= 2:
+            funding["previous"] = float(fr[1].get("r", 0))
+        cur = funding["current"]
+        if cur is not None:
+            if cur > 0.0001:
+                funding["sign"] = "long_pay"
+            elif cur < -0.0001:
+                funding["sign"] = "short_pay"
+            else:
+                funding["sign"] = "neutral"
+    except Exception:
+        pass
+
+    return {
+        "ts": int(time.time()),
+        "ts_str": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "last_px": last_px,
+        "trend": {
+            "15m": trend_15m, "1h": trend_1h, "4h": trend_4h,
+            "convergence": convergence,
+            "ema20_1h": round(ema20_1h, 2) if ema20_1h else None,
+            "ema50_1h": round(ema50_1h, 2) if ema50_1h else None,
+            "ema20_4h": round(ema20_4h, 2) if ema20_4h else None,
+            "ema50_4h": round(ema50_4h, 2) if ema50_4h else None,
+        },
+        "volatility": {
+            "atr_1h": round(atr_1h, 2) if atr_1h else None,
+            "atr_pct": round(atr_pct, 3) if atr_pct is not None else None,
+            "regime": regime,
+        },
+        "key_levels": key_levels,
+        "funding": funding,
+        # ★ 2026-10-24：v2.1 开仓闸门状态。
+        #   与上面的 volatility（1h ATR 口径）**不是同一个指标**，别混：
+        #     volatility.regime = 1h ATR / 价，用于行情提示（低波/高波/正常）
+        #     v2_gate.vol_5d_pct = 近 5 日 4h 已实现波动率，用于 v2.1 开仓闸门
+        #   阈值 0.65%：低波动下 v2.1（超跌反弹）从无优势。
+        #   绝对不能让它抛异常拖垮整个 market_analysis 端点 → try/except 兜底。
+        "v2_gate": _v2_gate_safe(),
+        "advisory": _advisory(ma_trend_15m=trend_15m, ma_trend_1h=trend_1h,
+                              ma_trend_4h=trend_4h, ma_convergence=convergence,
+                              ma_vol_regime=regime, ma_vol_pct=atr_pct,
+                              ma_funding_sign=funding.get("sign"),
+                              ma_funding_cur=funding.get("current"),
+                              ma_near_res=key_levels.get("near_resistance"),
+                              ma_near_sup=key_levels.get("near_support"),
+                              ma_payload={
+                                  "ts_str": time.strftime("%Y-%m-%d %H:%M:%S"),
+                                  "last_px": last_px,
+                                  "trend": {"15m": trend_15m, "1h": trend_1h, "4h": trend_4h,
+                                            "convergence": convergence,
+                                            "ema20_1h": round(ema20_1h, 2) if ema20_1h else None,
+                                            "ema50_1h": round(ema50_1h, 2) if ema50_1h else None,
+                                            "ema20_4h": round(ema20_4h, 2) if ema20_4h else None,
+                                            "ema50_4h": round(ema50_4h, 2) if ema50_4h else None},
+                                  "volatility": {"atr_pct": round(atr_pct, 3) if atr_pct is not None else None,
+                                                 "regime": regime},
+                                  "key_levels": key_levels,
+                                  "funding": funding,
+                              }),
+    }
+
+
+def _advisory(ma_trend_15m, ma_trend_1h, ma_trend_4h, ma_convergence,
+              ma_vol_regime, ma_vol_pct, ma_funding_sign, ma_funding_cur,
+              ma_near_res, ma_near_sup, ma_payload=None, mm_ns: str = "main") -> dict:
+    """综合建议（主观启发式，2026-10-18 liusir 要求）
+
+    规则按优先级（命中第一条返回）：
+      1. 费率极端（|r| > 0.05%）→ "费率极端（多头/空头挤压）注意反向"
+      2. 高波动（atr_pct > 1%）且 4h 趋势分歧 → "观望（高波动 + 趋势分歧）"
+      3. 趋势收敛 + 1h 多 + 资金费率中性/负 → "偏多观察"
+      4. 趋势收敛 + 1h 空 + 资金费率中性/正 → "偏空观察"
+      5. 趋势收敛但 1h 平 → "趋势收敛但 1h 平，等方向"
+      6. 趋势分歧 → "分歧，等共振"
+      7. 4h 平 + 1h 任意 → "4h 平，仅 1h 信号"
+      8. 全部平 → "无方向"
+    + 关键位 modifier（命中主规则后追加）：
+      - near_resistance → "近阻力" 红色提示
+      - near_support → "近支撑" 绿色提示
+    """
+    rules = []
+    main = None
+    # 1. 费率极端
+    if ma_funding_cur is not None and abs(ma_funding_cur) > 0.0005:
+        if ma_funding_cur > 0:
+            main = "费率极端（多头挤压）注意反向"
+        else:
+            main = "费率极端（空头挤压）注意反向"
+    # 2. 高波动 + 趋势分歧
+    elif ma_vol_pct is not None and ma_vol_pct > 1.0 and ma_convergence == "diverging":
+        main = "观望（高波动 + 趋势分歧）"
+    # 3-5. 收敛
+    elif ma_convergence == "converging":
+        if ma_trend_1h == "up" and ma_funding_sign in ("neutral", "short_pay"):
+            main = "偏多观察"
+        elif ma_trend_1h == "down" and ma_funding_sign in ("neutral", "long_pay"):
+            main = "偏空观察"
+        elif ma_trend_1h == "flat":
+            main = "趋势收敛但 1h 平，等方向"
+        else:
+            main = "趋势收敛（多 1h / 费率反向）" if ma_trend_1h == "up" else "趋势收敛（空 1h / 费率反向）"
+    # 6. 分歧
+    elif ma_convergence == "diverging":
+        main = "分歧，等共振"
+    # 7. 4h 平
+    elif ma_trend_4h == "flat":
+        main = "4h 平，仅 1h 信号"
+    # 8. 全部平
+    else:
+        main = "无方向"
+
+    # 关键位 modifier
+    if ma_near_res:
+        main += " · 近阻力"
+    elif ma_near_sup:
+        main += " · 近支撑"
+
+    # 颜色：偏多=绿 / 偏空=红 / 观望/分歧/平=灰 / 费率极端=琥珀
+    if "偏多" in main or "近支撑" in main:
+        color = "pos"
+    elif "偏空" in main or "近阻力" in main:
+        color = "neg"
+    elif "费率极端" in main:
+        color = "warn"
+    else:
+        color = "neu"
+
+    # 风险 modifier
+    if ma_vol_regime == "high":
+        risks = "高波动"
+    elif ma_vol_regime == "low":
+        risks = "低波动（潜在突破）"
+    else:
+        risks = "正常波动"
+
+    mm_text = _mm_advice(ma_payload, ns=mm_ns) if ma_payload else None
+    return {
+        "verdict": main,
+        "color": color,
+        "risk": risks,
+        # 2026-10-18 加：mimo 生成的交易员口吻判读（None 时前端 fallback 到 verdict）
+        "text": mm_text,
+        "text_source": "mimo" if mm_text else "fallback",
+    }
+
+
+# mimo 判读缓存：按 namespace 隔离。
+#   "main"  = /api/market_analysis（行情分析卡）
+#   "board" = /api/market_board（行情大图）
+# 两个端点的 payload 略有差异（取价口径/EMA 深度不同），共用一个缓存会导致
+# 「图上写 80,145、AI 判读写 80,083」这种自相矛盾，所以分开存。
+_MM_CACHES: dict = {"main": {"ts": 0, "text": None}, "board": {"ts": 0, "text": None}}
+_MM_CACHE_TTL = 900  # mimo 生成的结果缓存 15min（跟前端 15min 自动刷新节奏一致；首请求慢由 nginx read_timeout 保障）
+
+
+def _mm_advice(ma_payload: dict, ns: str = "main") -> "str | None":
+    """调 mimo 生成 1 段交易员口吻的判读（2026-10-18 liusir 要求）
+
+    输入：build_market_analysis() 的全部输出（trend / volatility / key_levels / funding + 4 维）
+    输出：100-150 字中文判读，按「数据 → 分类 → 方向」三段式
+    """
+    import time as _t
+    now = _t.time()
+    cache = _MM_CACHES.setdefault(ns, {"ts": 0, "text": None})
+    if cache["text"] and now - cache["ts"] < _MM_CACHE_TTL:
+        return cache["text"]
+
+    t = ma_payload.get("trend") or {}
+    v = ma_payload.get("volatility") or {}
+    k = ma_payload.get("key_levels") or {}
+    f = ma_payload.get("funding") or {}
+    last_px = ma_payload.get("last_px")
+    hi = k.get("high_24h")
+    lo = k.get("low_24h")
+    funding_pct = (f.get("current") or 0) * 100
+    fund_sign_zh = ("多头付费" if f.get("sign") == "long_pay"
+                    else "空头付费" if f.get("sign") == "short_pay"
+                    else "中性")
+
+    data_summary = (
+        f"现价 ${last_px:.0f}" if last_px else "现价未知"
+    )
+    if hi and lo and last_px:
+        # 当前价在 24h 区间的位置（0%=最低，100%=最高）
+        pos_pct = (last_px - lo) / (hi - lo) * 100 if hi > lo else 50
+        data_summary += f" · 24h 区间 ${lo:.0f}-${hi:.0f}（当前位于 {pos_pct:.0f}%）"
+
+    user_msg = f"""以下是 BTC 当前行情数据（{ma_payload.get('ts_str')}）：
+
+{data_summary}
+趋势：15m {t.get('15m')} / 1h {t.get('1h')} / 4h {t.get('4h')}（收敛性：{t.get('convergence')}）
+      EMA20/50 (1h): {t.get('ema20_1h')} / {t.get('ema50_1h')}
+      EMA20/50 (4h): {t.get('ema20_4h')} / {t.get('ema50_4h')}
+波动率：1h ATR {v.get('atr_pct')}%（regime: {v.get('regime')}）
+资金费率（8h）：{funding_pct:.4f}%（{fund_sign_zh}）
+关键位：距 24h 高 {k.get('dist_to_high_pct')}% / 距 24h 低 {k.get('dist_to_low_pct')}%
+        近阻力: {k.get('near_resistance')} / 近支撑: {k.get('near_support')}
+
+请按「数据 → 分类 → 方向」三段式给一段 100-150 字的中文交易员判读：
+1. **数据** 一句话说出当前最显眼的数据特征（位置 + 趋势方向 + 资金费率/波动是否异常）
+2. **分类** 一句话定义当前是什么行情（趋势/区间/转折/突破前夜等）
+3. **方向** 1-2 句指出近期最可能走的方向 + 关键位（突破哪里看多，跌破哪里看空，没信号就老实说观望）
+
+口吻要求：像有 3-5 年经验的 BTC 交易员在群里发的简评，不绕弯不堆术语。少用 emoji。不用 markdown 加粗。用句号分句，不要换行。""".strip()
+
+    try:
+        import urllib.request
+        import urllib.error
+        mimo_url = "https://token-plan-cn.xiaomimimo.com/v1/chat/completions"
+        mimo_model = "mimo-v2.6-pro"
+        mimo_key = "tp-ct47anmx8cfumrz76520csausc2bho3vdaa6zohh1ib7lznm"
+        body = json.dumps({
+            "model": mimo_model,
+            "max_tokens": 320,
+            "temperature": 0.5,
+            "messages": [
+                {"role": "system", "content": "你是一个有 3-5 年经验的 BTC 合约交易员，习惯用一两句短话说清行情，不绕弯不堆术语。"},
+                {"role": "user", "content": user_msg},
+            ],
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            mimo_url, data=body,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {mimo_key}",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+        text = (data.get("choices") or [{}])[0].get("message", {}).get("content", "").strip()
+        if not text:
+            return None
+        # 兜底：去掉首尾空白
+        text = text.replace("\n", " ").strip()
+        # 单段式：去掉可能的多余空行
+        import re as _re
+        text = _re.sub(r"\s+", " ", text)
+        _MM_CACHES[ns]["text"] = text
+        _MM_CACHES[ns]["ts"] = now
+        return text
+    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, KeyError, TimeoutError, OSError):
+        # mimo 失败时返回 None，让调用方 fallback 到 advisory.verdict
+        return None
+
+
+def _build_market_board_payload() -> dict:
+    """行情大图数据 + AI 判读。
+
+    AI 判读走 _mm_advice(ns="board")：跟 /api/market_analysis 共用同一套
+    _advisory 规则，但缓存命名空间独立（两个端点的取价口径略有差异，
+    共用缓存会出现「图上 80,215 / 判读 80,083」这种自相矛盾）。
+    """
+    import market_board
+    board = market_board.build_market_board()
+    if board.get("error"):
+        return board
+
+    mp = board.get("ma_payload") or {}
+    t = (mp.get("trend") or {})
+    v = (mp.get("volatility") or {})
+    k = (mp.get("key_levels") or {})
+    f = (mp.get("funding") or {})
+
+    adv = _advisory(
+        ma_trend_15m=t.get("15m"), ma_trend_1h=t.get("1h"), ma_trend_4h=t.get("4h"),
+        ma_convergence=t.get("convergence"),
+        ma_vol_regime=v.get("regime"), ma_vol_pct=v.get("atr_pct"),
+        ma_funding_sign=f.get("sign"), ma_funding_cur=f.get("current"),
+        ma_near_res=k.get("near_resistance"), ma_near_sup=k.get("near_support"),
+        ma_payload=mp, mm_ns="board",
+    )
+    board["advisory"] = adv
+    return board
+
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
@@ -863,6 +1574,32 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception as e:
+                self.send_error(500, str(e))
+            return
+        # ===== 行情大图（独立页面，2026-10-27 liusir：一页只讲当前市场环境）=====
+        if self.path == "/market" or self.path.startswith("/market.html"):
+            try:
+                body = MARKET_PAGE_PATH.read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception as e:
+                self.send_error(500, str(e))
+            return
+        # ===== 行情大图数据（多周期 K 线 + 指标 + 跨周期投票 + AI 判读）=====
+        if self.path.startswith("/api/market_board"):
+            try:
+                payload = _build_market_board_payload()
+                body = json.dumps(payload, ensure_ascii=False).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
                 self.wfile.write(body)
             except Exception as e:
@@ -918,11 +1655,57 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_error(500, str(e))
             return
-        # ===== 老师直播单：GET 列表 =====
-        if self.path == "/api/teacher/trades":
+        # ===== 老师直播单：GET 列表（支持分页 + 过滤 + 排序，2026-10-18） =====
+        if self.path.startswith("/api/teacher/trades"):
             try:
-                payload = build_status_teacher()
+                payload = build_status_teacher(self.path)
                 body = json.dumps(payload, ensure_ascii=False).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception as e:
+                self.send_error(500, str(e))
+            return
+        # ===== 5 objective + Edge Score 历史趋势 (2026-10-17) =====
+        # ===== 行情分析（prod 顶部 BTC 右侧，每 15min 刷新 + 手动） =====
+        if self.path.startswith("/api/market_analysis"):
+            try:
+                payload = build_market_analysis()
+                body = json.dumps(payload, ensure_ascii=False).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception as e:
+                self.send_error(500, str(e))
+            return
+        if self.path == "/api/metrics/history":
+            try:
+                sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+                from weekly_metrics_tracker import load_history
+                history = load_history()
+                body = json.dumps({"history": history}, ensure_ascii=False).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception as e:
+                self.send_error(500, str(e))
+            return
+        # ===== 改造前后 baseline 对比 (2026-10-17) =====
+        if self.path == "/api/metrics/baselines":
+            try:
+                sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+                from baseline_record import list_baselines
+                baselines = list_baselines()
+                body = json.dumps({"baselines": baselines}, ensure_ascii=False).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.send_header("Cache-Control", "no-store")

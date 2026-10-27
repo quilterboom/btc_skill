@@ -186,8 +186,14 @@ class TestFormatCardOverride(unittest.TestCase):
                 "vol": 200000,
             }
         }
+        # ★ 2026-10-26 修：verdict 原来写「临界（再等 1 根确认）」→ 命中 telegram.py
+        #   的 is_boundary 分支 → 卡片走「价位参考：暂无推荐价位」，
+        #   价位/TP/SL/张数**根本不渲染** → 6 个 override 断言全部失败。
+        #   根因：代码是按 liusir 反馈有意改成「临界/无信号不展示价位」的，
+        #   但测试的 fixture 没跟上，还停在旧行为。
+        #   这里改成「信号成立」档，让测试真正测到 override 的价位替换逻辑。
         self.scan_payload = {
-            "verdict": "临界（再等 1 根确认）",
+            "verdict": "做多信号成立",
             "side": "long",
             "score_long": 4,
             "score_short": 1,

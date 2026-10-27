@@ -504,7 +504,8 @@ class TestEmaWarningClosePnl(unittest.TestCase):
         """
         return [
             _bar(1005, 100.0, 100.2, 100.0, 100.1),  # 成交
-            _bar(1010, 100.1, 105.5, 99.5, 105.0),   # cur=105 + low=99.5 同时触发 BE
+            _bar(1010, 100.1, 105.5, 99.5, 105.0),   # cur=105 + EMA 预警（本根不判 SL，决策 B）
+            _bar(1020, 105.0, 105.2, 99.0, 99.5),    # 下一根 low=99 ≤ BE 100 → BE 兜底
         ]
 
     def test_long_ema_warn_then_be_stopped_pnl_includes_partial(self):
@@ -563,7 +564,8 @@ class TestEmaWarningClosePnl(unittest.TestCase):
         # 同时 1m 高点 high=100.5 ≥ active_sl=100（BE 兜底）
         bars_1m = [
             _bar(1005, 100.0, 100.2, 100.0, 100.1),  # 成交
-            _bar(1010, 99.0, 100.5, 95.0, 95.0),    # 盈利 + 同根 BE 兜底
+            _bar(1010, 99.0, 100.5, 95.0, 95.0),    # 盈利 + EMA 预警（本根不判 SL，决策 B）
+            _bar(1020, 95.0, 100.6, 94.8, 100.0),   # 下一根 high=100.6 ≥ BE 100 → BE 兜底
         ]
         with patch("position_tracker.fetch_ohlcv", side_effect=_fake_fetch):
             res = pt._settle_one(sig, bars_1m)
@@ -643,11 +645,19 @@ class TestAppendEventTestPrefixGuard(unittest.TestCase):
         self.assertIn("BTC_USDT-1790000000-long", data)
 
     def test_empty_id_appended(self):
-        """没 id 的事件（异常路径）保留原行为，写入"""
+        """没 id 的事件（异常路径）**不写入** —— 白名单只放 BTC_USDT- 前缀。
+
+        ★ 2026-10-26 修正断言方向：原断言是「保留原行为，写入」，
+        但 position_tracker._append_event 的白名单（2026-10-11 加的
+        `if not _rid.startswith("BTC_USDT-"): return`）早就把空 id 拦掉了，
+        测试断言没跟上 → 一直失败。空 id 事件无法归属到任何持仓，
+        写进去只会污染 dashboard 统计（latest_5 / 胜率）。
+        """
         pt._append_event({"outcome": "DEBUG", "net_usd": 0.0})
         with open(self.tmp_path) as f:
             data = f.read().strip()
-        self.assertIn("DEBUG", data)
+        self.assertNotIn("DEBUG", data,
+                         "空 id 事件写进了 events —— 会污染 dashboard 统计")
 
 
 class TestNotifyCloseNoiseGate(unittest.TestCase):

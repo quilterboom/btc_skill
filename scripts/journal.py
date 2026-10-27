@@ -296,6 +296,20 @@ def _settle_one(r: Dict, bars: List[List]) -> Optional[Dict]:
     if R <= 0:
         return None
     fee_r = FEE_R_MAKER / max(sl_pct, 1e-6)      # post-only 挂单往返
+    # ★ 2026-10-26 修复：**已成交的单让位给 position_tracker，本引擎不碰**。
+    #   根因（实测 BTC_USDT-1792856706-long）：hammer 走 hammer_watcher 市价成交
+    #   （_fill_method=market_on_watcher，fill_px=79536.4 高于挂单价 entry=79400），
+    #   但本函数无视 filled/fill_ts，按 15m K 线重判 `low <= entry` —— 市价单成交后
+    #   价格再没回踩 79400 → 判"从没挂到" → 24h 后盖 MISSED + filled=False，
+    #   把 hammer_watcher 写的市价成交踩掉，那笔 +6.64U 减仓利润从所有统计里消失。
+    #
+    #   更危险的是两个引擎 outcome 词表不同：本引擎写 SL / SL* / TP1_PARTIAL，
+    #   position_tracker 写 BE_STOPPED / SL_STOPPED / TP2_DONE（后者是结算权威）。
+    #   让本引擎处理已成交单 = 往账本里混异类 outcome，统计口径直接崩。
+    #   → 已成交（filled 或有 fill_ts）一律 return None，交给 position_tracker。
+    #   本引擎只负责它擅长的：未成交挂单的 24h 过期 MISSED。
+    if bool(r.get("filled")) or bool(r.get("fill_ts")):
+        return None
     filled = False
     ft = None
     mae = mfe = 0.0

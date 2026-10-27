@@ -60,8 +60,12 @@ def settler_loop() -> None:
     n_iter = 0
     n_done_total = 0
     while True:
-        # ★ 先写"开始"心跳——即使 settle_all 卡死，也能从 _write_heartbeat 推出 Settler 至少在循环里
-        # (heartbeat 文件保留上一次成功 ts，本轮没及时刷新 = Settler 卡了)
+        # ★ 先跑 settle_all，**再**写心跳（下一轮的 n_iter 只有等本轮 settle_all 返回后才 +1）
+        #   ⇒ 判定「Settler 卡没卡」要看 **心跳 ts 是否推进**，不是看 n_iter。
+        #   ⚠ 这里原注释写的是「先写开始心跳——即使 settle_all 卡死也能看出在循环里」，
+        #     与代码不符（心跳在 settle_all 之后）。2026-10-24 排查生产心跳停滞时被它误导过：
+        #     以为心跳不动 = 整个循环没起，其实是 settle_all 单轮就要跑很久。
+        #   若要真的「先写心跳再 settle」，把 _write_heartbeat 提到 try 块首行。
         try:
             n_done, n_still = settle_all(verbose=False)
             n_done_total += n_done

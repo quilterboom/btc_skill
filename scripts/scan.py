@@ -17,12 +17,13 @@
 """
 from __future__ import annotations
 import sys, os, time, json, argparse
+from typing import Optional, Dict
 from datetime import datetime, timezone, timedelta
 import numpy as np
 import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from gate_fetch import fetch_ohlcv, fetch_ticker, fetch_contract, assert_usdt_linear
+from gate_fetch import fetch_ohlcv, fetch_ticker, fetch_contract, assert_usdt_linear, DATA_DIR
 import config
 from indicators import (ema, rsi, atr, td_signal, td_setup, sma,
                         swing_pivots, last_swing_leg, fib_retr, fib_retr_up, FIB_RET,
@@ -213,10 +214,16 @@ def max_safe_lev(sl_pct, cushion=1.5):
 
 def make_plan(side, px, atrp, sup, res, d_atrp, lev, bal, risk, quanto, mode="cross",
               target_pts: float = 500.0, tp_mode: str = "auto",
-              custom_tp1_pct: float = None, custom_tp2_pct: float = None):
+              custom_tp1_pct: Optional[float] = None, custom_tp2_pct: Optional[float] = None):
     """
     long  → 挂最近支撑；short → 挂最近阻力
-    止损 = max/min(1.5×ATR, 次级结构位±0.3ATR)，夹在 0.8%~3%
+    止损 = max/min(1.5×ATR，次级结构位±0.3ATR)，夹在 0.8%~3%
+
+    # 2026-10-17 改造 (liusir 决策)：
+    #   SL clip 下限从 0.004 降到 0.001，允许保本 SL (贴近 teacher #8 套路)
+    #   之前下限 0.4% 强制让 SL 至少 0.4%，导致 ATR 小/挂单近支撑时 SL 过宽、
+    #   TP1 距离不足 → R:R < 1。改后 SL 可低至 0.1% 保本，TP1 不再被 R 截断。
+
     止盈 = **目标点数封顶**（默认 500 点）：
         T3 = 入场 ± target 点（硬顶，不贪）
         T1/T2 = 目标以内最近的合格结构位，没有就按 40%/70% 目标分批
@@ -224,7 +231,7 @@ def make_plan(side, px, atrp, sup, res, d_atrp, lev, bal, risk, quanto, mode="cr
     tp_mode (2026-10-09 liusir 加):
         - "auto"   (默认): 按 target_pts 自动算 TP1=40%/TP2=60%
         - "custom"        : 强制用 custom_tp1_pct / custom_tp2_pct (15m 形态信号专用)
-                           此时 SL 仍按 ATR/结构算 (0.8% 下限), entry 用 px (形态已锁定入场)
+                           此时 SL 仍按 ATR/结构算 (0.1% 下限, 允许保本风格), entry 用 px (形态已锁定入场)
     """
     a = max(atrp, 0.15) / 100.0
     near_sup = sup[0][1] if sup else px * (1 - a)
@@ -238,7 +245,8 @@ def make_plan(side, px, atrp, sup, res, d_atrp, lev, bal, risk, quanto, mode="cr
         entry_break = (res[0][1] * (1 + 0.05 * a)) if res else px * (1 + 0.10 * a)
         sec = sup[1][1] if len(sup) > 1 else entry - 2 * a * px
         sl = max(entry - 1.50 * a * px, sec - 0.30 * a * px)
-        sl_pct = float(np.clip((entry - sl) / entry, 0.004, 0.030))
+        # 2026-10-17: SL clip 下限 0.004→0.001, 允许保本 SL (贴近 teacher #8)
+        sl_pct = float(np.clip((entry - sl) / entry, 0.001, 0.030))
         R = entry * sl_pct
         cap = entry + tp_pts                                   # 500 点硬顶
         if is_custom:
@@ -260,7 +268,8 @@ def make_plan(side, px, atrp, sup, res, d_atrp, lev, bal, risk, quanto, mode="cr
         entry_break = (sup[0][1] * (1 - 0.05 * a)) if sup else px * (1 - 0.10 * a)
         sec = res[1][1] if len(res) > 1 else entry + 2 * a * px
         sl = min(entry + 1.50 * a * px, sec + 0.30 * a * px)
-        sl_pct = float(np.clip((sl - entry) / entry, 0.004, 0.030))
+        # 2026-10-17: SL clip 下限 0.004→0.001, 允许保本 SL (贴近 teacher #8)
+        sl_pct = float(np.clip((sl - entry) / entry, 0.001, 0.030))
         R = entry * sl_pct
         cap = entry - tp_pts
         if is_custom:
@@ -506,6 +515,249 @@ def _30m_trend_at(ts: int) -> int:
     return 0
 
 
+# ============================ 左侧超跌反弹 (liusir type, 2026-10-15 加) ============================
+# 验证案例: BTC 今晚 (10-15) 21:55 hammer 79,725.9 → 反弹到 81,977 (+2.95%)
+# 进程条: 跌幅 2.44% ✓ + 量能 22.98x ✓ + Pin bar ✓ + 反弹 +0.58% ✓ → 4/4 通过
+# 与 watch 现有 1h CORE 信号 + 15m 形态检测解耦：本函数**只推 teacher TG 卡、不进 journal**，
+# teacher 自己手动下（符合 10-13 拍板的"老师单跟 watch 解耦"原则）
+
+def _detect_left_side_long(
+    contract: str = "BTC_USDT",
+    drop_min_pct: float = 1.5,    # 4h 段跌幅下限
+    volx_min: float = 3.0,        # 1m K 量能放大下限（前 1h avg 对比）
+    rebound_min_pct: float = 0.3, # 点火后 20min 反弹下限
+    lookback_bars: int = 60,      # 1m K 线回看窗口（1h）
+) -> Optional[Dict]:
+    """
+    检测最近 1h 段内是否存在"左侧超跌反弹"机会。
+
+    进程条（4 条）：
+      1. drop ≥ 1.5%   ：前 4h 内最高 vs 当前 low
+      2. volx ≥ 3.0    ：最新 1m K 量能 vs 前 1h 平均
+      3. pin bar        ：阳线 + 下影 > 0.4×rng + 上影 < 0.3×rng + body < 0.5×rng
+      4. rebound ≥ 0.3% ：点火后 20min 最高价 vs 当前 low
+
+    返回 None 或 dict {ts, hammer_O/H/L/C, hammer_kind, drop_pct, volx, rebound_pct,
+                       entry, sl, sl_label, tp1, tp1_pct, tp2, tp2_pct, *_ok flags}
+    """
+    try:
+        # 1) 拉最近 8h 1m K 线（覆盖：4h 跌幅检查 + 1h 量能 base + 20min 反弹 + 留 pin 寻找窗口）
+        bars_1m = fetch_ohlcv(contract, "1m", 480, cache=False)
+    except Exception:
+        return None
+    if len(bars_1m) < 240:
+        return None
+
+    # 2) 找最近一根具有"pin bar / hammer-like" 形态的 1m K 线
+    #    范围：bars 倒数 240 根 = 4h 段（不全找，避免把"很久以前的 pin"误判当现行信号）
+    def _is_pin(o, h, l, c):
+        """
+        左侧超跌反弹形态定义（放宽，给波动剧烈的 BTC 1m K 线）：
+          任一满足：
+            A. 教科书 hammer：阳线 + 下影 > 0.4×rng + 上影 < 0.3×rng + body < 0.5×rng
+            B. 收阳 + 下影 > 0.2×rng + 上影 < 0.1×rng（强反转 / 子弹头）
+            C. "长腿鸽"形态：收阳 + 下影 > 1.5×body 且下影 > 上影×2
+        """
+        rng = h - l
+        if rng <= 0:
+            return False
+        body = abs(c - o)
+        lower = min(o, c) - l
+        upper = h - max(o, c)
+        bullish = c > o
+        if not bullish:
+            return False
+        # A. 教科书 hammer
+        if (lower / rng > 0.4
+                and upper / rng < 0.3
+                and body / rng < 0.5):
+            return True
+        # B. 强反转 / 子弹头（上影极小 + 下影扎实）
+        if (lower / rng > 0.2
+                and upper / rng < 0.1):
+            return True
+        # C. 长腿鸽形态（实体小或没，下影长）
+        if body > 0 and lower / body > 1.5 and lower / max(upper, 1e-6) > 2:
+            return True
+        return False
+
+    hammer = None
+    hammer_idx: Optional[int] = None
+    # 注意：bars_1m 升序，最后一根是最新的；从末尾向前找 pin，
+    # 但要找最新的（最近的 pin）— 倒序 iterate
+    # 同时检查：hammer 时刻后 20 min 内必须有反弹 ≥ rebound_min_pct（防被忽略）
+    # 先收集所有 pin，再选**最新**那根
+    pin_candidates = []
+    for i in range(len(bars_1m) - 1, max(len(bars_1m) - 240, -1), -1):
+        if i < 0: i = 0
+        b = bars_1m[i]
+        o, h, l, c = float(b[1]), float(b[2]), float(b[3]), float(b[4])
+        if _is_pin(o, h, l, c):
+            pin_candidates.append((i, b))
+    # 取最**新**的 pin（index 最大那个）
+    if not pin_candidates:
+        return None
+    pin_candidates.sort(key=lambda x: x[0], reverse=True)
+
+    # 2026-10-17 借鉴 harryguiacorn HOLP-LOHP + Heavy91 Failure Swing：
+    #   动态"破位 + 收回"判定（HOLP 反转）
+    #   - 破位: hammer.L < 最近 N 根（默认 60=1h）的最低 low
+    #   - 收回: hammer 收盘 > 破位 bar 的 high
+    #   比静态"平盘支撑"更准——HOLP-LOHP 是经典 S/R 反转信号
+    # 2026-10-17 之前 Heavy91 静态平盘版：回测反向（含平盘 WR 28.6% vs 不含 66.7%）
+    #   失败教训：静态"平盘"= 横盘 = 无趋势；动态"破位收回" = 趋势反转 = 真信号
+    HOLP_LOOKBACK = 60  # 1h 破位窗口
+    holp_break_bar = None  # 破位 bar index
+    holp_break_low = None  # 破位 bar 的 low
+    holp_reversal_ok = False
+    holp_score = 0  # 0-2（破位+收回 各 1 分）
+
+    for hammer_idx, hammer in pin_candidates:
+        hammer_pos = hammer_idx
+
+        hammer_ts = int(hammer[0])
+        hammer_O, hammer_H, hammer_L, hammer_C = float(hammer[1]), float(hammer[2]), float(hammer[3]), float(hammer[4])
+        hammer_v = float(hammer[5])
+
+        # 3) 4h 内跌幅（找最近 240 根 = 4h 内最高 vs hammer 低）
+        pre_4h = bars_1m[max(0, hammer_pos - 240):hammer_pos]
+        if not pre_4h:
+            continue  # 跳过这个 pin，试下一个
+        pre_4h_hi = max(pre_4h, key=lambda b: float(b[2]))
+        hi_4h = float(pre_4h_hi[2])
+        drop_pct = (hi_4h - hammer_L) / hi_4h * 100.0
+        drop_ok = drop_pct >= drop_min_pct
+
+        # 4) 量能放大（hammer 自身 / hammer 之前 1h 平均）
+        pre_1h = bars_1m[max(0, hammer_pos - 60):hammer_pos]
+        if not pre_1h:
+            continue  # 跳过这个 pin，试下一个
+        avg_vol_1h = sum(float(b[5]) for b in pre_1h) / len(pre_1h)
+        volx = hammer_v / avg_vol_1h if avg_vol_1h > 0 else 0
+        volx_ok = volx >= volx_min
+
+        # 5) 反弹确认（hammer 之后 20min 最高 vs hammer 低）
+        post_20m = bars_1m[hammer_pos + 1:hammer_pos + 21]
+        if not post_20m:
+            rebound_pct = 0.0
+        else:
+            post_hi = max(post_20m, key=lambda b: float(b[2]))
+            post_hi_v = float(post_hi[2])
+            rebound_pct = (post_hi_v - hammer_L) / hammer_L * 100.0
+        rebound_ok = rebound_pct >= rebound_min_pct
+
+        # 5.5) HOLP 反转判定（借 harryguiacorn）：
+        #   破位: hammer.L 低于最近 60 根（1h）的最低 low（hammer 自己也含在内）
+        #   收回: hammer 收盘 > 破位 bar 的 high（确认反转）
+        pre_lookback = bars_1m[max(0, hammer_pos - HOLP_LOOKBACK):hammer_pos + 1]  # 含 hammer 自身
+        if pre_lookback:
+            lookback_low = min(float(b[3]) for b in pre_lookback)
+            lookback_low_bar = min(pre_lookback, key=lambda b: float(b[3]))
+            # 破位：hammer.L 严格低于 lookback 的最低（hammer.L 是新的 session low）
+            holp_break_low = float(lookback_low_bar[3])
+            holp_break_bar = int(lookback_low_bar[0])
+            is_break = hammer_L < lookback_low
+            # 收回：hammer 收盘 > 破位 bar 的 high（high 是新的 session low 之前的阻力位）
+            holp_break_high = float(lookback_low_bar[2])
+            is_recovery = hammer_C > holp_break_high
+            holp_reversal_ok = is_break and is_recovery
+            holp_score = (1 if is_break else 0) + (1 if is_recovery else 0)
+
+        # 6) 进程不通过 → 跳过这个 pin，试下一个（而非直接 return None）
+        # liusir #8 规则：至少 3/4 通过才推
+        # 2026-10-17 加 drop_forced 守卫（回测证实 42% 噪音 hammer drop<1.5%）：
+        #   drop_ok 必须过（确认有真跌）→ 过滤掉横盘反弹的假 hammer
+        #   其他三项 (volx/pin/rebound) 3 选 2 即可
+        # 2026-10-17 借鉴 harryguiacorn HOLP-LOHP：尝试加 holp_reversal_ok 进程条（5 选 3 即可）
+        #   但 4 天回测 (20 笔) 显示 0 笔命中（条件太严苛）
+        #   不达标回滚。保留 holp 字段做大数据分析，不计入 passed。
+        if not drop_ok:
+            continue    # drop 没过直接跳过这个 pin（不计入 passed 累计）
+        passed = sum([drop_ok, volx_ok, True, rebound_ok])  # pin 形态已在第三步强制命中
+        # TODO: 等样本量 >= 30 笔后重新评估是否将 holp_reversal_ok 计入 passed
+        if passed >= 3:
+            # ✓ 找到有效信号，break 出循环
+            break
+    else:
+        # for-else：所有 pin 都试过了，没有一个满足条件
+        return None
+
+    # 7) 计算建议 entry / SL / TP1 / TP2（liusir #8 套路）
+    entry = round(hammer_H, 1)               # entry_zone = hammer H = 强阻力转支撑
+    sl = round(hammer_L * 0.999, 1)          # SL = low 略下方（保本风格，肉眼可看出是保本错位）
+    sl_label = f"hammer L-0.1% (保本风格, 实际入场后推 entry 即可)"
+
+    tp1_pct = 0.013   # 1.3%
+    tp2_pct = 0.029   # 2.9%
+    tp1 = round(entry * (1 + tp1_pct), 1)
+    tp2 = round(entry * (1 + tp2_pct), 1)
+
+    pin_kind = "hammer" if hammer_C > hammer_O and (hammer_C - hammer_O) > 0.3 * (hammer_H - hammer_L) else "pin_bar"
+
+    return {
+        "ts": hammer_ts,
+        "hammer_kind": pin_kind,
+        "hammer_O": hammer_O,
+        "hammer_H": hammer_H,
+        "hammer_L": hammer_L,
+        "hammer_C": hammer_C,
+        "drop_pct": round(drop_pct, 2),
+        "volx": round(volx, 2),
+        "rebound_pct": round(rebound_pct, 2),
+        "entry": entry,
+        "sl": sl,
+        "sl_label": sl_label,
+        "tp1": tp1,
+        "tp1_pct": tp1_pct,
+        "tp2": tp2,
+        "tp2_pct": tp2_pct,
+        # 2026-10-17 借鉴 harryguiacorn HOLP-LOHP：动态破位收回
+        "holp_break_bar": holp_break_bar,             # 破位 bar ts（None=没破位）
+        "holp_break_low": holp_break_low,             # 破位 bar 的 low（hammer.L 是新的 session low）
+        "holp_reversal_ok": holp_reversal_ok,         # 破位+收回 同时成立
+        "holp_score": holp_score,                     # 0/1/2（破位+收回 各 1 分）
+        "drop_ok": drop_ok,
+        "volx_ok": volx_ok,
+        "pin_ok": True,
+        "rebound_ok": rebound_ok,
+    }
+
+
+# ---- 左侧信号去重：同一根 hammer 只推一次（持久化到磁盘，跨进程生效）----
+# 2026-10-16 加：修"每 15 分钟重推同一根 11:43 hammer"的 bug（44 条累计）
+# 用单独文件 last_left_signal.json（不污染 volume.py 的 last_fire.json 量能冷却）
+_LAST_LEFT_PATH = os.path.join(DATA_DIR, "last_left_signal.json")
+
+
+def _load_last_left_signal(contract: str) -> float:
+    """读该合约最后一次左侧信号推过的 hammer ts。文件损坏返回 0。"""
+    try:
+        if os.path.exists(_LAST_LEFT_PATH):
+            data = json.load(open(_LAST_LEFT_PATH, encoding="utf-8"))
+            return float(data.get(contract, 0.0) or 0.0)
+    except Exception:
+        pass
+    return 0.0
+
+
+def _save_last_left_signal(contract: str, hammer_ts: float) -> None:
+    """原子写：保留其他合约的旧值，更新本合约 hammer_ts。"""
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        old = {}
+        if os.path.exists(_LAST_LEFT_PATH):
+            try:
+                old = json.load(open(_LAST_LEFT_PATH, encoding="utf-8"))
+            except Exception:
+                old = {}
+        old[contract] = float(hammer_ts)
+        tmp = _LAST_LEFT_PATH + ".tmp"
+        json.dump(old, open(tmp, "w", encoding="utf-8"))
+        os.replace(tmp, _LAST_LEFT_PATH)
+    except Exception:
+        pass  # 写失败不阻塞推送
+
+
 # ============================ 主流程 ============================
 def main():
     ap = argparse.ArgumentParser(add_help=False)
@@ -530,10 +782,16 @@ def main():
     ap.add_argument("--training", action="store_true", default=False,
                     help="训练环境模式（模拟开单，不计真实资金）。"
                          "journal 路径切换到 training_journal.jsonl，跟生产隔离")
+    ap.add_argument("--strategy-version", default="v1_prod",
+                    choices=["v1_prod", "v2_test"],
+                    help="策略版本: v1_prod=默认 (TP1=0.4×target); "
+                         "v2_test=C 方案 (TP1=1.0% TP2=1.5% 通过 custom 模式). "
+                         "仅训练 watch 启用 v2_test, 生产不动.")
     a = ap.parse_args()
     CONTRACT, LEV, BAL, RISK, MODE = a.contract, a.lev, a.bal, a.risk, a.mode
     BRIEF = a.brief
     TARGET = a.target
+    STRATEGY_VERSION = a.strategy_version
     PREVIEW_SECS = max(0, int(getattr(a, "preview_secs", 0) or 0))
 
     # 2026-10-11 加：训练环境模式（journal 隔离）
@@ -861,10 +1119,21 @@ def main():
     d_atrp = float(dl.atrp) if dl is not None else float(hl.atrp) * 4
     rb = RISK * RS * float(SZ.get("long", 1.0))    # 调参：风险缩放 × 方向仓位系数
     rs_ = RISK * RS * float(SZ.get("short", 1.0))
+    # 2026-10-19: 策略版本 v2_test (C 方案回测) → 训练 watch 走 custom TP1=1.0% TP2=1.5%
+    if STRATEGY_VERSION == "v2_test":
+        _main_tp_mode = "custom"
+        _main_custom_tp1_pct = 0.010
+        _main_custom_tp2_pct = 0.015
+    else:
+        _main_tp_mode = "auto"
+        _main_custom_tp1_pct = None
+        _main_custom_tp2_pct = None
     plan_b = make_plan("long", last, float(hl.atrp), sup, res, d_atrp, LEV, BAL, rb, quanto,
-                       MODE, TARGET)
+                       MODE, TARGET, tp_mode=_main_tp_mode,
+                       custom_tp1_pct=_main_custom_tp1_pct, custom_tp2_pct=_main_custom_tp2_pct)
     plan_s = make_plan("short", last, float(hl.atrp), sup, res, d_atrp, LEV, BAL, rs_, quanto,
-                       MODE, TARGET)
+                       MODE, TARGET, tp_mode=_main_tp_mode,
+                       custom_tp1_pct=_main_custom_tp1_pct, custom_tp2_pct=_main_custom_tp2_pct)
 
     # ============================================================
     # 2026-10-09 加: 15m 形态信号检测 (liu_A3.2 配置)
@@ -896,6 +1165,220 @@ def main():
                   f"(1h score={_p_score}+形态=1={_combined} ≥ 5)")
                 _ts_str = datetime.fromtimestamp(_15m_signal["ts"], timezone(timedelta(hours=8))).strftime('%m-%d %H:%M')
                 P(f"     形态: {_15m_signal['kind']} @ {_ts_str}")
+
+    # ============================================================
+    # 2026-10-15 加: left_side_oversold_bounce 信号检测 (liusir type)
+    #   触发条件（今晚 21:55 hammer 案例验证 5/6 通过）：
+    #     1. 4h 内跌幅 ≥ 1.5%
+    #     2. 最新 1m K 量能 ≥ 前 1h 3x
+    #     3. 1h RSI 不必 < 30（修复后会弹回中位，但 4h 跌幅+量能+形态足够）
+    #     4. 最新 1m K 线是 pin bar（阳线 + 下影 > 0.4×rng + 上影 < 0.3×rng）
+    #     5. 拉最强反弹确认（点火后 20min ≥ 0.3%）
+    #   输出：推 teacher TG 卡（不进 journal，teacher 手动下）
+    # ============================================================
+    _left_signal = None
+    try:
+        _left_signal = _detect_left_side_long(contract=CONTRACT)
+        if _left_signal:
+            # 2026-10-16 加：去重 — 同一根 hammer 只推一次（持久化跨进程）
+            # 不阻断正常信号：只有当扫描到的 hammer_ts == 上次已推的 ts 时跳过
+            # 新的 hammer 出现（比如几小时后新一根 pin）会自然通过
+            _last_left_ts = _load_last_left_signal(CONTRACT)
+            _cur_hammer_ts = float(_left_signal["ts"])
+            if _cur_hammer_ts <= _last_left_ts:
+                # 已推过同一根 hammer：跳过 TG 推送，但仍走主流程其它环节
+                P(f"\n  ⏭️  左侧信号 hammer_ts={int(_cur_hammer_ts)} 已推过（last={int(_last_left_ts)}）→ 跳过")
+            else:
+                P(f"\n  🔔 左侧超跌反弹信号命中 @ {datetime.fromtimestamp(_left_signal['ts'], timezone(timedelta(hours=8))).strftime('%H:%M')}")
+                P(f"     drop={_left_signal['drop_pct']:.2f}%  volx={_left_signal['volx']:.2f}x  hammer L={_left_signal['hammer_L']:.0f}  rebound={_left_signal['rebound_pct']:.2f}%")
+                # ============================================================
+                # 2026-10-17 改造 (liusir 决策)：
+                #   左侧超跌反弹 = 主信号之一，级别最高 → 命中即进场
+                #   - 进 journal (走主流程 log_signal 路径, 但绕过主 verdict 门槛)
+                #   - 走二次确认 + preview_secs (跟其他信号同套, 给取消窗口)
+                #   - TP 用 hammer 自带的 1.30% / 2.90% (liusir #8 套路), 不走 400/850
+                #   - SL 用 hammer L - 0.1% (保本风格, 跟原设计一致)
+                #   - signal_source = "left_side_oversold_bounce" (复盘分层用)
+                # ============================================================
+                _left_jstat = "skipped_duplicate"
+                _left_skip_reason = None
+                _e = _left_signal['entry']
+                _ts_label = datetime.fromtimestamp(_left_signal['ts'], timezone(timedelta(hours=8))).strftime('%H:%M')
+                _prog_pass = sum(1 for k in ['drop_ok', 'volx_ok', 'pin_ok', 'rebound_ok'] if _left_signal.get(k))
+
+                if _J is not None and not a.no_journal:
+                    try:
+                        # 用 make_plan(custom_tp1_pct / custom_tp2_pct) 生成 plan
+                        # SL/仓位/T3 走 make_plan 默认算法；TP1/TP2 强制用 hammer 自带的
+                        _lplan = make_plan(
+                            "long", last, float(hl.atrp), sup, res, d_atrp, LEV, BAL,
+                            RISK * RS * float(SZ.get("long", 1.0)), quanto, MODE, TARGET,
+                            tp_mode="custom",
+                            custom_tp1_pct=_left_signal["tp1_pct"],   # 0.013 = 1.30%
+                            custom_tp2_pct=_left_signal["tp2_pct"],   # 0.029 = 2.90%
+                        )
+                        # ★ 覆盖 make_plan 默认 SL（ATR 结构位）→ 用 hammer L - 0.1% 保本风格
+                        _lplan["sl"] = _left_signal["sl"]
+                        # ★ 2026-10-26 修：sl_pct 原来写 (sl / entry - 1)，两个错：
+                        #   ① 符号反了（long 的 sl 在 entry 下方，应该是 (entry-sl)/entry > 0）
+                        #   ② 单位错了（make_plan 的 sl_pct 是**百分数** sl_pct*100，
+                        #      这里存的是小数 → 跟其它路径差 100 倍，R:R/风险/回测全算错）
+                        #   实测那笔 hammer：entry 79400, sl 79208.6 → 正确值 0.2411，
+                        #   原来存的 -0.0024（负数 + 小数）。
+                        _lplan["sl_pct"] = ((_e - _left_signal["sl"]) / _e * 100) if _e > 0 \
+                            else _lplan.get("sl_pct", 0.5)
+                        # 保持 TP1/TP2 = hammer 自带 (make_plan custom 已用同值，但 entry 用 px 算的，
+                        # 我们要按 hammer 自己的 entry 重新算一遍以严格对齐)
+                        _lplan["entry_limit"] = _e
+                        _lplan["tp1"] = _left_signal["tp1"]
+                        _lplan["tp2"] = _left_signal["tp2"]
+                        # ★ 2026-10-26 修：同 sl_pct，make_plan 口径是百分数（*100），
+                        #   hammer 的 tp1_pct/tp2_pct 是小数 → 转百分数存，别差 100 倍。
+                        _lplan["tp1_pct"] = _left_signal["tp1_pct"] * 100
+                        _lplan["tp2_pct"] = _left_signal["tp2_pct"] * 100
+                        _lplan["signal_source"] = "left_side_oversold_bounce"
+
+                        # 准入守卫 ①: 主方向同向冷却（防止反向同时挂单）
+                        _skip, _reason = config.should_skip_new_signal(CONTRACT, "long", _e)
+                        # 准入守卫 ②: hammer 是主信号级别最高，**不**走"成立"门槛
+                        #     （verdict 可能是"无信号·观望"，但 hammer 自己 4 项进程条已验过）
+                        # 准入守卫 ③: 二次确认（C/D 盘口 + OI），与主信号同套
+                        if not _skip:
+                            try:
+                                from secondary_confirm import check_secondary_confirm
+                                _pass2, _reason2 = check_secondary_confirm("long", CONTRACT)
+                                if not _pass2:
+                                    _skip = True
+                                    _reason = f"二次确认失败：{_reason2}"
+                                    P(f"\n  ⚠️ {_reason}")
+                            except Exception as _e2:
+                                P(f"\n  ⚠️ 二次确认模块异常（fail-open）: {_e2}")
+
+                        _left_skip_reason = _reason if _skip else None
+
+                        if not _skip:
+                            # ★ inline 算 trend/vol/fib tag (hammer block 在主信号 trend_tag
+                            #   定义 line 1345 之前；不能依赖主信号算好的 tag)
+                            _htrend = ("多头排列" if (ml.close > ml.e144 and ml.e169_s5 > 0
+                                                      and dl is not None and dl.close > dl.e144) else
+                                       "空头排列" if (ml.close < ml.e144 and ml.e169_s5 < 0) else "震荡")
+                            _hvol = "放量" if hl.vr > 1.2 else ("温和" if hl.vr > 0.9 else "缩量")
+                            _hfib = "无"
+                            if fib_info:
+                                _hftf = "4h" if "4h" in fib_info else ("1h" if "1h" in fib_info else None)
+                                if _hftf:
+                                    for _hrr in (0.5, 0.618, 0.786):
+                                        if abs(fib_info[_hftf][3][_hrr] / _e - 1) < 0.003:
+                                            _hfib = "共振"
+                                            break
+                            _left_verdict = f"左侧超跌反弹成立（{_left_signal['hammer_kind']} @ {_ts_label}, {_prog_pass}/4 通过）"
+                            # 2026-10-18 liusir 改造：hammer 改"直接进"逻辑
+                            #   - 不再走 post-only 限价挂单（挂单一般进不了）
+                            #   - 写 preview_pending (preview_secs=120) + meta.hammer_managed=True
+                            #   - HammerWatcher 每秒 poll ticker:
+                            #     · ticker >= hammer_L × 1.003 → 市价进（fill_px = ticker）
+                            #     · 120s 过期 → 标 cancelled
+                            #   - 触发后 entry/fill_px 都用 ticker（不用 hammer_H），
+                            #     跟现有 TP/SL 计算公式自动对齐
+                            _HAMMER_PREVIEW_SECS = 120  # 2 分钟监测窗
+                            _left_jstat = _J.log_signal(
+                                CONTRACT, last, "long",
+                                7,   # hammer = 最高级别，1h score 不参与门槛判定
+                                True,
+                                _left_verdict, _lplan,
+                                {"trend": _htrend, "vol": _hvol, "fib": _hfib,
+                                 "pattern": _left_signal["hammer_kind"],
+                                 "left_drop": f"{_left_signal['drop_pct']:.2f}%",
+                                 "left_volx": f"{_left_signal['volx']:.1f}x",
+                                 "left_rebound": f"+{_left_signal['rebound_pct']:.2f}%"},
+                                {"lev": LEV, "bal": BAL, "risk": RISK, "mode": MODE,
+                                 "signal_source": "left_side_oversold_bounce",
+                                 # ★ 2026-10-26 补：strategy_version（同 15m 路径，原来漏了）
+                                 "strategy_version": STRATEGY_VERSION,
+                                 "hammer_ts": int(_cur_hammer_ts),
+                                 # ★ hammer 监测所需字段（HammerWatcher 读这些算阈值）
+                                 "hammer_managed": True,
+                                 "hammer_O": _left_signal.get("hammer_O", 0),
+                                 "hammer_H": _left_signal.get("hammer_H", 0),
+                                 "hammer_L": _left_signal.get("hammer_L", 0),
+                                 "hammer_C": _left_signal.get("hammer_C", 0),
+                                 "hammer_v": _left_signal.get("hammer_v", 0),
+                                 "trigger_pct": 0.003},  # 与 hammer_watcher.TRIGGER_PCT 对齐
+                                preview_secs=_HAMMER_PREVIEW_SECS)
+                            P(f"\n  ✅ 左侧超跌反弹已写入 journal: {_left_jstat}")
+                            P(f"     entry={_e:.1f}  SL={_lplan['sl']:.1f}  TP1={_lplan['tp1']:.1f}  TP2={_lplan['tp2']:.1f}")
+                        else:
+                            _left_jstat = "skipped_duplicate"
+                            P(f"\n  ⚠️ 左侧信号准入守卫：{_reason} → 跳过 journal 写入")
+                    except Exception as _le2:
+                        P(f"\n  ⚠️ 左侧信号 journal 处理失败 (非阻塞): {_le2}")
+                        _left_jstat = "error"
+
+                try:
+                    from telegram import push
+                    if PREVIEW_SECS and PREVIEW_SECS > 0 and _left_jstat == "added":
+                        _until = int(time.time()) + PREVIEW_SECS
+                        _until_str = time.strftime("%H:%M:%S", time.localtime(_until))
+                        push(
+                            f"📋 *左侧超跌反弹预览* `LONG`\n"
+                            f"形态: {_left_signal['hammer_kind']} (1m pin bar @ {_ts_label})\n"
+                            f"\n进程条 ✓ {_prog_pass}/4:\n"
+                            f"  跌幅 ({_left_signal['drop_pct']:.2f}%) {'✓' if _left_signal.get('drop_ok') else '✗'}\n"
+                            f"  量能 x{_left_signal['volx']:.1f} {'✓' if _left_signal.get('volx_ok') else '✗'}\n"
+                            f"  Pin bar {'✓' if _left_signal.get('pin_ok') else '✗'}\n"
+                            f"  反弹 +{_left_signal['rebound_pct']:.2f}% {'✓' if _left_signal.get('rebound_ok') else '✗'}\n"
+                            f"\n计划 (liusir #8 同套路)：\n"
+                            f"  入场: {_e:,.1f} (post-only)\n"
+                            f"  SL: {_left_signal['sl']:,.1f} (hammer L - 0.1% 保本风格)\n"
+                            f"  TP1: {_left_signal['tp1']:,.1f} (1.30%) 减半推保本\n"
+                            f"  TP2: {_left_signal['tp2']:,.1f} (2.90%) 全部走\n"
+                            f"\n⏳ {PREVIEW_SECS}s 后自动执行 ({_until_str} 前可取消)\n"
+                            f"取消: `python3 journal.py cancel <id>`"
+                        )
+                    elif _left_jstat == "added":
+                        push(
+                            f"🔔 *左侧超跌反弹* `LONG`\n"
+                            f"形态: {_left_signal['hammer_kind']} (1m pin bar @ {_ts_label})\n"
+                            f"\n进程条 ✓ {_prog_pass}/4:\n"
+                            f"  跌幅 ({_left_signal['drop_pct']:.2f}%) {'✓' if _left_signal.get('drop_ok') else '✗'}\n"
+                            f"  量能 x{_left_signal['volx']:.1f} {'✓' if _left_signal.get('volx_ok') else '✗'}\n"
+                            f"  Pin bar {'✓' if _left_signal.get('pin_ok') else '✗'}\n"
+                            f"  反弹 +{_left_signal['rebound_pct']:.2f}% {'✓' if _left_signal.get('rebound_ok') else '✗'}\n"
+                            f"\n计划 (liusir #8 同套路)：\n"
+                            f"  入场: {_e:,.1f} (post-only)\n"
+                            f"  SL: {_left_signal['sl']:,.1f}\n"
+                            f"  TP1: {_left_signal['tp1']:,.1f} (1.30%)\n"
+                            f"  TP2: {_left_signal['tp2']:,.1f} (2.90%)"
+                        )
+                    elif _left_jstat in ("skipped_duplicate", "blocked_account_safety") and _left_skip_reason:
+                        # 已被准入守卫拦下 → 推"候选卡"告知但不挂单（保留旧行为）
+                        push(
+                            f"🔔 *左侧超跌反弹候选* (liusir-style)\n"
+                            f"形态: {_left_signal['hammer_kind']} (1m pin bar @ {_ts_label})\n"
+                            f"\n进程条 ✓ {_prog_pass}/4:\n"
+                            f"  跌幅 ({_left_signal['drop_pct']:.2f}%) {'✓' if _left_signal.get('drop_ok') else '✗'}\n"
+                            f"  量能 x{_left_signal['volx']:.1f} {'✓' if _left_signal.get('volx_ok') else '✗'}\n"
+                            f"  Pin bar {'✓' if _left_signal.get('pin_ok') else '✗'}\n"
+                            f"  反弹 +{_left_signal['rebound_pct']:.2f}% {'✓' if _left_signal.get('rebound_ok') else '✗'}\n"
+                            f"\n建议 (liusir #8 同套路)：\n"
+                            f"  入场: {_e:.1f} (限价 post-only)\n"
+                            f"  SL: {_left_signal['sl']:.1f} = {_left_signal['sl_label']}\n"
+                            f"  TP1: {_left_signal['tp1']:.1f} ({_left_signal['tp1_pct']*100:.2f}%) 减半推保本\n"
+                            f"  TP2: {_left_signal['tp2']:.1f} ({_left_signal['tp2_pct']*100:.2f}%) 全部走\n"
+                            f"\n⛔ 未挂单：{_left_skip_reason}"
+                        )
+                    # 推送成功 → 持久化 hammer_ts（无论 push 内部 fail/pass 都写，避免重试 spam）
+                    _save_last_left_signal(CONTRACT, _cur_hammer_ts)
+                except Exception as _tg_e:
+                    P(f"\n  ⚠️ 左侧信号 TG 推送失败 (非阻塞): {_tg_e}")
+                    # TG 失败也要持久化，否则下次还会重推同一根 hammer
+                    try:
+                        _save_last_left_signal(CONTRACT, _cur_hammer_ts)
+                    except Exception:
+                        pass
+    except Exception as _le:
+        P(f"\n  ⚠️ 左侧反弹检测异常 (非阻塞): {_le}")
+
     # 2026-10-08 v4.1 liusir 异动行情处理流程（修复版）：
     #   1h K 线收盘/量能异动触发 → 先判断市场状态（ADX）
     #     - ADX > 25: 单边趋势 → 走 CORE 趋势策略
@@ -1072,7 +1555,8 @@ def main():
                     core_b if main_side == "long" else core_s,
                     verdict, _plm,
                     {"trend": trend_tag, "vol": vol_tag, "fib": fib_tag},
-                    {"lev": LEV, "bal": BAL, "risk": RISK, "mode": MODE},
+                    {"lev": LEV, "bal": BAL, "risk": RISK, "mode": MODE,
+                     "strategy_version": STRATEGY_VERSION},  # 2026-10-19 标记策略版本便于回测对比
                     preview_secs=PREVIEW_SECS)
                 # 2026-10-11 补: 1h 主信号路径也推预览/正式 TG 卡
                 # 修复预览闸门漏改这个分支的 bug (之前只在 15m 形态信号路径推)
@@ -1088,8 +1572,8 @@ def main():
                             f"入场: {_plm['entry_limit']:,.1f} (挂单 post-only)\n"
                             f"突破追: {_plm.get('entry_break', 0):,.1f}\n"
                             f"SL: {_plm['sl']:,.1f} ({_plm['sl_pct']:.2f}%)\n"
-                            f"TP1: {_plm['tp1']:,.1f} (400 点)\n"
-                            f"TP2: {_plm['tp2']:,.1f} (600 点)\n"
+                            f"TP1: {_plm['tp1']:,.1f} ({_plm['tp1']-_plm['entry_limit']:+,.0f} 点)\n"
+                            f"TP2: {_plm['tp2']:,.1f} ({_plm['tp2']-_plm['entry_limit']:+,.0f} 点)\n"
                             f"仓位: {_plm['contracts']:.0f} 张 (名义 {_plm['notional']:,.0f}U)\n"
                             f"⏳ {PREVIEW_SECS}s 后自动执行 ({_until_str} 前可取消)\n"
                             f"取消: `python3 journal.py cancel {CONTRACT}-{int(time.time())}-{main_side}`"
@@ -1100,9 +1584,9 @@ def main():
                             f"判定: {verdict}\n"
                             f"1h score: {sc_b if main_side == 'long' else sc_s}/7\n"
                             f"入场: {_plm['entry_limit']:,.1f}\n"
-                            f"SL: {_plm['sl']:,.1f} ({_plm['sl_pct']:.2f}%)\n"
-                            f"TP1: {_plm['tp1']:,.1f} (400 点)\n"
-                            f"TP2: {_plm['tp2']:,.1f} (600 点)\n"
+                                                    f"SL: {_plm['sl']:,.1f} ({_plm['sl_pct']:.2f}%)\n"
+                                                    f"TP1: {_plm['tp1']:,.1f} ({_plm['tp1']-_plm['entry_limit']:+,.0f} 点)\n"
+                                                    f"TP2: {_plm['tp2']:,.1f} ({_plm['tp2']-_plm['entry_limit']:+,.0f} 点)\n"
                             f"仓位: {_plm['contracts']:.0f} 张 (名义 {_plm['notional']:,.0f}U)"
                         )
                 except Exception as _tg_e:
@@ -1111,34 +1595,75 @@ def main():
             # ============================================================
             # 2026-10-09 加: 15m 形态信号触发 → 单独走 tp_mode="custom" 路径
             #   - 形态信号**独立于主信号 verdict** (5/8+形态 已经过 1h score 4 + 形态 1 验证)
-            #   - 复用 make_plan 的 custom_tp1_pct/custom_tp2_pct (TP1=400/TP2=850)
+            #   - 复用 make_plan 的 custom_tp1_pct/custom_tp2_pct
             #   - 主信号 cooldown 检查仍生效 (config.should_skip_new_signal), 避免
             #     短时间内多个反向单同时挂出
+            #
+            # ★ 2026-10-26 修：上面那句注释是**错的** —— 15m 路径原来**根本没调用**
+            #   should_skip_new_signal，只有 1h 主信号路径调用。结果：
+            #   ① 同一形态被反复扫到时每次都写一条新 journal（实测 10-24 同形态
+            #      1 小时内写了 3 条：06:00 / 06:56 / 07:12）；
+            #   ② 生产/训练两边因各自 journal 状态不同 → 同一批 K 线扫出**不同信号**
+            #      （实测 10-17 后生产 13 笔 vs 训练 11 笔，仅 6 笔同刻同向），
+            #      A/B 对照根本不可比。
+            #   现在补上守卫，两边行为一致。
             # ============================================================
             if _pattern_trigger:
                 try:
                     _pside = _pattern_trigger["side"]
                     # 重新生成 plan (custom 模式)
+                    #
+                    # ★ 2026-10-26 改：TP1/TP2 原来**写死** 0.48%/1.02%，跟
+                    #   STRATEGY_VERSION 无关 —— 所以 10-19 部署的 v2_test A/B 对照
+                    #   **从来没生效过**：v2_test 只改了 1h 主信号的 TP，而 1h 主信号
+                    #   几乎不出（生产 81 笔里只有 1 笔），真正在跑的是 15m 形态路径。
+                    #   现在 15m 路径也受版本控制，A/B 对照才有意义。
+                    #
+                    #   回测依据（pos_state 反推，15m 子集 17 笔）：
+                    #     TP1=0.48%（现状）净 +72.0U  盈亏比 3.48
+                    #     TP1=1.00%       净 +174.8U  盈亏比 7.01  胜率不变
+                    #   差 103U > backtest.py 的 ±30U 误差线，方向可信 → 送训练对照。
+                    #
+                    #   根因：TP1 固定 0.48% 但 SL 是 ATR 动态的（实测 0.14%~0.59%），
+                    #   SL > TP1 时盈亏比 < 1，摸不到 TP1 就必亏。
+                    if STRATEGY_VERSION == "v2_test":
+                        _pat_tp1_pct = 0.010     # 1.0%
+                        _pat_tp2_pct = 0.015     # 1.5%
+                    else:
+                        _pat_tp1_pct = 0.00480   # 0.48%（生产现状，不变）
+                        _pat_tp2_pct = 0.01020   # 1.02%
                     _pplan = make_plan(
                         _pside, last, float(hl.atrp), sup, res, d_atrp, LEV, BAL,
                         RISK * RS * float(SZ.get(_pside, 1.0)), quanto, MODE, TARGET,
                         tp_mode="custom",
-                        custom_tp1_pct=0.00480,   # 400 点
-                        custom_tp2_pct=0.01020,   # 850 点
+                        custom_tp1_pct=_pat_tp1_pct,
+                        custom_tp2_pct=_pat_tp2_pct,
                     )
                     _pplan["signal_source"] = "15m_pattern"  # 标记信号源
                     _pverdict = (f"15m形态信号成立（{_15m_signal['kind']}，"
                                  f"1h{_pattern_trigger['score_1h']}+形态=1={_pattern_trigger['score_combined']}）")
-                    jstat_15m = _J.log_signal(
-                        CONTRACT, last, _pside,
-                        _pattern_trigger["score_1h"],   # 1h 主信号 score (7分制)
-                        core_b if _pside == "long" else core_s,
-                        _pverdict, _pplan,
-                        {"trend": trend_tag, "vol": vol_tag, "fib": fib_tag,
-                         "pattern": _15m_signal["kind"]},
-                        {"lev": LEV, "bal": BAL, "risk": RISK, "mode": MODE,
-                         "signal_source": "15m_pattern"},
-                        preview_secs=PREVIEW_SECS)
+                    # ★ 2026-10-26 补准入守卫（见上方注释）：15m 路径原来没调用
+                    #   should_skip_new_signal → 同一形态反复写 journal，
+                    #   且生产/训练两边信号错位（实测仅 6/13 同刻同向），A/B 不可比。
+                    _skip15, _reason15 = config.should_skip_new_signal(
+                        CONTRACT, _pside, float(_pplan["entry_limit"]))
+                    if _skip15:
+                        P(f"\n  ⚠️ 准入守卫：{_reason15} → 跳过 15m 形态信号")
+                        jstat_15m = "skipped_duplicate"
+                    else:
+                        jstat_15m = _J.log_signal(
+                            CONTRACT, last, _pside,
+                            _pattern_trigger["score_1h"],   # 1h 主信号 score (7分制)
+                            core_b if _pside == "long" else core_s,
+                            _pverdict, _pplan,
+                            {"trend": trend_tag, "vol": vol_tag, "fib": fib_tag,
+                             "pattern": _15m_signal["kind"]},
+                            {"lev": LEV, "bal": BAL, "risk": RISK, "mode": MODE,
+                             "signal_source": "15m_pattern",
+                             # ★ 2026-10-26 补：strategy_version 原来只有 1h 主信号路径写，
+                             #   15m/hammer 都漏了 → 81 笔全 None，v2_test 的 A/B 对照没法做。
+                             "strategy_version": STRATEGY_VERSION},
+                            preview_secs=PREVIEW_SECS)
                     P(f"\n  ✅ 15m 形态信号已写入 journal: {jstat_15m}")
                     P(f"     TP1={_pplan['tp1']:,.1f}  TP2={_pplan['tp2']:,.1f}  SL={_pplan['sl']:,.1f}")
                     # 推 TG 卡片
@@ -1152,10 +1677,10 @@ def main():
                                 f"📋 *15m 形态信号预览* `{_pside.upper()}`\n"
                                 f"形态: {_15m_signal['kind']}\n"
                                 f"1h score: {_pattern_trigger['score_1h']} + 形态=1 = {_pattern_trigger['score_combined']}\n"
-                                f"入场: {last:,.1f}\n"
+                                f"入场: {_pplan['entry']:,.1f}\n"
                                 f"SL: {_pplan['sl']:,.1f} ({_pplan['sl_pct']:.2f}%)\n"
-                                f"TP1: {_pplan['tp1']:,.1f} (400 点)\n"
-                                f"TP2: {_pplan['tp2']:,.1f} (850 点)\n"
+                                f"TP1: {_pplan['tp1']:,.1f} ({_pplan['tp1']-_pplan['entry']:+,.0f} 点)\n"
+                                f"TP2: {_pplan['tp2']:,.1f} ({_pplan['tp2']-_pplan['entry']:+,.0f} 点)\n"
                                 f"仓位: {_pplan['contracts']:.0f} 张 (名义 {_pplan['notional']:,.0f}U)\n"
                                 f"⏳ {PREVIEW_SECS}s 后自动执行 ({_until_str} 前可取消)\n"
                                 f"取消: `python3 journal.py cancel {_pplan.get('id') or (CONTRACT + '-' + str(int(time.time())) + '-' + _pside)}`"
@@ -1165,10 +1690,10 @@ def main():
                                 f"🔔 *15m 形态信号* `{_pside.upper()}`\n"
                                 f"形态: {_15m_signal['kind']}\n"
                                 f"1h score: {_pattern_trigger['score_1h']} + 形态=1 = {_pattern_trigger['score_combined']}\n"
-                                f"入场: {last:,.1f}\n"
+                                f"入场: {_pplan['entry']:,.1f}\n"
                                 f"SL: {_pplan['sl']:,.1f} ({_pplan['sl_pct']:.2f}%)\n"
-                                f"TP1: {_pplan['tp1']:,.1f} (400 点)\n"
-                                f"TP2: {_pplan['tp2']:,.1f} (850 点)\n"
+                                f"TP1: {_pplan['tp1']:,.1f} ({_pplan['tp1']-_pplan['entry']:+,.0f} 点)\n"
+                                f"TP2: {_pplan['tp2']:,.1f} ({_pplan['tp2']-_pplan['entry']:+,.0f} 点)\n"
                                 f"仓位: {_pplan['contracts']:.0f} 张 (名义 {_pplan['notional']:,.0f}U)\n"
                                 f"`signal_source=15m_pattern, tp_mode=custom`"
                             )
