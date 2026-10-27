@@ -1,0 +1,940 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BTC 行情环境大图</title>
+<style>
+  :root {
+    --bg: #f8fafc;
+    --card: #ffffff;
+    --border: #e5e7eb;
+    --border-strong: #d1d5db;
+    --text: #111827;
+    --muted: #6b7280;
+    --green: #10b981;
+    --red: #ef4444;
+    --amber: #f59e0b;
+    --blue: #3b82f6;
+    --violet: #8b5cf6;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+  }
+  h1 { font-size: 20px; font-weight: 600; margin: 0; }
+  h3 { font-size: 12.5px; font-weight: 600; color: var(--muted); margin: 0; letter-spacing: .3px; }
+
+  /* ---------- 工作台式外壳 ---------- */
+  .wb { display: flex; min-height: 100vh; }
+  .wb-side {
+    width: 176px; flex: 0 0 176px;
+    background: #ffffff;
+    border-right: 1px solid var(--border);
+    position: sticky; top: 0; height: 100vh;
+    display: flex; flex-direction: column;
+  }
+  .wb-logo { padding: 16px 14px 12px; border-bottom: 1px solid var(--border); }
+  .wb-logo b { display: block; font-size: 13.5px; font-weight: 600; }
+  .wb-logo small { color: var(--muted); font-size: 11px; }
+  .wb-nav { display: flex; flex-direction: column; gap: 2px; padding: 10px 8px; }
+  .wb-nav a {
+    display: flex; align-items: center; gap: 7px;
+    padding: 7px 10px; border-radius: 6px;
+    color: var(--muted); text-decoration: none; font-size: 13px;
+  }
+  .wb-nav a:hover { background: #f3f4f6; color: var(--text); }
+  .wb-nav a.active { background: #eff6ff; color: var(--blue); font-weight: 600; }
+  .wb-nav .nav-dot { width: 6px; height: 6px; border-radius: 50%; background: #cbd5e1; }
+  .wb-nav a.active .nav-dot { background: var(--blue); }
+  .wb-side-foot { margin-top: auto; padding: 10px 14px; border-top: 1px solid var(--border);
+                  color: var(--muted); font-size: 11px; }
+  .wb-side-foot a { color: var(--blue); text-decoration: none; }
+
+  .wb-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  .wb-top {
+    position: sticky; top: 0; z-index: 20;
+    background: rgba(248,250,252,.94);
+    backdrop-filter: blur(6px);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 20px;
+    display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap;
+  }
+  .wb-content { padding: 16px 20px 60px; display: flex; flex-direction: column; gap: 14px; }
+
+  @media (max-width: 900px) {
+    .wb { flex-direction: column; }
+    .wb-side { width: 100%; flex: none; height: auto; position: static; border-right: 0; border-bottom: 1px solid var(--border); }
+    .wb-nav { flex-direction: row; overflow-x: auto; }
+    .wb-side-foot { display: none; }
+  }
+
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px;
+    /* sticky 顶栏高约 50px → 锚点滚动时留出余量，否则卡片标题被顶栏盖住 */
+    scroll-margin-top: 62px;
+  }
+  .card-hd { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
+  .meta { font-size: 11.5px; color: var(--muted); }
+  .pos { color: var(--green); }
+  .neg { color: var(--red); }
+  .flat { color: var(--muted); }
+  .num { font-variant-numeric: tabular-nums; }
+  .empty { color: var(--muted); font-style: italic; padding: 14px 0; }
+
+  button {
+    font-family: inherit; font-size: 12.5px;
+    padding: 5px 12px; border: 1px solid var(--border); background: #fff;
+    border-radius: 6px; cursor: pointer; color: var(--text);
+  }
+  button:hover { background: #f3f4f6; }
+  button.active { background: var(--blue); border-color: var(--blue); color: #fff; font-weight: 600; }
+
+  /* ---------- 环境结论 hero ---------- */
+  .hero { display: grid; grid-template-columns: 1.15fr 1fr; gap: 18px; }
+  @media (max-width: 860px) { .hero { grid-template-columns: 1fr; } }
+  .lbl { font-size: 11px; color: var(--muted); letter-spacing: .4px; }
+  .hero-price .big {
+    font-size: 46px; font-weight: 700; line-height: 1.05; letter-spacing: -1px;
+    font-variant-numeric: tabular-nums; margin: 2px 0 2px;
+  }
+  .hero-price .chg { font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .range-bar {
+    position: relative; height: 26px; margin-top: 12px;
+    background: linear-gradient(90deg, #fee2e2 0%, #f1f5f9 50%, #d1fae5 100%);
+    border-radius: 6px; border: 1px solid var(--border);
+  }
+  .range-bar .mark {
+    position: absolute; top: -4px; bottom: -4px; width: 3px;
+    background: var(--text); border-radius: 2px; transform: translateX(-1.5px);
+    box-shadow: 0 0 0 2px #fff;
+  }
+  .range-bar .mid { position: absolute; top: 0; bottom: 0; left: 50%; width: 1px; background: var(--border-strong); }
+  .range-ends { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted);
+                margin-top: 4px; font-variant-numeric: tabular-nums; }
+
+  .verdict-badge {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-size: 30px; font-weight: 700; line-height: 1.1;
+    padding: 6px 16px; border-radius: 10px; margin: 4px 0 10px;
+  }
+  .verdict-badge.v-pos { background: #d1fae5; color: #065f46; }
+  .verdict-badge.v-neg { background: #fee2e2; color: #991b1b; }
+  .verdict-badge.v-neu { background: #f3f4f6; color: #374151; }
+  .verdict-badge .sub { font-size: 13px; font-weight: 500; opacity: .8; }
+  .norm-gauge { position: relative; height: 22px; margin: 6px 0 4px; }
+  .norm-track {
+    position: absolute; top: 8px; left: 0; right: 0; height: 6px;
+    background: #f1f5f9; border-radius: 3px; overflow: hidden;
+  }
+  .norm-track .band { position: absolute; top: 0; bottom: 0; background: #e5e7eb; }
+  .norm-track .fill { position: absolute; top: 0; bottom: 0; background: var(--green); }
+  .norm-track .fill.neg { background: var(--red); }
+  .norm-marker { position: absolute; top: 2px; width: 3px; height: 18px; background: var(--text);
+                 border-radius: 2px; transform: translateX(-1.5px); }
+  .norm-scale { display: flex; justify-content: space-between; font-size: 10px; color: var(--muted); }
+
+  /* ---------- 指标小卡 ---------- */
+  .tile-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  @media (max-width: 900px) { .tile-row { grid-template-columns: repeat(2, 1fr); } }
+  .tile { background: #f8fafc; border: 1px solid var(--border); border-radius: 8px; padding: 9px 11px; }
+  .tile .t-lbl { font-size: 10.5px; color: var(--muted); }
+  .tile .t-val { font-size: 19px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.25; }
+  .tile .t-sub { font-size: 10.5px; color: var(--muted); }
+  .tile .t-bar { height: 4px; border-radius: 2px; background: #e5e7eb; margin-top: 6px; overflow: hidden; position: relative; }
+  .tile .t-bar i { position: absolute; top: 0; bottom: 0; border-radius: 2px; }
+  .tile .t-bar .zone { position: absolute; top: 0; bottom: 0; background: #f1f5f9; }
+
+  /* ---------- 主图 ---------- */
+  .split { display: grid; grid-template-columns: 1.75fr 1fr; gap: 14px; align-items: start; }
+  @media (max-width: 1100px) { .split { grid-template-columns: 1fr; } }
+  .tf-tabs { display: flex; gap: 5px; }
+  .tf-tabs button { padding: 3px 11px; font-size: 12px; }
+  .chart-wrap { position: relative; }
+  #chart-canvas { width: 100%; height: 460px; display: block; cursor: crosshair; }
+  @media (max-width: 700px) { #chart-canvas { height: 340px; } }
+  .chart-legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 11px; color: var(--muted);
+                  margin-top: 8px; font-variant-numeric: tabular-nums; }
+  .chart-legend span.lg { display: inline-flex; align-items: center; gap: 5px; }
+  .chart-legend i { width: 12px; height: 2px; border-radius: 1px; display: inline-block; }
+  .chart-legend i.sq { width: 8px; height: 8px; border-radius: 2px; }
+  .tip {
+    position: absolute; pointer-events: none; z-index: 5;
+    background: rgba(17,24,39,.94); color: #fff;
+    border-radius: 6px; padding: 7px 9px; font-size: 11px; line-height: 1.55;
+    font-variant-numeric: tabular-nums; white-space: nowrap;
+    box-shadow: 0 4px 14px rgba(0,0,0,.2);
+  }
+  .tip .r { display: flex; justify-content: space-between; gap: 14px; }
+  .tip .r span:first-child { color: #cbd5e1; }
+  .tip .hd { font-weight: 600; margin-bottom: 3px; }
+
+  /* ---------- 多周期矩阵 ---------- */
+  .tf-row { padding: 9px 0; border-bottom: 1px dashed var(--border); }
+  .tf-row:last-child { border-bottom: 0; padding-bottom: 0; }
+  .tf-row:first-child { padding-top: 0; }
+  .tf-row-hd { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 5px; }
+  .tf-name { font-size: 13px; font-weight: 700; letter-spacing: .5px; }
+  .tf-w { font-size: 10.5px; color: var(--muted); }
+  .tf-tags { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 6px; }
+  .tag { font-size: 10.5px; padding: 1px 7px; border-radius: 4px; background: #f3f4f6; color: #4b5563; white-space: nowrap; }
+  .tag.g { background: #d1fae5; color: #065f46; }
+  .tag.r { background: #fee2e2; color: #991b1b; }
+  .tag.a { background: #fef3c7; color: #92400e; }
+  .tag.b { background: #dbeafe; color: #1e40af; }
+  .dims { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .dim { font-size: 10px; color: var(--muted); }
+  .dim .d-top { display: flex; justify-content: space-between; align-items: baseline; }
+  .dim .d-val { font-size: 11.5px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .dim .d-bar { height: 4px; background: #f1f5f9; border-radius: 2px; margin-top: 3px; position: relative; overflow: hidden; }
+  .dim .d-bar .mid { position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: var(--border-strong); }
+  .dim .d-bar i { position: absolute; top: 0; bottom: 0; border-radius: 2px; }
+
+  /* ---------- 关键位 ---------- */
+  .lv-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .lv-table th { text-align: left; font-weight: 500; color: var(--muted); font-size: 10.5px;
+                 padding: 0 8px 6px 0; border-bottom: 1px solid var(--border); }
+  .lv-table td { padding: 5px 8px 5px 0; border-bottom: 1px dashed var(--border); font-variant-numeric: tabular-nums; }
+  .lv-table tr:last-child td { border-bottom: 0; }
+  .lv-table td.r { text-align: right; }
+  .lv-tag { font-size: 10.5px; padding: 1px 6px; border-radius: 4px; background: #f3f4f6; color: #4b5563; }
+  .lv-tag.res { background: #fee2e2; color: #991b1b; }
+  .lv-tag.sup { background: #d1fae5; color: #065f46; }
+
+  /* ---------- AI 判读 ---------- */
+  .ai-box { background: #f8fafc; border-left: 3px solid var(--blue); border-radius: 4px; padding: 11px 13px; }
+  .ai-box.pos { border-left-color: var(--green); }
+  .ai-box.neg { border-left-color: var(--red); }
+  .ai-box.warn { border-left-color: var(--amber); }
+  .ai-box.neu { border-left-color: var(--muted); }
+  .ai-label { font-size: 10.5px; font-weight: 600; color: var(--muted); margin-bottom: 5px;
+              display: flex; justify-content: space-between; gap: 10px; align-items: baseline; }
+  .ai-body { font-size: 13px; line-height: 1.75; white-space: pre-wrap; word-break: break-word; }
+  .foot-note { font-size: 11px; color: var(--muted); margin-top: 8px; padding-top: 7px;
+               border-top: 1px dashed var(--border); }
+</style>
+</head>
+<body>
+<div class="wb">
+
+  <aside class="wb-side">
+    <div class="wb-logo">
+      <b>⬛ BTC 行情环境</b>
+      <small>多周期 · 一眼判读</small>
+    </div>
+    <nav class="wb-nav">
+      <a href="#sec-verdict" class="active"><span class="nav-dot"></span>环境结论</a>
+      <a href="#sec-chart"><span class="nav-dot"></span>价格主图</a>
+      <a href="#sec-tf"><span class="nav-dot"></span>多周期</a>
+      <a href="#sec-levels"><span class="nav-dot"></span>关键位</a>
+      <a href="#sec-advisory"><span class="nav-dot"></span>交易员判读</a>
+    </nav>
+    <div class="wb-side-foot">
+      行情刷新 30s · AI 判读 15min<br>
+      <a href="/">← 返回策略工作台</a>
+    </div>
+  </aside>
+
+  <div class="wb-main">
+    <header class="wb-top">
+      <h1>BTC 当前市场环境</h1>
+      <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap">
+        <div class="meta" id="updated">加载中…</div>
+        <button onclick="loadBoard(true)">↻ 刷新</button>
+      </div>
+    </header>
+
+    <div class="wb-content">
+
+      <!-- 1. 环境结论 -->
+      <div class="card" id="sec-verdict">
+        <div class="card-hd">
+          <h3>环境结论</h3>
+          <span class="meta" id="verdict-meta"></span>
+        </div>
+        <div class="hero">
+          <div class="hero-price">
+            <div class="lbl">BTC 现价</div>
+            <div class="big" id="px-last">—</div>
+            <div class="chg" id="px-chg">—</div>
+            <div class="range-bar" id="range-bar">
+              <div class="mid"></div>
+              <div class="mark" id="range-mark" style="left:50%"></div>
+            </div>
+            <div class="range-ends">
+              <span id="range-lo">24h 低 —</span>
+              <span id="range-pos">区间位置 —</span>
+              <span id="range-hi">24h 高 —</span>
+            </div>
+          </div>
+          <div>
+            <div class="lbl">综合方向（4h×3 · 1h×2 · 15m×1 加权投票）</div>
+            <div class="verdict-badge v-neu" id="verdict-badge">—</div>
+            <div class="norm-gauge" id="norm-gauge">
+              <div class="norm-track">
+                <div class="band" id="norm-band"></div>
+                <div class="fill" id="norm-fill"></div>
+              </div>
+              <div class="norm-marker" id="norm-marker" style="left:50%"></div>
+            </div>
+            <div class="norm-scale"><span>偏空</span><span>中性区</span><span>偏多</span></div>
+            <div class="meta" id="verdict-note" style="margin-top:6px"></div>
+          </div>
+        </div>
+
+        <div class="tile-row" style="margin-top:14px">
+          <div class="tile">
+            <div class="t-lbl">波动率（1h 平均真实波幅）</div>
+            <div class="t-val" id="t-vol">—</div>
+            <div class="t-sub" id="t-vol-sub">—</div>
+            <div class="t-bar" id="t-vol-bar"></div>
+          </div>
+          <div class="tile">
+            <div class="t-lbl">资金费率（8 小时）</div>
+            <div class="t-val" id="t-fund">—</div>
+            <div class="t-sub" id="t-fund-sub">—</div>
+            <div class="t-bar" id="t-fund-bar"></div>
+          </div>
+          <div class="tile">
+            <div class="t-lbl">量能（5 根 / 20 根 均量比）</div>
+            <div class="t-val" id="t-vol-2">—</div>
+            <div class="t-sub" id="t-vol2-sub">—</div>
+            <div class="t-bar" id="t-vol2-bar"></div>
+          </div>
+          <div class="tile">
+            <div class="t-lbl">v2.1 开仓闸门（5 日波动）</div>
+            <div class="t-val" id="t-gate">—</div>
+            <div class="t-sub" id="t-gate-sub">—</div>
+            <div class="t-bar" id="t-gate-bar"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 2. 主图 + 多周期 -->
+      <div class="split">
+        <div class="card" id="sec-chart">
+          <div class="card-hd">
+            <h3>价格主图（K 线 · 均线 · 相对强弱 · 成交量）</h3>
+            <div class="tf-tabs" id="tf-tabs">
+              <button data-tf="4h" onclick="switchTf('4h')">4 小时</button>
+              <button data-tf="1h" class="active" onclick="switchTf('1h')">1 小时</button>
+              <button data-tf="15m" onclick="switchTf('15m')">15 分钟</button>
+            </div>
+          </div>
+          <div class="chart-wrap" id="chart-wrap">
+            <canvas id="chart-canvas"></canvas>
+            <div class="tip" id="chart-tip" hidden></div>
+          </div>
+          <div class="chart-legend" id="chart-legend"></div>
+        </div>
+
+        <div class="card" id="sec-tf">
+          <div class="card-hd">
+            <h3>多周期结构</h3>
+            <span class="meta" id="tf-meta"></span>
+          </div>
+          <div id="tf-matrix"><div class="empty">加载中…</div></div>
+        </div>
+      </div>
+
+      <!-- 3. 关键位 + AI 判读 -->
+      <div class="split">
+        <div class="card" id="sec-levels">
+          <div class="card-hd">
+            <h3>关键位（支撑 / 阻力 / 回调位）</h3>
+            <span class="meta" id="lv-meta"></span>
+          </div>
+          <div id="levels-body"><div class="empty">加载中…</div></div>
+        </div>
+
+        <div class="card" id="sec-advisory">
+          <div class="card-hd">
+            <h3>交易员判读</h3>
+            <span class="meta" id="adv-meta"></span>
+          </div>
+          <div id="advisory-body"><div class="empty">加载中…</div></div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<script>
+"use strict";
+
+// ============================ 状态 ============================
+let _board = null;          // 最近一次 /api/market_board 响应
+let _tf = "1h";             // 当前主图周期
+let _hover = -1;            // 十字光标落在第几根 K 线
+let _chartGeom = null;      // 画图时的坐标映射（供 tooltip 用）
+
+const TF_LABEL = { "4h": "4 小时", "1h": "1 小时", "15m": "15 分钟" };
+
+// ============================ 工具 ============================
+function _fmtPx(v, nd) {
+  if (v === null || v === undefined || isNaN(v)) return "—";
+  return Number(v).toLocaleString("en-US", { minimumFractionDigits: nd || 0, maximumFractionDigits: nd || 0 });
+}
+function _fmtNum(v, nd) {
+  if (v === null || v === undefined || isNaN(v)) return "—";
+  return Number(v).toFixed(nd === undefined ? 2 : nd);
+}
+function _cls(v) { return v > 0 ? "pos" : (v < 0 ? "neg" : "flat"); }
+function _sign(v) { return v > 0 ? "+" : ""; }
+
+function _tfTime(ts, tf) {
+  const d = new Date(ts * 1000);
+  const p = n => String(n).padStart(2, "0");
+  if (tf === "15m") return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:00`;
+}
+
+// ============================ 拉数据 ============================
+async function loadBoard(manual) {
+  const btn = document.querySelector("#sec-verdict ~ * button");
+  try {
+    const r = await fetch("/api/market_board", { cache: "no-store" });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const d = await r.json();
+    _board = d;
+    renderBoard(d);
+  } catch (e) {
+    // 页面被销毁（切标签页/关闭）时 document 可能已不可用 → 别在错误处理里再抛一次
+    if (typeof document === "undefined" || !document.getElementById) return;
+    const el = document.getElementById("verdict-meta");
+    if (el) el.innerHTML = `<span class="neg">加载失败：${e.message}</span>`;
+  }
+}
+
+// ============================ 渲染主入口 ============================
+function renderBoard(d) {
+  const up = document.getElementById("updated");
+  if (up) up.textContent = "更新于 " + (d.ts_str || "—");
+
+  if (d.error) {
+    document.getElementById("verdict-meta").innerHTML = `<span class="neg">${d.error}</span>`;
+    document.getElementById("tf-matrix").innerHTML = `<div class="empty">${d.error}</div>`;
+    return;
+  }
+
+  // 每个区块独立 try/catch：一个区块抛错不能让后面的区块全空白
+  // （曾出现过「多周期有数据、关键位和判读空白」= renderLevels 抛错截断了后续渲染）
+  const sections = [
+    ["环境结论", renderVerdict],
+    ["指标卡", renderTiles],
+    ["多周期", renderTfMatrix],
+    ["关键位", renderLevels],
+    ["交易员判读", renderAdvisory],
+  ];
+  for (const [name, fn] of sections) {
+    try {
+      fn(d);
+    } catch (e) {
+      console.error(`[render] ${name} 渲染失败:`, e);
+      const host = { "环境结论": "verdict-meta", "指标卡": "t-vol", "多周期": "tf-matrix",
+                     "关键位": "levels-body", "交易员判读": "advisory-body" }[name];
+      const el = document.getElementById(host);
+      if (el) el.innerHTML = `<div class="empty">${name}渲染失败：${e.message}</div>`;
+    }
+  }
+
+  try {
+    drawChart();
+  } catch (e) {
+    console.error("[render] 主图绘制失败:", e);
+  }
+}
+
+// ---------- 1. 环境结论 ----------
+function renderVerdict(d) {
+  const p = d.price || {};
+  const last = document.getElementById("px-last");
+  last.textContent = "$" + _fmtPx(p.last, 2);
+  last.className = "big " + _cls(p.chg_24h_pct);
+
+  const chg = document.getElementById("px-chg");
+  const chgTxt = p.chg_24h_pct === null || p.chg_24h_pct === undefined
+    ? "24 小时涨跌 —" : `24 小时 ${_sign(p.chg_24h_pct)}${_fmtNum(p.chg_24h_pct, 2)}%`;
+  chg.textContent = chgTxt;
+  chg.className = "chg " + _cls(p.chg_24h_pct);
+
+  document.getElementById("range-lo").textContent = "24h 低 " + (p.low_24h ? _fmtPx(p.low_24h) : "—");
+  document.getElementById("range-hi").textContent = "24h 高 " + (p.high_24h ? _fmtPx(p.high_24h) : "—");
+  document.getElementById("range-pos").textContent =
+    p.pos_in_range_pct === null || p.pos_in_range_pct === undefined
+      ? "区间位置 —" : `区间位置 ${_fmtNum(p.pos_in_range_pct, 0)}%`;
+  const mark = document.getElementById("range-mark");
+  if (mark) mark.style.left = Math.max(0, Math.min(100, p.pos_in_range_pct || 50)) + "%";
+
+  // 方向徽章
+  const agg = d.aggregate || {};
+  const bias = agg.bias || "neutral";
+  const biasTxt = bias === "long" ? "偏多" : (bias === "short" ? "偏空" : "中性");
+  const badge = document.getElementById("verdict-badge");
+  badge.className = "verdict-badge v-" + (bias === "long" ? "pos" : (bias === "short" ? "neg" : "neu"));
+  const cons = agg.consensus || "—";
+  badge.innerHTML = `${biasTxt}<span class="sub">${cons}</span>`;
+
+  // 归一化得分仪表（norm 范围约 ±1，中性带 ±0.2）
+  const norm = agg.norm === null || agg.norm === undefined ? 0 : agg.norm;
+  const pos = Math.max(0, Math.min(100, 50 + (norm / 1.0) * 50));
+  const fill = document.getElementById("norm-fill");
+  const marker = document.getElementById("norm-marker");
+  if (norm >= 0) { fill.style.left = "50%"; fill.style.width = (pos - 50) + "%"; fill.className = "fill"; }
+  else { fill.style.left = pos + "%"; fill.style.width = (50 - pos) + "%"; fill.className = "fill neg"; }
+  marker.style.left = pos + "%";
+  // 中性带（±0.2 → ±10%）
+  const band = document.getElementById("norm-band");
+  band.style.left = "40%"; band.style.width = "20%";
+
+  document.getElementById("verdict-meta").textContent =
+    `加权总分 ${_fmtNum(agg.score, 2)} · 归一化 ${_fmtNum(norm, 3)}`;
+  document.getElementById("verdict-note").textContent =
+    `三周期一致性：${cons} · 门槛 ±0.20 内判中性；4h 反向时上限收紧到 ±0.10`;
+}
+
+// ---------- 2. 指标小卡 ----------
+function renderTiles(d) {
+  const v = d.volatility || {};
+  const volVal = document.getElementById("t-vol");
+  const volSub = document.getElementById("t-vol-sub");
+  const regimeTxt = { low: "低波（收敛）", normal: "正常", high: "高波" }[v.atr_regime] || "—";
+  volVal.textContent = v.atr_pct === null || v.atr_pct === undefined ? "—" : _fmtNum(v.atr_pct, 2) + "%";
+  volVal.className = "t-val " + (v.atr_regime === "high" ? "neg" : (v.atr_regime === "low" ? "pos" : ""));
+  volSub.textContent = `${regimeTxt} · 相对 50 根均幅 ${_fmtNum(v.atr_ratio, 2)} 倍`;
+  // 条：0 ~ 1.5% 映射，低波区(0-0.3)绿、正常(0.3-1.0)灰、高波(1.0-1.5)红
+  const vb = document.getElementById("t-vol-bar");
+  const pct = Math.max(0, Math.min(100, ((v.atr_pct || 0) / 1.5) * 100));
+  vb.innerHTML = `<div class="zone" style="left:0;width:20%"></div>
+                  <div class="zone" style="left:20%;width:46.7%"></div>
+                  <i style="left:${pct}%;width:3px;background:${v.atr_regime === "high" ? "var(--red)" : (v.atr_regime === "low" ? "var(--green)" : "var(--amber)")}"></i>`;
+
+  const f = d.funding || {};
+  const fv = f.current === null || f.current === undefined ? null : f.current * 100;
+  const fundVal = document.getElementById("t-fund");
+  fundVal.textContent = fv === null ? "—" : _fmtNum(fv, 4) + "%";
+  fundVal.className = "t-val " + (f.sign === "long_pay" ? "neg" : (f.sign === "short_pay" ? "pos" : ""));
+  document.getElementById("t-fund-sub").textContent =
+    f.sign === "long_pay" ? "多头付费（偏拥挤）" : (f.sign === "short_pay" ? "空头付费（偏拥挤）" : "中性");
+  const fb = document.getElementById("t-fund-bar");
+  const fpos = Math.max(0, Math.min(100, 50 + ((fv || 0) / 0.1) * 50));
+  fb.innerHTML = `<i style="left:${fpos}%;width:3px;background:${f.sign === "long_pay" ? "var(--red)" : (f.sign === "short_pay" ? "var(--green)" : "var(--muted)")}"></i>`;
+
+  // 量能取 1h 周期
+  const tf1 = (d.tfs || {})["1h"] || {};
+  const vr = tf1.vol_ratio;
+  const v2 = document.getElementById("t-vol-2");
+  v2.textContent = vr === null || vr === undefined ? "—" : _fmtNum(vr, 2) + "×";
+  const vreg = tf1.vol_regime || "—";
+  v2.className = "t-val " + (vreg === "放量" ? "neg" : (vreg === "缩量" ? "" : ""));
+  document.getElementById("t-vol2-sub").textContent = `${vreg} · 1 小时`;
+  const v2b = document.getElementById("t-vol2-bar");
+  const vrPos = Math.max(0, Math.min(100, ((vr || 1) / 2.5) * 100));
+  v2b.innerHTML = `<div class="zone" style="left:32%;width:28%"></div>
+                   <i style="left:${vrPos}%;width:3px;background:${vreg === "放量" ? "var(--amber)" : "var(--blue)"}"></i>`;
+
+  // v2 闸门
+  const g = d.gate || {};
+  const gv = document.getElementById("t-gate");
+  const gsub = document.getElementById("t-gate-sub");
+  if (g.ok === false) {
+    gv.textContent = "读取失败"; gv.className = "t-val flat";
+    gsub.textContent = g.error || "—";
+    document.getElementById("t-gate-bar").innerHTML = "";
+  } else {
+    const pass = g.vol_pass === true;
+    gv.textContent = pass ? "放行" : "挡掉";
+    gv.className = "t-val " + (pass ? "pos" : "neg");
+    let s = `5 日波动 ${_fmtNum(g.vol_5d_pct, 3)}% / 门槛 ${_fmtNum(g.vol_min_pct, 2)}%`;
+    if (g.blocked_24h !== null && g.blocked_24h !== undefined) s += ` · 24h 挡掉 ${g.blocked_24h} 次`;
+    gsub.textContent = s;
+    const gb = document.getElementById("t-gate-bar");
+    const gp = Math.max(0, Math.min(100, ((g.vol_5d_pct || 0) / 1.5) * 100));
+    gb.innerHTML = `<i style="left:${gp}%;width:3px;background:${pass ? "var(--green)" : "var(--red)"}"></i>`;
+  }
+}
+
+// ---------- 3. 多周期矩阵 ----------
+function _scoreTag(label, score) {
+  const cls = score > 0 ? "g" : (score < 0 ? "r" : "");
+  return `<span class="tag ${cls}">${label} ${score > 0 ? "+" : ""}${score}</span>`;
+}
+function renderTfMatrix(d) {
+  const tfs = d.tfs || {};
+  const host = document.getElementById("tf-matrix");
+  const order = ["4h", "1h", "15m"];
+  const weights = { "4h": 3, "1h": 2, "15m": 1 };
+  let html = "";
+  for (const tf of order) {
+    const t = tfs[tf];
+    if (!t) continue;
+    if (t.error) {
+      html += `<div class="tf-row"><div class="tf-row-hd"><span class="tf-name">${TF_LABEL[tf]}</span></div>
+               <div class="meta">${t.error}</div></div>`;
+      continue;
+    }
+    const trendCls = t.trend_score > 0 ? "g" : (t.trend_score < 0 ? "r" : "");
+    const macdCls = t.macd_score > 0 ? "g" : (t.macd_score < 0 ? "r" : "");
+    const rsiCls = t.rsi_state === "超买" ? "r" : (t.rsi_state === "超卖" ? "g" : "");
+    const volCls = t.vol_regime === "放量" ? "a" : "";
+    const structCls = t.structure_bias === "long" ? "g" : (t.structure_bias === "short" ? "r" : "");
+
+    html += `<div class="tf-row">
+      <div class="tf-row-hd">
+        <span class="tf-name">${TF_LABEL[tf]}</span>
+        <span class="tf-w">权重 ×${weights[tf]} · 得分 ${_fmtNum(t.score_trend + t.score_momentum + t.score_volatility, 0)}</span>
+      </div>
+      <div class="tf-tags">
+        <span class="tag ${trendCls}">趋势 ${t.trend || "—"}</span>
+        <span class="tag ${macdCls}">动能 ${t.macd_state || "—"}</span>
+        <span class="tag ${rsiCls}">相对强弱 ${_fmtNum(t.rsi, 0)} ${t.rsi_state || ""}</span>
+        <span class="tag ${volCls}">量能 ${t.vol_regime || "—"}</span>
+        <span class="tag ${structCls}">结构 ${t.structure || "—"}</span>
+      </div>
+      <div class="dims">
+        ${_dimBar("趋势", t.score_trend)}
+        ${_dimBar("动能", t.score_momentum)}
+        ${_dimBar("波动", t.score_volatility)}
+      </div>
+      <div class="meta" style="margin-top:5px">
+        波动率 ${_fmtNum(t.atr_pct, 2)}% · ${t.atr_regime || "—"} · 时段 ${t.session || "—"}
+        ${t.swing_note ? " · " + t.swing_note : ""}
+      </div>
+    </div>`;
+  }
+  host.innerHTML = html || `<div class="empty">无周期数据</div>`;
+  const agg = d.aggregate || {};
+  document.getElementById("tf-meta").textContent =
+    agg.consensus ? `一致性 ${agg.consensus}` : "";
+}
+function _dimBar(label, score) {
+  const s = score === null || score === undefined ? 0 : score;
+  const w = Math.min(50, Math.abs(s) / 6 * 50);
+  const left = s >= 0 ? 50 : 50 - w;
+  const color = s > 0 ? "var(--green)" : (s < 0 ? "var(--red)" : "var(--border-strong)");
+  return `<div class="dim">
+    <div class="d-top"><span>${label}</span><span class="d-val ${_cls(s)}">${s > 0 ? "+" : ""}${s}</span></div>
+    <div class="d-bar"><div class="mid"></div><i style="left:${left}%;width:${w}%;background:${color}"></i></div>
+  </div>`;
+}
+
+// ---------- 4. 关键位 ----------
+function renderLevels(d) {
+  const p = d.price || {};
+  const last = p.last;
+  const rows = [];
+  const push = (tag, cls, label, px, note) => {
+    if (px === null || px === undefined || isNaN(px)) return;
+    const dist = last ? ((px - last) / last) * 100 : null;
+    rows.push({ tag, cls, label, px, dist, note });
+  };
+
+  push("阻力", "res", "24h 高", p.high_24h);
+  push("支撑", "sup", "24h 低", p.low_24h);
+
+  // 1h swing 区间 + 斐波那契回调位
+  const t1 = (d.tfs || {})["1h"] || {};
+  push("阻力", "res", "1h 摆动高点", t1.swing_hi);
+  push("支撑", "sup", "1h 摆动低点", t1.swing_lo);
+  const retr = t1.retracements || {};
+  const t4 = (d.tfs || {})["4h"] || {};
+  const retr4 = t4.retracements || {};
+  const swingUp = t1.swing_kind === "up";
+  Object.keys(retr).sort((a, b) => a - b).forEach(k => {
+    const isRetr = swingUp;
+    push(isRetr ? "支撑" : "阻力", isRetr ? "sup" : "res", `1h 回调位 ${Number(k).toFixed(3)}`, retr[k]);
+  });
+  Object.keys(retr4).sort((a, b) => a - b).forEach(k => {
+    const isRetr = t4.swing_kind === "up";
+    push(isRetr ? "支撑" : "阻力", isRetr ? "sup" : "res", `4h 回调位 ${Number(k).toFixed(3)}`, retr4[k]);
+  });
+
+  rows.sort((a, b) => b.px - a.px);
+
+  let html = `<table class="lv-table">
+    <thead><tr><th>性质</th><th>位置</th><th style="text-align:right">价位</th><th style="text-align:right">距现价</th></tr></thead><tbody>`;
+  for (const r of rows) {
+    html += `<tr>
+      <td><span class="lv-tag ${r.cls}">${r.tag}</span></td>
+      <td>${r.label}</td>
+      <td class="r">${_fmtPx(r.px, 1)}</td>
+      <td class="r ${_cls(r.dist)}">${r.dist === null ? "—" : _sign(r.dist) + _fmtNum(r.dist, 2) + "%"}</td>
+    </tr>`;
+  }
+  html += `</tbody></table>`;
+  if (!rows.length) html = `<div class="empty">暂无关键位数据</div>`;
+  document.getElementById("levels-body").innerHTML = html;
+  document.getElementById("lv-meta").textContent = rows.length ? `${rows.length} 个价位` : "";
+}
+
+// ---------- 5. AI 判读 ----------
+function renderAdvisory(d) {
+  const adv = d.advisory || {};
+  const host = document.getElementById("advisory-body");
+  const color = adv.color || "neu";
+  const text = adv.text || adv.verdict || "暂无判读";
+  const isLong = !!(adv.text && adv.text.length > 30);
+  host.innerHTML = `<div class="ai-box ${color}">
+    <div class="ai-label"><span>${isLong ? "交易员判读" : "规则判读"}</span><span>${adv.risk || ""}</span></div>
+    <div class="ai-body">${text}</div>
+  </div>
+  <div class="foot-note">数据源：gate.io 实时行情 · 行情指标 30 秒刷新 · 判读由 ${adv.text_source === "mimo" ? "AI 模型生成" : "规则兜底"}（与 Telegram 判读同一套指标口径）· 判读文中的价格为生成时刻快照，最多滞后 15 分钟</div>`;
+  document.getElementById("adv-meta").textContent = adv.verdict || "";
+}
+
+// ============================ 主图绘制 ============================
+function switchTf(tf) {
+  _tf = tf;
+  _hover = -1;
+  document.querySelectorAll("#tf-tabs button").forEach(b => {
+    b.classList.toggle("active", b.dataset.tf === tf);
+  });
+  drawChart();
+}
+
+function drawChart() {
+  const cv = document.getElementById("chart-canvas");
+  if (!cv || !_board || !_board.chart) return;
+  const data = _board.chart[_tf];
+  if (!data || !data.t || !data.t.length) {
+    const g = cv.getContext("2d");
+    g.clearRect(0, 0, cv.width, cv.height);
+    return;
+  }
+
+  const dpr = window.devicePixelRatio || 1;
+  const cssW = cv.clientWidth || 800;
+  const cssH = cv.clientHeight || 460;
+  cv.width = Math.round(cssW * dpr);
+  cv.height = Math.round(cssH * dpr);
+  const g = cv.getContext("2d");
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, cssW, cssH);
+
+  const n = data.t.length;
+  const padL = 6, padR = 62, padT = 8, padB = 20;
+  const gap = 26;
+  const totalH = cssH - padT - padB;
+  const priceH = totalH * 0.62;
+  const volH = totalH * 0.16;
+  const rsiH = totalH * 0.18;
+  const plotW = cssW - padL - padR;
+  const barW = plotW / n;
+
+  // ---- 价格范围（含均线）----
+  let lo = Infinity, hi = -Infinity;
+  for (let i = 0; i < n; i++) {
+    if (data.l[i] < lo) lo = data.l[i];
+    if (data.h[i] > hi) hi = data.h[i];
+    const e1 = data.ema20[i], e2 = data.ema50[i];
+    if (e1 !== null && e1 !== undefined) { if (e1 < lo) lo = e1; if (e1 > hi) hi = e1; }
+    if (e2 !== null && e2 !== undefined) { if (e2 < lo) lo = e2; if (e2 > hi) hi = e2; }
+  }
+  if (!isFinite(lo) || !isFinite(hi)) return;
+  const pad = (hi - lo) * 0.06 || 1;
+  lo -= pad; hi += pad;
+  const priceTop = padT;
+  const priceBot = padT + priceH;
+  const volTop = priceBot + gap;
+  const volBot = volTop + volH;
+  const rsiTop = volBot + gap;
+  const rsiBot = rsiTop + rsiH;
+
+  const X = i => padL + (i + 0.5) * barW;
+  const Y = p => priceBot - ((p - lo) / (hi - lo)) * priceH;
+
+  // ---- 网格 + 价格轴 ----
+  g.strokeStyle = "#eef1f5"; g.lineWidth = 1;
+  g.fillStyle = "#9ca3af"; g.font = "10px -apple-system, sans-serif"; g.textAlign = "left";
+  const ticks = 5;
+  for (let k = 0; k <= ticks; k++) {
+    const p = lo + (hi - lo) * (k / ticks);
+    const y = Y(p);
+    g.beginPath(); g.moveTo(padL, y); g.lineTo(padL + plotW, y); g.stroke();
+    g.fillText(_fmtPx(p, 0), padL + plotW + 6, y + 3);
+  }
+
+  // ---- 时间轴 ----
+  g.textAlign = "center"; g.fillStyle = "#9ca3af";
+  const nTicks = Math.min(6, n);
+  for (let k = 0; k < nTicks; k++) {
+    const i = Math.floor((k + 0.5) * (n / nTicks));
+    if (i < 0 || i >= n) continue;
+    const x = X(i);
+    if (x > cssW - padR - 20) continue;
+    g.fillText(_tfTime(data.t[i], _tf), x, cssH - 5);
+  }
+
+  // ---- K 线 ----
+  const bodyW = Math.max(1, Math.min(11, barW * 0.62));
+  for (let i = 0; i < n; i++) {
+    const o = data.o[i], h = data.h[i], l = data.l[i], c = data.c[i];
+    const up = c >= o;
+    const x = X(i);
+    g.strokeStyle = up ? "#10b981" : "#ef4444";
+    g.fillStyle = up ? "#10b981" : "#ef4444";
+    g.beginPath(); g.moveTo(x, Y(h)); g.lineTo(x, Y(l)); g.stroke();
+    const y1 = Y(o), y2 = Y(c);
+    const top = Math.min(y1, y2);
+    const hgt = Math.max(1, Math.abs(y2 - y1));
+    g.fillRect(x - bodyW / 2, top, bodyW, hgt);
+  }
+
+  // ---- 均线 ----
+  const drawLine = (arr, color, width) => {
+    g.strokeStyle = color; g.lineWidth = width; g.beginPath();
+    let started = false;
+    for (let i = 0; i < n; i++) {
+      const v = arr[i];
+      if (v === null || v === undefined) { started = false; continue; }
+      const x = X(i), y = Y(v);
+      if (!started) { g.moveTo(x, y); started = true; } else { g.lineTo(x, y); }
+    }
+    g.stroke();
+  };
+  drawLine(data.ema50, "#8b5cf6", 1.4);
+  drawLine(data.ema20, "#f59e0b", 1.4);
+
+  // ---- 现价线 ----
+  const lastC = data.c[n - 1];
+  const lastY = Y(lastC);
+  g.strokeStyle = "#111827"; g.lineWidth = 1; g.setLineDash([3, 3]);
+  g.beginPath(); g.moveTo(padL, lastY); g.lineTo(padL + plotW, lastY); g.stroke();
+  g.setLineDash([]);
+  g.fillStyle = "#111827";
+  g.fillRect(padL + plotW + 2, lastY - 8, padR - 4, 16);
+  g.fillStyle = "#fff"; g.textAlign = "left"; g.font = "10px -apple-system, sans-serif";
+  g.fillText(_fmtPx(lastC, 0), padL + plotW + 6, lastY + 3.5);
+
+  // ---- 成交量 ----
+  let vmax = 0;
+  for (let i = 0; i < n; i++) if (data.v[i] > vmax) vmax = data.v[i];
+  if (vmax > 0) {
+    for (let i = 0; i < n; i++) {
+      const h = (data.v[i] / vmax) * volH;
+      g.fillStyle = data.c[i] >= data.o[i] ? "rgba(16,185,129,.55)" : "rgba(239,68,68,.55)";
+      g.fillRect(X(i) - bodyW / 2, volBot - h, bodyW, h);
+    }
+  }
+  g.fillStyle = "#9ca3af"; g.font = "10px -apple-system, sans-serif"; g.textAlign = "left";
+  g.fillText("成交量", padL + 2, volTop + 9);
+  g.fillText(vmax ? _fmtPx(vmax, 0) : "", padL + plotW + 6, volTop + 9);
+
+  // ---- 相对强弱 ----
+  g.strokeStyle = "#cbd5e1"; g.lineWidth = 1; g.setLineDash([4, 3]);
+  g.beginPath();
+  g.moveTo(padL, Y2(rsiTop, rsiBot, 70)); g.lineTo(padL + plotW, Y2(rsiTop, rsiBot, 70)); g.stroke();
+  g.beginPath();
+  g.moveTo(padL, Y2(rsiTop, rsiBot, 30)); g.lineTo(padL + plotW, Y2(rsiTop, rsiBot, 30)); g.stroke();
+  g.setLineDash([]);
+  g.strokeStyle = "#3b82f6"; g.lineWidth = 1.6; g.beginPath();
+  let st = false;
+  for (let i = 0; i < n; i++) {
+    const v = data.rsi[i];
+    if (v === null || v === undefined) { st = false; continue; }
+    const x = X(i), y = Y2(rsiTop, rsiBot, v);
+    if (!st) { g.moveTo(x, y); st = true; } else { g.lineTo(x, y); }
+  }
+  g.stroke();
+  g.fillStyle = "#9ca3af"; g.textAlign = "left";
+  g.fillText("相对强弱 (30/70)", padL + 2, rsiTop + 9);
+
+  function Y2(top, bot, v) { return bot - ((v - 0) / 100) * (bot - top); }
+
+  _chartGeom = { X, Y, n, data, padL, plotW, padR };
+
+  // ---- 图例 ----
+  const tfs = (_board.tfs || {})[_tf] || {};
+  document.getElementById("chart-legend").innerHTML = `
+    <span class="lg"><i class="sq" style="background:#10b981"></i>涨</span>
+    <span class="lg"><i class="sq" style="background:#ef4444"></i>跌</span>
+    <span class="lg"><i style="background:#f59e0b"></i>EMA20 ${_fmtNum(tfs.ema20, 1)}</span>
+    <span class="lg"><i style="background:#8b5cf6"></i>EMA50 ${_fmtNum(tfs.ema50, 1)}</span>
+    <span class="lg">${TF_LABEL[_tf]} 共 ${n} 根 · 趋势 ${tfs.trend || "—"} · ${tfs.structure || "—"}</span>`;
+
+  if (_hover >= 0 && _hover < n) drawCrosshair(g, _hover);
+}
+
+// ---------- 十字光标 + tooltip ----------
+function drawCrosshair(g, idx) {
+  if (!_chartGeom) return;
+  const { X, Y, data } = _chartGeom;
+  const x = X(idx);
+  const cssW = document.getElementById("chart-canvas").clientWidth;
+  const cssH = document.getElementById("chart-canvas").clientHeight;
+  g.save();
+  g.setTransform(window.devicePixelRatio || 1, 0, 0, window.devicePixelRatio || 1, 0, 0);
+  g.strokeStyle = "#94a3b8"; g.lineWidth = 1; g.setLineDash([3, 3]);
+  g.beginPath(); g.moveTo(x, 0); g.lineTo(x, cssH); g.stroke();
+  const y = Y(data.c[idx]);
+  g.beginPath(); g.moveTo(0, y); g.lineTo(cssW, y); g.stroke();
+  g.setLineDash([]);
+  g.fillStyle = "#111827";
+  g.fillRect(_chartGeom.padL + _chartGeom.plotW + 2, y - 8, _chartGeom.padR - 4, 16);
+  g.fillStyle = "#fff"; g.textAlign = "left"; g.font = "10px -apple-system, sans-serif";
+  g.fillText(_fmtPx(data.c[idx], 0), _chartGeom.padL + _chartGeom.plotW + 6, y + 3.5);
+  g.restore();
+}
+
+function updateTip(idx) {
+  const tip = document.getElementById("chart-tip");
+  if (!_chartGeom || idx < 0 || !_board) { tip.hidden = true; return; }
+  const d = _board.chart[_tf];
+  const o = d.o[idx], h = d.h[idx], l = d.l[idx], c = d.c[idx];
+  const prev = idx > 0 ? d.c[idx - 1] : o;
+  const chg = prev ? ((c - prev) / prev) * 100 : 0;
+  const e20 = d.ema20[idx], e50 = d.ema50[idx], rs = d.rsi[idx];
+  tip.innerHTML = `
+    <div class="hd">${_tfTime(d.t[idx], _tf)}</div>
+    <div class="r"><span>开</span><span>${_fmtPx(o, 1)}</span></div>
+    <div class="r"><span>高</span><span>${_fmtPx(h, 1)}</span></div>
+    <div class="r"><span>低</span><span>${_fmtPx(l, 1)}</span></div>
+    <div class="r"><span>收</span><span style="color:${chg >= 0 ? "#34d399" : "#f87171"}">${_fmtPx(c, 1)} (${_sign(chg)}${_fmtNum(chg, 2)}%)</span></div>
+    <div class="r"><span>EMA20</span><span>${e20 === null ? "—" : _fmtPx(e20, 1)}</span></div>
+    <div class="r"><span>EMA50</span><span>${e50 === null ? "—" : _fmtPx(e50, 1)}</span></div>
+    <div class="r"><span>相对强弱</span><span>${rs === null ? "—" : _fmtNum(rs, 1)}</span></div>
+    <div class="r"><span>成交量</span><span>${_fmtPx(d.v[idx], 0)}</span></div>`;
+  tip.hidden = false;
+  const wrap = document.getElementById("chart-wrap");
+  const cv = document.getElementById("chart-canvas");
+  const rect = cv.getBoundingClientRect();
+  const wRect = wrap.getBoundingClientRect();
+  const tx = rect.left - wRect.left + _chartGeom.X(idx) + 12;
+  tip.style.left = Math.min(tx, wRect.width - 165) + "px";
+  tip.style.top = "10px";
+}
+
+// ============================ 事件绑定 ============================
+document.getElementById("chart-canvas").addEventListener("mousemove", function (e) {
+  if (!_chartGeom) return;
+  const rect = this.getBoundingClientRect();
+  const x = e.clientX - rect.left;
+  const idx = Math.floor((x - _chartGeom.padL) / ((_chartGeom.plotW) / _chartGeom.n));
+  const clamped = Math.max(0, Math.min(_chartGeom.n - 1, idx));
+  if (clamped === _hover) { updateTip(clamped); return; }
+  _hover = clamped;
+  drawChart();
+  updateTip(clamped);
+});
+document.getElementById("chart-canvas").addEventListener("mouseleave", function () {
+  _hover = -1;
+  document.getElementById("chart-tip").hidden = true;
+  drawChart();
+});
+window.addEventListener("resize", () => drawChart());
+
+// ============================ 启动 ============================
+loadBoard(false);
+setInterval(() => loadBoard(false), 30000);
+</script>
+</body>
+</html>
