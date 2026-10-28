@@ -27,6 +27,101 @@ PAGE_PATH = Path(__file__).resolve().parent / "index.html"
 MARKET_PAGE_PATH = Path(__file__).resolve().parent / "market.html"
 
 
+# ============================ 老师单分析（IMA 当数据库） ============================
+# 2026-10-28 liusir：「你就把 ima 当做数据库去存数据就行」
+# 数据底座在 IMA KB（scripts/teacher_kb_store.py 写，脚本 teacher_analysis.py 算）。
+# 网页读 IMA 而不是直接读本地 jsonl —— 这样网页看到的永远是「落过盘的那份」，
+# 跟 liusir 在 IMA 里翻到的内容一致。
+_TA_CACHE: dict = {"ts": 0.0, "data": None, "err": None}
+_TA_CACHE_TTL = 300.0   # 5min：IMA 读一次要两次 HTTP（list + media_info + 抓正文）
+
+
+def build_teacher_analysis_api() -> dict:
+    """读 IMA 里的最新老师单分析。
+
+    失败不抛：返回 {error, stale} —— 前端能显示「IMA 读取失败」而不是整页崩。
+    IMA 挂了时退回本地实时计算（标注 source=local_fallback），保证卡片不空。
+    """
+    now = time.time()
+    if _TA_CACHE["data"] and now - _TA_CACHE["ts"] < _TA_CACHE_TTL:
+        return _TA_CACHE["data"]
+    try:
+        from teacher_kb_store import read_latest_analysis
+        data = read_latest_analysis()
+        if not data:
+            raise RuntimeError("IMA KB 里没有老师单分析文档")
+        data["source"] = "ima"
+        data["stale"] = False
+    except Exception as e:
+        # IMA 不可用 → 本地兜底（数据仍是真实的，只是没落 IMA）
+        try:
+            from teacher_analysis import build_teacher_analysis as _local
+            data = _local()
+            data["source"] = "local_fallback"
+            data["stale"] = True
+            data["error"] = f"IMA 读取失败，已用本地实时计算兜底：{e}"
+        except Exception as e2:
+            return {"error": f"老师单分析不可用（IMA: {e}；本地: {e2}）"}
+    _TA_CACHE["ts"], _TA_CACHE["data"] = now, data
+    return data
+
+
+# ============================ 行情剧震检测（事件触发分析） ============================
+# 2026-10-28 liusir：行情更新不能只靠固定 15min 刷新，
+#   「出现行情剧烈波动的时候去分析，或者出现大幅下跌的时候去分析」。
+# 阈值来自近 30 天真实 15m K 线分位数（scripts 里可复算）：
+#   15m 单根跌幅 p1% = -0.485% → 取 -0.5%（近 30 天 0.8 次/天）
+#   1h  累计跌幅 p1% = -0.984% → 取 -1.0%（近 30 天 0.9 次/天）
+#   15m 单根涨幅 p99% = +0.532% → 取 +0.5%
+# 也就是说：每天大概 1~2 次会触发，不会刷屏。
+SHOCK_CACHE: dict = {"ts": 0.0, "data": None}
+SHOCK_TTL = 60.0
+SHOCK_15M_DOWN = -0.5      # %
+SHOCK_15M_UP = 0.5        # %
+SHOCK_1H_DOWN = -1.0      # %
+
+
+def build_shock_state() -> dict:
+    """检测最近一段行情是否发生「剧烈波动 / 大幅下跌」。
+
+    返回 {shock: bool, reasons: [...], drops: {...}, last_shock_ts}
+    shock 只在「刚刚发生」的那一段窗口内为真（默认 15min），避免一直亮着。
+    """
+    now = time.time()
+    if SHOCK_CACHE["data"] and now - SHOCK_CACHE["ts"] < SHOCK_TTL:
+        return SHOCK_CACHE["data"]
+
+    out = {"shock": False, "reasons": [], "drops": {}, "checked_ts": int(now),
+           "last_shock_ts": None, "thresholds": {
+               "15m_down": SHOCK_15M_DOWN, "15m_up": SHOCK_15M_UP, "1h_down": SHOCK_1H_DOWN}}
+
+    try:
+        from teacher_analysis import _bars
+        b15 = _bars("15m")
+        if len(b15) >= 10:
+            closes = [float(b[4]) for b in b15]
+            # 最新一根收盘 vs 上一根
+            d15 = (closes[-1] - closes[-2]) / closes[-2] * 100
+            # 最近 4 根（1h）
+            d1h = (closes[-1] - closes[-5]) / closes[-5] * 100
+            out["drops"] = {"m15_pct": round(d15, 3), "h1_pct": round(d1h, 3),
+                            "last_px": closes[-1]}
+            reasons = []
+            if d15 <= SHOCK_15M_DOWN:
+                reasons.append(f"15m 大跌 {d15:.2f}%")
+            if d15 >= SHOCK_15M_UP:
+                reasons.append(f"15m 急涨 {d15:.2f}%")
+            if d1h <= SHOCK_1H_DOWN:
+                reasons.append(f"1h 大跌 {d1h:.2f}%")
+            out["reasons"] = reasons
+            out["shock"] = bool(reasons)
+    except Exception as e:
+        out["error"] = str(e)
+
+    SHOCK_CACHE["ts"], SHOCK_CACHE["data"] = now, out
+    return out
+
+
 # ============================ 数据聚合 ============================
 
 def _read_jsonl(path: Path):
@@ -1745,6 +1840,34 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.startswith("/api/teacher/trades"):
             try:
                 payload = build_status_teacher(self.path)
+                body = json.dumps(payload, ensure_ascii=False).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception as e:
+                self.send_error(500, str(e))
+            return
+        # ===== 老师单分析（IMA 当数据库，2026-10-28） =====
+        if self.path.startswith("/api/teacher/analysis"):
+            try:
+                payload = build_teacher_analysis_api()
+                body = json.dumps(payload, ensure_ascii=False).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception as e:
+                self.send_error(500, str(e))
+            return
+        # ===== 行情剧震检测（事件触发，2026-10-28） =====
+        if self.path.startswith("/api/market_shock"):
+            try:
+                payload = build_shock_state()
                 body = json.dumps(payload, ensure_ascii=False).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json; charset=utf-8")

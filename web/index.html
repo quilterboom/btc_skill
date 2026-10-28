@@ -823,8 +823,10 @@
     .ma-advisory .ai-body { color: inherit; }
     .ma-foot { font-size: 10.5px; color: var(--muted); margin-top: 8px; padding-top: 6px; border-top: 1px dashed var(--border); }
     .btn-tiny { font-size: 11px; padding: 2px 8px; }
-    .btn-tiny.spinning { animation: ma-spin 0.8s linear infinite; pointer-events: none; opacity: 0.6; }
-    @keyframes ma-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+    /* 2026-10-28 liusir：「点击行情分析的刷新按钮，不要旋转」
+       原来是整个按钮 360° 转（transform: rotate 会把文字也跟着转），
+       现在只做静态禁用态 —— 文字改「拉取中…」+ 灰化 + 禁点，不再转。 */
+    .btn-tiny.spinning { pointer-events: none; opacity: 0.55; cursor: wait; }
 
     /* 策略-效果矩阵（训练版）—— 1 行 = 1 策略，列：源 / 笔数 / 净利 / 胜率 / PF / DD */
     .smx-table { width: 100%; border-collapse: collapse; font-size: 12px; }
@@ -1357,6 +1359,59 @@
    liusir：「交易明细展示的很丑，你固定一个高度，超过这个高度的可以滚动」
    根因：两个面板行数不一样（老师单 19 行 vs 结算单 2 行），高度参差
    → 做成统一固定高度 + 内部滚动，表头 sticky，观感整齐。 */
+/* ============ 悬浮列表框（2026-10-28 liusir：点击卡片弹明细） ============
+   liusir：「将交易明细列表改为点击对应的 EDGE 卡片后弹出悬浮列表框」
+   → 交易明细不再常驻占一屏，改为按需弹出的浮层。 */
+.dt-modal {
+  position: fixed; inset: 0; z-index: 9000;
+  background: rgba(15, 23, 42, 0.45);
+  display: none; align-items: center; justify-content: center;
+  padding: 24px;
+}
+.dt-modal.open { display: flex; }
+.dt-modal-box {
+  background: #fff; border-radius: 10px;
+  box-shadow: 0 18px 48px rgba(15, 23, 42, 0.28);
+  width: min(1180px, 100%); max-height: 86vh;
+  display: flex; flex-direction: column; overflow: hidden;
+}
+.dt-modal-hd {
+  display: flex; align-items: center; gap: 10px;
+  padding: 14px 18px; border-bottom: 1px solid var(--tc-border);
+  flex: none;
+}
+.dt-modal-hd h3 { margin: 0; font-size: 14px; font-weight: 600; }
+.dt-modal-hd .meta { font-size: 11px; }
+.dt-modal-bd {
+  padding: 14px 18px; overflow-y: auto; flex: 1; min-height: 0;
+}
+.dt-modal-bd .tl-table { width: 100%; }
+.dt-modal-close {
+  margin-left: auto; border: 1px solid var(--tc-border); background: #fff;
+  border-radius: 4px; padding: 4px 12px; font-size: 12px; cursor: pointer;
+  color: var(--tc-text);
+}
+.dt-modal-close:hover { background: var(--tc-bg-hover); }
+/* 弹窗内的列表不沿用页面流的 520px 固定高度 —— 浮层 86vh 会被撑爆
+   （页面流里 520px 是为了两栏严格等高对齐；浮层里两栏同排，
+   用 calc 让列表吃掉浮层剩余高度，且两栏共用同一高度基准） */
+.dt-modal-bd .panel .trade-list {
+  height: calc(86vh - 260px);
+  min-height: 320px;
+  max-height: 620px;
+}
+.dt-modal-bd .split-grid { align-items: start; }
+/* 卡片可点击提示 */
+.data-card.dt-clickable { cursor: pointer; position: relative; }
+.data-card.dt-clickable:hover { border-color: var(--tc-blue); }
+.data-card.dt-clickable::after {
+  content: "查看明细 ›";
+  position: absolute; top: 14px; right: 18px;
+  font-size: 11px; color: var(--tc-blue); opacity: 0;
+  transition: opacity .15s; letter-spacing: .3px;
+}
+.data-card.dt-clickable:hover::after { opacity: 1; }
+
 .tc .split-grid > .panel {
   display: flex;
   flex-direction: column;
@@ -1507,7 +1562,7 @@
         <a href="#sec-strategy"><span class="nav-dot"></span>当前策略</a>
         <a href="#sec-analysis"><span class="nav-dot"></span>数据分析</a>
         <a href="#sec-winrate"><span class="nav-dot"></span>胜率</a>
-        <a href="#sec-trades"><span class="nav-dot"></span>交易明细</a>
+        <a href="#" id="nav-trades"><span class="nav-dot"></span>交易明细</a>
       </nav>
       <div class="tc-foot">
         自动刷新 1s · 交易列表 5s<br>
@@ -1601,8 +1656,8 @@
 
   <!-- 2026-10-17 借鉴 trade-journal：Edge Score + P&L 日历 + 错误归因 -->
   <div id="sec-analysis" class="data-grid" style="margin-top:16px" data-env-show="prod">
-    <div class="sec-hd" style="grid-column:1/-1; margin:0"><h2>数据分析</h2><span class="meta">Edge Score · P&L 日历 · 错误归因</span></div>
-    <div class="data-card">
+    <div class="sec-hd" style="grid-column:1/-1; margin:0"><h2>数据分析</h2><span class="meta">Edge Score · P&L 日历 · 错误归因 · 老师单</span></div>
+    <div class="data-card dt-clickable" id="card-edge" data-dt-open="settle">
       <h3>Edge Score <small>v2</small></h3>
       <div id="edge-score">加载中…</div>
     </div>
@@ -1613,6 +1668,16 @@
     <div class="data-card">
       <h3>错误归因 <small>近期</small></h3>
       <div id="mistakes-summary">加载中…</div>
+    </div>
+    <!-- 2026-10-28 老师单维度：盈利记录 + 出场模式 -->
+    <div class="data-card dt-clickable" id="card-teacher-pnl" data-dt-open="teacher">
+      <h3>老师单盈利记录 <small id="teacher-pnl-source">IMA</small></h3>
+      <div id="teacher-pnl">加载中…</div>
+    </div>
+    <!-- 2026-10-28 老师单维度：入场行情分析 -->
+    <div class="data-card dt-clickable" id="card-teacher-entry" data-dt-open="teacher">
+      <h3>老师单入场行情 <small>入场时市场结构</small></h3>
+      <div id="teacher-entry">加载中…</div>
     </div>
   </div>
 
@@ -1709,9 +1774,19 @@
 
   </div>
 
-  <!-- 老师直播单（2026-10-14 liusir 拍板：网页端展示 + 录入） -->
-  <div class="sec-hd" id="sec-trades"><h2>交易明细</h2><span class="meta">左：老师直播单（手动录入 + 自动结算） · 右：策略结算明细（自动）</span></div>
-  <div class="split-grid" style="margin-top:6px">
+  <!-- 交易明细（2026-10-28 liusir：改为点击卡片弹出悬浮列表框）
+       原来这里是常驻的 split-grid 两栏（老师直播单 | 策略结算明细），
+       占了整整一屏。现在收进 #dt-modal-bd，由「老师单盈利记录」/「Edge Score」卡片点击唤起。
+       ★ 两栏依然并排（保留 10-18 拍板的左右对照），只是从页面流里搬进浮层。 -->
+  <div class="dt-modal" id="dt-modal" role="dialog" aria-modal="true" aria-labelledby="dt-modal-title">
+    <div class="dt-modal-box">
+      <div class="dt-modal-hd">
+        <h3 id="dt-modal-title">交易明细</h3>
+        <span class="meta" id="dt-modal-sub"></span>
+        <button class="dt-modal-close" id="dt-modal-close" aria-label="关闭">✕ 关闭</button>
+      </div>
+      <div class="dt-modal-bd" id="dt-modal-bd">
+  <div class="split-grid" id="sec-trades-grid" style="margin-top:0">
     <!-- 左：老师直播单 -->
     <div class="panel" id="panel-teacher">
       <div class="panel-hd">
@@ -1848,6 +1923,9 @@
       </div>
     </div>
   </div>
+      </div><!-- /dt-modal-bd -->
+    </div><!-- /dt-modal-box -->
+  </div><!-- /dt-modal -->
 
       </div><!-- /tc-content -->
     </div><!-- /tc-main -->
@@ -2458,6 +2536,220 @@ function renderMistakes(ms, elId = "mistakes-summary") {
       <div class="ms-foot">共 <b>${ms.total_with_mistake}</b> 笔有效标记 · 详见 journal.mistake 字段（手动标记）</div>
     </div>`;
 }
+
+// ─────────────────────────────────────────────────────────────
+// 老师单分析（2026-10-28）
+// 数据源：/api/teacher/analysis（后端读 IMA KB —— liusir「把 ima 当数据库」）
+// 两张卡：① 盈利记录  ② 入场行情
+// ─────────────────────────────────────────────────────────────
+let _taData = null;
+
+async function fetchTeacherAnalysis() {
+  try {
+    const r = await fetch("/api/teacher/analysis", { cache: "no-store" });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const d = await r.json();
+    if (d.error) {
+      document.getElementById("teacher-pnl").innerHTML = `<div class="empty">${d.error}</div>`;
+      document.getElementById("teacher-entry").innerHTML = `<div class="empty">${d.error}</div>`;
+      return;
+    }
+    _taData = d;
+    renderTeacherPnl(d);
+    renderTeacherEntry(d);
+    const src = document.getElementById("teacher-pnl-source");
+    if (src) {
+      src.textContent = d.source === "ima" ? "IMA 知识库" : "本地兜底";
+      src.style.color = d.source === "ima" ? "" : "var(--amber, #f59e0b)";
+    }
+  } catch (e) {
+    const msg = `<div class="empty">加载失败：${e.message}</div>`;
+    const p = document.getElementById("teacher-pnl");
+    const q = document.getElementById("teacher-entry");
+    if (p) p.innerHTML = msg;
+    if (q) q.innerHTML = msg;
+  }
+}
+
+// 卡 ①：老师单盈利记录 —— 大字累计净利 + 每笔净利柱 + 出场模式分布
+function renderTeacherPnl(d) {
+  const el = document.getElementById("teacher-pnl");
+  if (!el) return;
+  const s = d.summary || {};
+  const per = d.per_trade || [];
+  const settled = per.filter(r => r.settled);
+  const maxAbs = Math.max(1, ...settled.map(r => Math.abs(r.net_usd || 0)));
+
+  const bars = settled.map(r => {
+    const v = r.net_usd || 0;
+    const h = Math.max(6, Math.abs(v) / maxAbs * 100);
+    const cls = v > 0 ? "pos" : v < 0 ? "neg" : "";
+    const tip = `#${r.trade_id} ${r.date || ""} ${r.side === "long" ? "多" : "空"} ${v > 0 ? "+" : ""}${v.toFixed(2)}U · ${r.exit_mode || ""}`;
+    return `<div class="pnl-bar-day ${cls}" style="flex-grow:${h}; height:100%"
+      data-tip="${tip}" title="${tip}"></div>`;
+  }).join("");
+
+  const modes = (d.exit_modes || []).map(m => {
+    const pct = s.settled ? (m.n / s.settled * 100) : 0;
+    return `<div class="ms-row">
+      <span class="lbl">${m.mode}</span>
+      <span class="bar"><i style="width:${pct.toFixed(1)}%"></i></span>
+      <span class="n">${m.n}笔 · ${m.net > 0 ? "+" : ""}${m.net.toFixed(0)}U</span>
+    </div>`;
+  }).join("");
+
+  const totalColor = s.net_usd > 0 ? "var(--green)" : s.net_usd < 0 ? "var(--red)" : "var(--text)";
+  el.innerHTML = `
+    <div class="pnl-board">
+      <div class="pnl-board-top">
+        <div class="pnl-big" style="color:${totalColor}">${(s.net_usd > 0 ? "+" : "")}${s.net_usd ?? "—"}<span class="u">U</span></div>
+        <div class="pnl-stats">
+          <div class="pnl-stat"><b style="color:var(--green)">${s.wins ?? 0}</b> 盈<span class="meta">笔数</span></div>
+          <div class="pnl-stat"><b style="color:var(--red)">${s.losses ?? 0}</b> 亏<span class="meta">笔数</span></div>
+          <div class="pnl-stat">${s.win_rate_pct ?? "—"}%<span class="meta">胜率</span></div>
+          <div class="pnl-stat">${s.payoff ?? "—"}<span class="meta">盈亏比</span></div>
+        </div>
+      </div>
+      <div class="pnl-bar-row" style="height:34px">
+        ${bars || '<div class="empty">暂无已结算单子</div>'}
+      </div>
+      <div class="pnl-bar-axis">
+        <span>#${settled[0]?.trade_id ?? "—"}</span>
+        <span>每根柱 = 一笔老师单（绿盈红亏）</span>
+        <span>#${settled[settled.length - 1]?.trade_id ?? "—"}</span>
+      </div>
+      <div style="margin-top:10px; border-top:1px solid var(--tc-border); padding-top:8px">
+        ${modes}
+      </div>
+      <div class="ms-foot">共 <b>${s.total ?? 0}</b> 笔 · 已结算 <b>${s.settled ?? 0}</b> · 均笔 <b>${s.avg_usd ?? "—"}U</b> · 数据源 IMA 知识库</div>
+    </div>`;
+}
+
+// 卡 ②：老师单入场行情 —— 入场时的市场结构画像
+function renderTeacherEntry(d) {
+  const el = document.getElementById("teacher-entry");
+  if (!el) return;
+  const p = d.profile || {};
+  const per = (d.per_trade || []).filter(r => r.entry_ts_source === "kline");
+
+  const rows = per.map(r => {
+    const pos = r.range_pos_pct;
+    const posCls = pos == null ? "" : pos < 20 ? "pos" : pos > 80 ? "neg" : "";
+    const trendCn = r.trend === "up" ? "多头结构" : r.trend === "down" ? "空头结构" : r.trend === "flat" ? "横盘" : "—";
+    const alignCn = r.aligned === true ? "顺势" : r.aligned === false ? "逆势" : "—";
+    const alignCls = r.aligned === true ? "pos" : r.aligned === false ? "neg" : "";
+    const net = r.net_usd;
+    const netCls = net == null ? "" : net > 0 ? "pos" : net < 0 ? "neg" : "flat";
+    return `<tr>
+      <td class="num">#${r.trade_id}</td>
+      <td>${r.side === "long" ? "多" : "空"}</td>
+      <td class="num ${posCls}">${pos == null ? "—" : pos.toFixed(0) + "%"}</td>
+      <td class="num">${r.dd_from_high_pct == null ? "—" : r.dd_from_high_pct.toFixed(2) + "%"}</td>
+      <td class="num">${r.vol_x == null ? "—" : r.vol_x.toFixed(1) + "×"}</td>
+      <td class="${alignCls}">${trendCn} · ${alignCn}</td>
+      <td class="num ${netCls}">${net == null ? "—" : (net > 0 ? "+" : "") + net.toFixed(2)}</td>
+    </tr>`;
+  }).join("");
+
+  el.innerHTML = `
+    <div class="ms-board">
+      <div class="ms-row">
+        <span class="lbl">平均入场位置</span>
+        <span class="bar"><i style="width:${Math.min(100, p.range_pos_pct ?? 0)}%"></i></span>
+        <span class="n">${p.range_pos_pct ?? "—"}%<span class="meta"> · 24h 区间低位=0</span></span>
+      </div>
+      <div class="ms-row">
+        <span class="lbl">平均距高点回撤</span>
+        <span class="bar"><i style="width:${Math.min(100, (p.dd_from_high_pct ?? 0) * 20)}%"></i></span>
+        <span class="n">${p.dd_from_high_pct ?? "—"}%</span>
+      </div>
+      <div class="ms-row">
+        <span class="lbl">平均量能放大</span>
+        <span class="bar"><i style="width:${Math.min(100, (p.vol_x ?? 0) * 12)}%"></i></span>
+        <span class="n">${p.vol_x ?? "—"}×</span>
+      </div>
+      <div class="ms-row">
+        <span class="lbl">顺势单胜率</span>
+        <span class="bar"><i style="width:${p.aligned_win_rate ?? 0}%"></i></span>
+        <span class="n">${p.aligned_win_rate ?? "—"}%<span class="meta"> · ${p.aligned ?? 0} 笔</span></span>
+      </div>
+      <div class="ms-row">
+        <span class="lbl">逆势单胜率</span>
+        <span class="bar"><i style="width:${p.counter_win_rate ?? 0}%"></i></span>
+        <span class="n">${p.counter_win_rate ?? "—"}%<span class="meta"> · ${p.counter ?? 0} 笔</span></span>
+      </div>
+      <div class="ms-foot">入场时刻由「入场价 + 当日 K 线」反查得出（${p.n ?? 0} 笔可定位）</div>
+      <div style="max-height:150px; overflow-y:auto; margin-top:6px">
+        <table class="tl-table" style="font-size:11px">
+          <thead><tr><th>单号</th><th>向</th><th>位置</th><th>回撤</th><th>量比</th><th>结构</th><th>净利</th></tr></thead>
+          <tbody>${rows || '<tr><td colspan="7" class="empty">暂无</td></tr>'}</tbody>
+        </table>
+      </div>
+    </div>`;
+}
+
+// ─────────────────────────────────────────────────────────────
+// 悬浮列表框（2026-10-28）：交易明细从常驻区块改成点卡片弹出
+// ─────────────────────────────────────────────────────────────
+function openDtModal(title, sub) {
+  const m = document.getElementById("dt-modal");
+  if (!m) return;
+  const t = document.getElementById("dt-modal-title");
+  const s = document.getElementById("dt-modal-sub");
+  if (t) t.textContent = title || "交易明细";
+  if (s) s.textContent = sub || "";
+  m.classList.add("open");
+  document.body.style.overflow = "hidden";
+  // 弹窗里的列表需要数据：老师单 / 结算明细各拉一次
+  if (typeof loadTeacher === "function") loadTeacher();
+  if (typeof fetchSettlements === "function") fetchSettlements();
+}
+
+function closeDtModal() {
+  const m = document.getElementById("dt-modal");
+  if (!m) return;
+  m.classList.remove("open");
+  document.body.style.overflow = "";
+}
+
+// 绑定时机：本 script 在 <body> 末尾，DOM 已就绪 → 直接执行
+// （用 DOMContentLoaded 有风险：若脚本 defer/async 或已晚于该事件，监听器永不触发）
+(function bindDtModal() {
+  const m = document.getElementById("dt-modal");
+  if (m) {
+    m.addEventListener("click", e => { if (e.target === m) closeDtModal(); });
+  }
+  const close = document.getElementById("dt-modal-close");
+  if (close) close.addEventListener("click", closeDtModal);
+  document.addEventListener("keydown", e => { if (e.key === "Escape") closeDtModal(); });
+
+  // 侧栏「交易明细」→ 弹窗
+  const navTrades = document.getElementById("nav-trades");
+  if (navTrades) {
+    navTrades.addEventListener("click", e => {
+      e.preventDefault();
+      openDtModal("交易明细", "左：老师直播单（手动录入） · 右：策略结算明细（自动）");
+    });
+  }
+
+  // 卡片 → 弹窗（对应关系写在 data-dt-open 上）
+  document.querySelectorAll("[data-dt-open]").forEach(el => {
+    el.addEventListener("click", () => {
+      const kind = el.dataset.dtOpen;
+      if (kind === "teacher") {
+        openDtModal("老师单交易明细", "手动录入 + 自动结算 · 共 " + ((_taData && _taData.summary && _taData.summary.total) || 0) + " 笔");
+      } else {
+        openDtModal("策略结算明细", "自动结算 · 生产环境真实成交");
+      }
+    });
+  });
+
+  // 老师单分析两张卡：启动时拉一次 + 15min 刷（跟 IMA 缓存 5min 对齐不上，加长没关系）
+  if (document.getElementById("teacher-pnl")) {
+    fetchTeacherAnalysis();
+    setInterval(fetchTeacherAnalysis, 15 * 60 * 1000);
+  }
+})();
 
 // ── 策略-效果矩阵 + 最近 N 笔训练明细 ──
 function renderStrategyMatrix(rows, elId = "train-strategy-matrix") {
@@ -3078,6 +3370,34 @@ setInterval(loadTeacher, 5000);  // 5s 刷新
 // ============================ 行情分析卡（BTC 右侧，15min 自动 + 手动） ============================
 // 2026-10-18 liusir 要求：每 15min 拉一次 /api/market_analysis（4 维：趋势/波动/关键位/资金费率）
 // 手动 ↻ 按钮立即触发。prod-only。
+// ★ 2026-10-28：加事件触发 —— 行情剧烈波动 / 大幅下跌时立即重新分析一次，
+//   不必等满 15min。阈值来自近 30 天真实 15m K 线分位数（约 1~2 次/天触发）。
+//   剧震窗口内只触发一次（_shockFired 标记），避免同一波行情反复刷。
+let _shockFired = false;
+
+async function checkShockTrigger() {
+  try {
+    const r = await fetch("/api/market_shock", { cache: "no-store" });
+    if (!r.ok) return;
+    const s = await r.json();
+    if (!s.shock) { _shockFired = false; return; }
+    if (_shockFired) return;      // 同一波行情只触发一次
+    _shockFired = true;
+    const reasons = (s.reasons || []).join(" / ");
+    await fetchMarketAnalysis(false);
+    // 在卡片上标出这次是事件触发触发的
+    const foot = document.querySelector("#market-analysis-card .ma-foot");
+    if (foot) {
+      const tag = document.createElement("span");
+      tag.className = "ma-shock-tag";
+      tag.textContent = `⚡ ${reasons} 触发`;
+      tag.style.cssText = "margin-left:8px;color:#b45309;font-weight:600";
+      foot.appendChild(tag);
+    }
+  } catch (e) {
+    // 剧震检测失败不影响主流程
+  }
+}
 
 function renderMarketAnalysis(ma) {
   const body = document.getElementById("market-analysis-body");
@@ -3193,6 +3513,11 @@ document.getElementById("ma-refresh")?.addEventListener("click", () => fetchMark
 // 15min 自动（900s）
 fetchMarketAnalysis(false);
 setInterval(() => fetchMarketAnalysis(false), 15 * 60 * 1000);
+
+// ★ 2026-10-28 liusir：行情剧震/大跌时额外触发一次分析（不必等满 15min）
+//   60s 轮询一次 /api/market_shock（后端 60s 缓存，不打爆 gate）
+checkShockTrigger();
+setInterval(checkShockTrigger, 60 * 1000);
 
 // ============================ 老师直播单 ============================
 async function teacherApi(path, opts = {}) {
