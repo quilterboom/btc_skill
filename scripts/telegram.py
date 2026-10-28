@@ -89,6 +89,36 @@ def _rate_limit_check(now_ts: float) -> tuple:
         return True, "ok"
 
 
+# ============================ 训练/生产标识 ============================
+# 2026-10-17 加：只加在 push() 里 → ★ 2026-10-29 修：漏了 push_once()。
+#   入场卡 / 部分止盈卡 / 平仓卡全部走 push_once()（10-27 幂等改造后），
+#   于是**所有关键卡片都没有标识**，生产单和训练单长得一模一样。
+#   实测 10-29 05:29 生产/训练连推两张「已成交入场」，卡片只有 TP/SL 差几个点，
+#   liusir 无法判断哪张是生产单。
+#   规则：**任何**出站卡片都要带前缀 → 统一在这里加，push/push_once 共用。
+ENV_TAG_PROD = "🚀 <b>[生产]</b> "
+ENV_TAG_TRAIN = "🧪 <b>[训练]</b> "
+
+
+def _env_tag() -> str:
+    """当前进程的训练/生产标识前缀。
+
+    判别用 os.environ["TRAINING_MODE"]（不是 training_config 常量）：
+    常量在 import 时锁死，而 runner.py 是启动时才设 os.environ，
+    worker 线程（settler / risk_guard / promoter）用 os.environ 才可靠。
+    """
+    return ENV_TAG_TRAIN if os.environ.get("TRAINING_MODE") == "1" else ENV_TAG_PROD
+
+
+def _apply_env_tag(card: str) -> str:
+    """给卡片加 [生产]/[训练] 前缀（已带过则不重复加）。"""
+    c = card or ""
+    s = c.lstrip()
+    if s.startswith(ENV_TAG_PROD) or s.startswith(ENV_TAG_TRAIN):
+        return c
+    return _env_tag() + c
+
+
 # ============================ 路径 ============================
 SECRETS_PATH = Path("/root/.hermes/secrets/btc_tg.json")
 DEFAULT_CHAT_ID = "7097652385"
@@ -219,11 +249,8 @@ def push(card: str, token: Optional[str] = None, chat_id: Optional[str] = None) 
         return False
 
     # 2026-10-17 liusir：训练版和生产版用同一个 chat_id，分不清来源。
-    # 在消息最前面加 [生产] / [训练] 前缀（不影响卡片内部格式）。
-    tag = "🧪 <b>[训练]</b> " if os.environ.get("TRAINING_MODE") == "1" else "🚀 <b>[生产]</b> "
-    if not (card or "").lstrip().startswith("🚀 <b>[生产]</b>") and \
-       not (card or "").lstrip().startswith("🧪 <b>[训练]</b>"):
-        card = tag + (card or "")
+    # 2026-10-29：统一走 _apply_env_tag（push/push_once 共用），别再各写一份。
+    card = _apply_env_tag(card)
 
     # ★ 2026-10-27：限流（只作用在非幂等的普通推送）
     #   关键卡片请用 push_once(key, card) —— 幂等去重 + 不受限流。
@@ -281,6 +308,13 @@ def push_once(key: str, card: str, token: Optional[str] = None,
         chat_id = load_chat()
     if not token or not chat_id:
         return False
+
+    # ★ 2026-10-29：push_once 也必须带 [生产]/[训练] 标识。
+    #   入场/部分止盈/平仓/安全阀卡片全走这条路径 —— 之前完全没前缀，
+    #   生产单和训练单在同一个 chat 里长得一模一样（10-29 05:29 实测两张卡
+    #   连着推，TP/SL 只差几个点，liusir 无法分辨）。
+    #   幂等 key 是显式的（持仓id:事件类型），跟卡片文本无关 → 加前缀不影响去重。
+    card = _apply_env_tag(card)
 
     now = time.time()
     allow, why = _idempotent_check(key, now)

@@ -123,6 +123,44 @@ def _append_outcome_event(ev: Dict) -> bool:
     return True
 
 
+def _notify_close_from_record(rec: Dict) -> None:
+    """★ 2026-10-29 新增：risk_guard 实时平仓后必须推平仓卡。
+
+    Bug（实测 10-25 之后 12 笔结算全部无平仓卡，生产 7 + 训练 5）：
+      risk_guard 用实时 ticker 抢先结算（settler 用 1m K 回放，最坏延迟 60s），
+      结算完把 status 改成 settled → settler 的 settle_all 只处理 status=='pending'
+      的记录 → position_tracker._notify_close 永远不会被调用 → **平仓卡静默丢失**。
+      用户只在 TG 看到「已成交入场」，之后没有任何出场通知。
+      连 10-29 04:10 那笔 -15.41U 的 SL 都没有卡。
+
+    修复：risk_guard 结算成功后自己推卡。幂等 key 复用 {持仓id}:close
+      （position_tracker._notify_close 内部就是 _push_once(f"{id}:close")）
+      → 与 settler 路径天然互斥，不会双推。
+
+    res 从 rec 现取（rec 里已有 net_usd/gross_usd/category/outcome/exit_px/exit_ts），
+    不重算一遍公式——口径唯一在 position_tracker._close。
+    """
+    try:
+        from position_tracker import _notify_close
+    except Exception as e:
+        log(f"[risk_guard] 无法导入 position_tracker._notify_close: {e}")
+        return
+    res = {
+        "outcome": rec.get("outcome"),
+        "category": rec.get("category"),
+        "net_usd": rec.get("net_usd"),
+        "gross_usd": rec.get("gross_usd"),
+        "exit_px": rec.get("exit_px"),
+        "exit_ts": rec.get("exit_ts"),
+        "contracts": rec.get("contracts"),
+        "partial_exits": rec.get("partial_exit_count", 0) or 0,
+    }
+    try:
+        _notify_close(rec, res)
+    except Exception as e:
+        log(f"[risk_guard] 平仓卡推送失败 {rec.get('id')}: {e}")
+
+
 def _apply_sl(rec: Dict, last: float, now_ts: int) -> Optional[Dict]:
     """SL 平仓：写 canonical net/gross/category，返回待落盘的 outcome event。
 
@@ -170,8 +208,17 @@ def _ticker_last(contract="BTC_USDT") -> Optional[float]:
 
 def _try_partial_close(sig: Dict, last: float, qty_pct: int, reason: str) -> bool:
     """减仓 qty_pct % 仓位 + 推保本。返回是否成功执行。
+
     简化: 通过 _settle_one 不行 — 这里只做"标记 tp1_hit + 设 active_sl=entry"让 settler 接手平仓。
-    真正的市价减仓由 position_tracker 处理（但要先触发 tp1_hit）。"""
+    真正的市价减仓由 position_tracker 处理（但要先触发 tp1_hit）。
+
+    ★ 2026-10-29 修复：risk_guard 的 TP1 分支原来**只改内存状态、从不推卡**。
+      实测 10-22 ~ 10-26 有 6 笔 TP1 命中零卡片（生产 4 + 训练 2），
+      用户完全不知道"已经减仓锁利、止损上移到保本"。
+      根因：settler 下一轮看到 tp1_hit=True 就走「跳过重复 partial」分支，
+      永远不会补推这张卡 → 卡永久丢失。
+      修复：这里直接推 TP1 部分止盈卡（幂等 key {id}:partial:TP1）。
+    """
     side = sig.get("side")
     entry = float(sig.get("entry", 0))
     tp1 = float(sig.get("tp1", 0))
@@ -185,7 +232,32 @@ def _try_partial_close(sig: Dict, last: float, qty_pct: int, reason: str) -> boo
     sig["pos_state"] = "TP1_PARTIAL"
     sig["partial_exits"] = sig.get("partial_exits", 0) + 1
     sig["note"] = (sig.get("note", "") or "") + f" | [risk_guard] {reason} @ {last:.1f}"
+    # ★ 2026-10-29：推 TP1 部分止盈卡（settler 不会补推，见上方说明）
+    _notify_partial_from_record(sig, last)
     return True
+
+
+def _notify_partial_from_record(sig: Dict, px: float) -> None:
+    """★ 2026-10-29：risk_guard 触发 TP1 时推部分止盈卡。
+
+    张数口径：本段卖出 = 原始总量 // PARTS（与 position_tracker._close 里
+    part_size = contracts_orig // PARTS 一致）。risk_guard 不实际减仓，
+    但卡片上的数字必须跟最终结算用同一口径，否则「卡上写的张数」和
+    「journal 算的 PnL」对不上（display-integrity 硬规则）。
+    """
+    try:
+        from position_tracker import _notify_partial, PARTS
+    except Exception as e:
+        log(f"[risk_guard] 无法导入 position_tracker._notify_partial: {e}")
+        return
+    try:
+        contracts = int(sig.get("contracts") or 0)
+        base = int(sig.get("_orig_contracts") or contracts)
+        qty = max(1, base // PARTS)
+        _notify_partial(sig, "TP1", px, contracts or base, int(sig.get("tp1_hit_ts") or time.time()),
+                        qty=qty)
+    except Exception as e:
+        log(f"[risk_guard] TP1 部分止盈卡推送失败 {sig.get('id')}: {e}")
 
 
 def _check_one(sig: Dict, last: float, now_ts: int):
@@ -267,6 +339,7 @@ def risk_guard_loop():
             action = "hold"   # 默认 hold, 避免 unbound
             rid = "?"
             pending_events: List[Dict] = []   # journal 落盘成功后才 append（避免事件先于状态）
+            pending_close_cards: List[Dict] = []   # ★ 2026-10-29：risk_guard 结算后要推的平仓卡
             for r in recs:
                 if r.get("status") != "pending":
                     continue
@@ -283,6 +356,10 @@ def risk_guard_loop():
                     ev = _apply_sl(r, last, now_ts)
                     if ev:
                         pending_events.append(ev)
+                        # ★ 2026-10-29 修复：risk_guard 抢先结算后 settler 就不会
+                        #   再处理这条（status 已 settled）→ 平仓卡必须在这里推。
+                        #   幂等 key 复用 {id}:close，与 settler 路径互斥。
+                        pending_close_cards.append(r)
                     changed = True
                 elif action == "TP1":
                     n_tp1 += 1
@@ -299,6 +376,11 @@ def risk_guard_loop():
                                 f"net={ev.get('net_usd')} cat={ev.get('category')}")
                     except Exception as e:
                         log(f"[risk_guard] outcome event 写入失败 {ev.get('id')}: {e}")
+                # ★ 2026-10-29：journal 落盘 + event 写入成功后才推平仓卡。
+                #   顺序很关键：先落盘再推送 → 推送失败时 journal 仍有结算记录，
+                #   反过来（先推卡）会出现「卡说有平仓、journal 没记录」的分裂。
+                for rec in pending_close_cards:
+                    _notify_close_from_record(rec)
             if n_iter % HEARTBEAT_EVERY == 0:
                 log(f"[risk_guard] 心跳 #{n_iter}（guard={n_guard} sl={n_sl} tp1={n_tp1}）")
             _write_heartbeat(n_iter, n_guard, n_sl, n_tp1)

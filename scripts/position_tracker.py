@@ -457,8 +457,8 @@ def _settle_one(sig: Dict, bars: List[List]) -> Optional[Dict]:
             sig["pos_state"] = "TP1_PARTIAL"
             sig["partial_exit_count"] = sig.get("partial_exit_count", 0) + 1
             sig["last_check_ts"] = ts
-            # 推送部分止盈
-            _notify_partial(sig, "TP1", tp1, contracts, ts)
+            # 推送部分止盈（qty = 本段实际卖出张数）
+            _notify_partial(sig, "TP1", tp1, contracts, ts, qty=_partial_qty)
             # ★ 立即把 TP1 状态持久化到 journal（避免下次 cron 重复触发）
             try:
                 _recs = _read_journal()
@@ -507,7 +507,9 @@ def _settle_one(sig: Dict, bars: List[List]) -> Optional[Dict]:
                 sig["pos_state"] = "PARTIAL_CLOSED"
                 sig["partial_exit_count"] = sig.get("partial_exit_count", 0) + 1
                 # 推送部分止盈（复用 _notify_partial，文案同 TP1 partial）
-                _notify_partial(sig, "PARTIAL_CLOSE", c, _remain_qty, ts)
+                # qty = 本段实际卖出张数（_cur_contracts - _remain_qty）
+                _notify_partial(sig, "PARTIAL_CLOSE", c, _remain_qty, ts,
+                                qty=_cur_contracts - _remain_qty)
                 # 立即持久化到 journal
                 try:
                     _recs = _read_journal()
@@ -640,9 +642,23 @@ def _notify_fill(sig: Dict, fill_px: float, contracts: int, ts: int) -> None:
     _push_once(f"{sig.get('id')}:fill", card)
 
 
-def _notify_partial(sig: Dict, label: str, px: float, contracts: int, ts: int) -> None:
-    """TP1/TP2 部分止盈推送"""
-    partial_qty = contracts // PARTS
+def _notify_partial(sig: Dict, label: str, px: float, contracts: int, ts: int,
+                    qty: Optional[int] = None) -> None:
+    """TP1/TP2 部分止盈推送
+
+    ★ 2026-10-29 新增 qty 参数：本段**实际卖出**的张数。
+      原来靠 `contracts // PARTS` 反推，两个调用方口径不同：
+        · settler TP1 路径：先把 contracts 减到 2/3 再传进来 → 反推出来是 2/3/3
+          （实际卖出 1/3）→ 卡上写的张数和锁利金额都比真实值小。
+        · risk_guard TP1 路径：contracts 没减 → 反推 1/3 反而是对的。
+      两条路径出来的卡数字对不上 → 同一笔单在两条路径下显示不同张数。
+      现在由调用方显式传「实际卖出张数」，公式只在这里一处。
+    """
+    # 实际卖出张数：优先用调用方给的 qty；否则按原始总量 // PARTS 兜底
+    if qty is None:
+        base = int(sig.get("_orig_contracts") or contracts)
+        qty = max(1, base // PARTS)
+    partial_qty = int(qty)
     entry = float(sig["entry"])
     side_cn = "做多" if sig["side"] == "long" else "做空"
     sign = 1 if sig["side"] == "long" else -1
@@ -673,10 +689,16 @@ def _notify_close(sig: Dict, res: Dict) -> None:
     #       这种"价格根本没动就被平"的卡片挤占 TG 无任何决策价值。
     # 改：outcome=BE_STOPPED 且 exit_px 距 entry < 5 点 → 视为零位移噪音，跳过推送。
     #     仅 stderr 警告 + journal audit（你仍能在 report 里看到这些结算）。
+    #
+    # ★ 2026-10-29 修复：原门只看 exit_px≈entry，**没看净利** → 连真收益一起吞了。
+    #   实测 6 笔被跳过：净利 +3.14/+3.15/+4.35（真噪音，该跳）
+    #   但 +23.47U / +24.88U 两笔也被跳了 —— 那是 TP1 已锁利、最后保本被打，
+    #   净利是真的，只因为"出场价=开仓价"就被当成噪音 → 用户白丢两笔盈利通知。
+    #   正确口径：零位移 **且** 净利也不足 5U → 才算噪音。
     _is_noise_be = False
     if res.get("outcome") == "BE_STOPPED":
         _exit_px = float(res.get("exit_px", 0))
-        if abs(_exit_px - entry) < 5.0:
+        if abs(_exit_px - entry) < 5.0 and abs(float(net)) < 5.0:
             _is_noise_be = True
     if _is_noise_be:
         import sys as _sys
