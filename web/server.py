@@ -837,6 +837,13 @@ def build_status_teacher(path: str = "") -> dict:
             return False
         return True
 
+    def _has_pnl(t):
+        """★ 2026-10-28：net_usd 为 null 的单（#11 K线冲突未决）**不算已结算**
+        —— 旧逻辑只看 result.open False 就把它算进胜率分母，胜率被虚高。
+        口径：net_usd 有值 = 可计入统计；net_usd=null = 挂着待定。"""
+        r = t.get("result") or {}
+        return r.get("net_usd") is not None
+
     # 分类：profit/loss/flat/open —— 单笔维度，全程统计不受过滤影响
     def _cat_of(t):
         if _is_open(t):
@@ -887,8 +894,10 @@ def build_status_teacher(path: str = "") -> dict:
     page_items = filtered[start:end]
 
     # 顶部分类/胜率/累计净利（始终基于已结算全集，不受过滤影响）
-    settled = [t for t in trades if not _is_open(t)]
-    pending = [t for t in trades if _is_open(t)]
+    # ★ 2026-10-28：已结算 = net_usd 有值的单。#11 这类 net_usd=null 的
+    # （K 线冲突未决、结果待定）不进胜率分母，也不进累计净利 —— 否则胜率虚高
+    settled = [t for t in trades if _has_pnl(t)]
+    pending = [t for t in trades if not _has_pnl(t)]
     net_usd = sum((t.get("result") or {}).get("net_usd") or 0 for t in settled)
     wins = sum(1 for t in settled if (t.get("result") or {}).get("win"))
 
@@ -1050,68 +1059,161 @@ def teacher_add_event(trade_id: int, payload: dict) -> tuple[int, dict]:
 _TEACHER_QUANT_MULT = 0.0001        # 1 张 = 0.0001 BTC
 _TEACHER_FEE_USD = 4.85             # taker 往返收费
 
+# 出场事件类型（会吃仓位、产生 gross）
+#   tp1_partial / tp2_partial / remaining_close / tp2_full / sl_breakeven / close_sl
+# 历史别名：sl_breakeven = remaining_close，tp2_full = remaining_close
+_TEACHER_CLOSE_TYPES = {
+    "tp1_partial", "tp2_partial", "remaining_close", "tp2_full",
+    "sl_breakeven", "close_sl",
+}
+# 保本腿：只有 status == "TRIGGERED" 才是"被打保本出场"；
+# 没有 status 的 breakeven_stop 是"把止损移到保本"这个动作本身（不是出场腿）
+_TEACHER_BE_TYPES = {"breakeven_stop"}
+# 只占仓位、不产生 gross（仓位已分配但还没平）
+_TEACHER_PENDING_TYPES = {"remaining_pending"}
+# 触发标记（记录"止损被触发"这一事实，但不是出场腿，不重复计盈亏）
+_TEACHER_TRIGGER_TYPES = {"sl_triggered"}
+# 非出场事件（建仓腿 / 盘前标记）
+_TEACHER_ENTRY_TYPES = {"entry", "add_position", "pre"}
+
+
+def _teacher_entry_basis(t: dict) -> Optional[float]:
+    """入场价基准（多腿建仓用加权均价，单腿用 fill_price）"""
+    res = t.get("result") or {}
+    avg = res.get("avg_entry")
+    if isinstance(avg, (int, float)):
+        return float(avg)
+    evs = t.get("events") or []
+    legs = [
+        (e.get("px"), e.get("qty_pct"))
+        for e in evs
+        if e.get("type") in ("entry", "add_position") and isinstance(e.get("px"), (int, float))
+    ]
+    if len(legs) > 1:  # 多腿 → 按 qty_pct 加权
+        num = sum(px * (q if isinstance(q, (int, float)) else 0) for px, q in legs)
+        den = sum(q if isinstance(q, (int, float)) else 0 for _px, q in legs)
+        if den:
+            return num / den
+    entry = t.get("fill_price") or t.get("entry_zone")
+    return float(entry) if isinstance(entry, (int, float)) else None
+
+
+def _teacher_contracts(t: dict, entry_basis: float) -> int:
+    """仓位张数：优先用 size_contracts（与名义推导接近时才采信），否则按名义推导"""
+    notional = t.get("notional_usd")
+    if not isinstance(notional, (int, float)):
+        notional = 5000
+    derived = round(notional / (entry_basis * _TEACHER_QUANT_MULT))
+    size = t.get("size_contracts")
+    if isinstance(size, (int, float)) and size > 0:
+        # size_contracts 语义历史上不统一（#13=总仓 614、#10=单腿 312），
+        # 只在与名义推导接近时采信，否则以名义推导为准
+        if abs(size - derived) <= max(2, derived * 0.05):
+            return int(size)
+    return derived
+
 
 def _compute_trade_net_usd(t: dict) -> Optional[float]:
     """
     根据 trade 完整 events 数组算 net_usd：
-      contracts = round(notional / (entry * QUANT_MULT))
-      partial gross = (tp1_px - entry) × partial_contracts × QUANT_MULT
-      remaining gross = (remaining_px - entry) × remaining_contracts × QUANT_MULT
+      contracts = round(notional / (entry_basis * QUANT_MULT))
+      partial gross = (tp1_px - entry_basis) × partial_contracts × QUANT_MULT
+      remaining gross = (remaining_px - entry_basis) × remaining_contracts × QUANT_MULT
       fee = 4.85U（全程一笔，无论 tp1 partial + remaining close）
       net = total_gross - fee
 
     长/短方向：用 trade.side。
-    return None 当 events 不完整（缺 entry 或两个减仓事件都没）。
+
+    ★ 2026-10-28 修的四个语义坑（全部来自真实老师单，详见 skill btc-position-ops）：
+      1. 多腿建仓（add_position）：entry_basis 必须是加权均价，不能用首腿 fill_price
+      2. NOT_TRIGGERED 占位事件（目标价从未触达）：**不计 gross、不占仓位**
+      3. breakeven_stop 两种语义：无 status = "把止损移到保本"（不是出场腿）；
+         status=TRIGGERED = "真的被打保本出场"
+      4. **缺 qty_pct 的出场腿不能 fallback 成 100%**（旧代码用 100-consumed_pct，
+         当它是第一条出场腿时 → 整段仓位算成 100%，净利虚高十几 U）
+         正确口径：用「100% - 其余明确腿之和」反推；反推不出来 → 返回 None，不猜
+    return None 当 events 不完整（缺 entry / 无法确定各腿比例 / 没有出场腿）。
     """
     side = t.get("side")
-    entry = t.get("fill_price") or t.get("entry_zone")
-    notional = t.get("notional_usd") or 5000
-    if not entry or not side or side not in ("long", "short"):
+    if side not in ("long", "short"):
         return None
-    # 区间成交（如 '82400-82600'）或非数值 → 自动算不出来，跳过返回 None 由用户手填
-    if not isinstance(entry, (int, float)):
-        return None
-    if not isinstance(notional, (int, float)):
+    entry_basis = _teacher_entry_basis(t)
+    if entry_basis is None:
+        # 区间成交（如 '82400-82600'）或非数值 → 自动算不出来，跳过返回 None 由用户手填
         return None
 
     evs = t.get("events") or []
     if not evs:
         return None
 
-    contracts = round(notional / (entry * _TEACHER_QUANT_MULT))
+    contracts = _teacher_contracts(t, entry_basis)
 
-    # 平仓事件类型（2026-10-15 起包含历史别名：sl_breakeven = remaining_close, tp2_full = remaining_close）
-    _CLOSE_TYPES = {"tp1_partial", "remaining_close", "remaining_pending", "sl_breakeven", "tp2_full"}
-
-    total_gross = 0.0
-    consumed_pct = 0
+    # ── 第一遍：分类事件 + 收集各腿比例 ──────────────────────────────
+    legs = []          # {px, qty, kind}
+    explicit_sum = 0   # 已明确的**出场腿**比例之和（pending 不计入——它是同一批仓位的占位）
+    missing = []       # 缺 qty_pct 的出场腿
     for ev in evs:
         et = ev.get("type")
         ep = ev.get("px")
         qp = ev.get("qty_pct")
-        if et == "entry":
+        if et in _TEACHER_ENTRY_TYPES:
             continue
-        if ep is None:
+        if et in _TEACHER_TRIGGER_TYPES:
+            continue          # 触发标记，不是出场腿
+        if ev.get("status") == "NOT_TRIGGERED":
+            continue          # 目标价从未触达 → 不计 gross、不占仓位
+        if ep is None or not isinstance(ep, (int, float)):
             continue
-        # 旧数据可能没 qty_pct，按 consumed_pct 推断
-        if qp is None:
-            qp = 100 - consumed_pct
-        qty_pct = int(qp)
-        # 防御：单仓位合约只能分一次。同一 type 重复触发只算第一条
-        # 比如 remaining_pending + remaining_close 都是 same 仓位 (30%)，
-        # 那只看首次出现
-        if et in _CLOSE_TYPES:
-            ev_contracts = contracts * qty_pct / 100.0
-            if side == "long":
-                leg_gross = (ep - entry) * ev_contracts * _TEACHER_QUANT_MULT
-            else:
-                leg_gross = (entry - ep) * ev_contracts * _TEACHER_QUANT_MULT
-            # 防 trade 7 模式：remaining_pending 不计 gross（持仓还没出，仅注记 pending → 仓位已被 tp1 partial 扣完）
-            if et == "remaining_pending":
-                consumed_pct += qty_pct  # 仅更新"已被分配"，不算 gross
+        if et in _TEACHER_BE_TYPES:
+            # breakeven_stop：status=TRIGGERED → 真的被打保本出场；
+            # 无 status → 只是"把止损移到保本"这个动作，不吃仓位
+            if ev.get("status") != "TRIGGERED":
                 continue
-            total_gross += leg_gross
-            consumed_pct += qty_pct
+            kind = "close"
+        elif et in _TEACHER_PENDING_TYPES:
+            # remaining_pending：仓位已分配但还没平 → 只占仓位，不产生 gross
+            kind = "pending"
+        elif et in _TEACHER_CLOSE_TYPES:
+            kind = "close"
+        else:
+            continue
+        leg_qty = int(qp) if isinstance(qp, (int, float)) else None
+        if leg_qty is None:
+            missing.append(len(legs))
+        elif kind == "close":
+            explicit_sum += leg_qty
+        legs.append({"px": ep, "qty": leg_qty, "kind": kind})
+
+    if not legs:
+        return None
+
+    # ── 第二遍：补齐缺 qty_pct 的腿 ────────────────────────────────
+    if missing:
+        if len(missing) > 1:
+            return None      # 多条腿都缺比例 → 无法唯一反推，不猜
+        rest = 100 - explicit_sum
+        if rest <= 0:
+            return None      # 明确腿已超 100% → 数据自相矛盾，不猜
+        legs[missing[0]]["qty"] = rest
+    elif explicit_sum > 100:
+        # 出场腿比例加起来超 100% → 数据自相矛盾（如 tp2_partial 写成 50% 但实际是 25%）
+        return None          # 不猜，交给人修数据
+
+    # ── 第三遍：算 gross ───────────────────────────────────────────
+    total_gross = 0.0
+    consumed_pct = 0
+    for leg in legs:
+        qty_pct = leg["qty"]
+        if leg["kind"] == "pending":
+            consumed_pct += qty_pct   # 只占仓位，不产生 gross
+            continue
+        ev_contracts = contracts * qty_pct / 100.0
+        if side == "long":
+            leg_gross = (leg["px"] - entry_basis) * ev_contracts * _TEACHER_QUANT_MULT
+        else:
+            leg_gross = (entry_basis - leg["px"]) * ev_contracts * _TEACHER_QUANT_MULT
+        total_gross += leg_gross
+        consumed_pct += qty_pct
 
     if consumed_pct == 0:
         return None
