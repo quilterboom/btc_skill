@@ -1394,13 +1394,15 @@
 .dt-modal-close:hover { background: var(--tc-bg-hover); }
 /* 弹窗内的列表不沿用页面流的 520px 固定高度 —— 浮层 86vh 会被撑爆
    （页面流里 520px 是为了两栏严格等高对齐；浮层里两栏同排，
-   用 calc 让列表吃掉浮层剩余高度，且两栏共用同一高度基准） */
-.dt-modal-bd .panel .trade-list {
-  height: calc(86vh - 260px);
-  min-height: 320px;
-  max-height: 620px;
+   用 calc 让列表吃掉浮层剩余高度，且两栏共用同一高度基准）
+   ★ 特异性必须压过 `.tc .panel .trade-list`（0,3,0），用 0,4,0 + !important
+     压制历史遗留规则 —— 实测 list_h=520 > box_h=496 撑破浮层才加的。 */
+.dt-modal .dt-modal-bd .panel .trade-list {
+  height: calc(86vh - 280px) !important;
+  min-height: 300px !important;
+  max-height: 620px !important;
 }
-.dt-modal-bd .split-grid { align-items: start; }
+.dt-modal .dt-modal-bd .split-grid { align-items: start; }
 /* 卡片可点击提示 */
 .data-card.dt-clickable { cursor: pointer; position: relative; }
 .data-card.dt-clickable:hover { border-color: var(--tc-blue); }
