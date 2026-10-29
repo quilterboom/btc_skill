@@ -458,7 +458,16 @@ def _detect_15m_pattern(contract: str = "BTC_USDT", lookback: int = 5):
         return None
     # 取最近 lookback 根中"形态 K 线 + 后续确认 K 线都齐全"的最后一根
     last_valid_i = len(raw) - 3  # 至少需要 i, i+1, i+2
-    for i in range(last_valid_i, -1, -1):
+    # ★ 2026-10-30 修（陈旧形态触发 bug）：原来 `range(last_valid_i, -1, -1)` 会
+    #   把整个 50 根窗口（12.5 小时）全部扫完，只在"最近完全没有形态"时才 fallback
+    #   到十几小时前的旧形态 bar → 拿旧形态当新信号开仓。
+    #   实测 10-29 04:00 / 05:15 两笔 journal 的形态 bar 都是 10-28 17:30 的锤子
+    #   （形态年龄 10.5 / 11.8 小时），两笔合计 -37.35U。
+    #   同一根旧形态还能被反复触发：10-24 05:00 那根触发 4 次、10-28 17:30 触发 2 次。
+    #   现在按 lookback 收口——形态 bar 必须落在最近 lookback 根内（与 10-09 回测
+    #   "逐 bar 向前扫描、每根形态只算一次" 的口径一致）。
+    first_i = max(0, len(raw) - lookback)
+    for i in range(last_valid_i, first_i - 1, -1):
         bar = raw[i]
         ts_i, o_i, h_i, l_i, c_i = int(bar[0]), float(bar[1]), float(bar[2]), float(bar[3]), float(bar[4])
         # 流星线 + 连续 2 阴线
