@@ -64,8 +64,20 @@ def scan_patterns(rows_15m: list, start: int, end: int) -> list[dict]:
         if not (is_ss or is_hm):
             continue
         nxt = rows_15m[i + 1]
-        # 后根确认: 流星→后根阴, 锤→后根阳
-        confirmed = (is_ss and nxt[4] < nxt[1]) or (is_hm and nxt[4] > nxt[1])
+        # ★ 2026-10-30 修（口径与生产不一致）：报告原来对流星只要求「后根1 阴」，
+        #   生产 scan.py::_detect_15m_pattern 要求「后根1 阴 + 后根2 阴 + 后根2.close < 后根1.close」
+        #   （连续 2 阴线）。口径不一致 → 报告报出的"理论可触发"笔数虚高，
+        #   实测 10-29 的 19:45 流星：后根2 是阳线，生产根本不会触发，报告却算进 3 笔。
+        #   现在与生产口径对齐（见 references/2026-10-30-15m-pattern-stale-trigger-bug.md）。
+        if is_ss:
+            # 流星: 连续 2 阴线且后根2 收盘 < 后根1 收盘
+            if i + 2 >= len(rows_15m):
+                continue
+            nxt2 = rows_15m[i + 2]
+            confirmed = (nxt[4] < nxt[1] and nxt2[4] < nxt2[1] and nxt2[4] < nxt[4])
+        else:
+            # 锤: 后根阳线
+            confirmed = nxt[4] > nxt[1]
         if not confirmed:
             continue
         try:
