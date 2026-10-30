@@ -48,12 +48,23 @@ function check(name, cond, extra) {
     tp ? `len=${tp.innerHTML.length}` : "未找到");
   check("#teacher-entry 有内容", te && te.innerHTML.length > 100,
     te ? `len=${te.innerHTML.length}` : "未找到");
-  check("#teacher-pnl 显示累计净利", /310\.29/.test(tp.innerHTML), tp.innerHTML.slice(0, 200));
-  check("#teacher-pnl 显示胜率", /86\.7/.test(tp.innerHTML));
+  // ★ 2026-10-30：不写死数字（老师单会变，10-30 结算 #16 后 310.29→329.13），
+  //   改成跟 /api/teacher/analysis 实际返回值比对 —— 数字变了断言自动跟着变，
+  //   真正出错（渲染没跟上 API）才会失败。
+  const taApi = await fetch(BASE + "/api/teacher/analysis").then(r => r.json());
+  const taSum = taApi.summary || {};
+  const taNetStr = (taSum.net_usd >= 0 ? "+" : "") + taSum.net_usd.toFixed(2);
+  check("#teacher-pnl 显示累计净利（与 API 一致）",
+    tp.innerHTML.includes(taNetStr), `期望含 ${taNetStr}`);
+  check("#teacher-pnl 显示胜率（与 API 一致）",
+    tp.innerHTML.includes(String(taSum.win_rate_pct)),
+    `期望含 ${taSum.win_rate_pct}`);
   check("#teacher-pnl 出场模式分布存在", /TP1/.test(tp.innerHTML));
   check("#teacher-pnl 每笔净利柱存在", (tp.querySelectorAll(".pnl-bar-day").length >= 10),
     `bars=${tp.querySelectorAll(".pnl-bar-day").length}`);
-  check("#teacher-entry 显示入场位置", /42/.test(te.innerHTML));
+  check("#teacher-entry 显示入场位置（与 API 一致）",
+    te.innerHTML.includes(String((taApi.profile || {}).range_pos_pct)),
+    `期望含 ${(taApi.profile || {}).range_pos_pct}`);
   check("#teacher-entry 显示顺势胜率", /100/.test(te.innerHTML));
   check("#teacher-entry 逐笔明细表有行", te.querySelectorAll("tbody tr").length >= 10,
     `rows=${te.querySelectorAll("tbody tr").length}`);
@@ -80,6 +91,8 @@ function check(name, cond, extra) {
     q("#dt-modal-title").textContent);
   check("弹窗内含老师直播单面板", !!q("#dt-modal-bd #panel-teacher"));
   check("弹窗内含策略结算面板", !!q("#dt-modal-bd #panel-settle"));
+  // ★ 2026-10-30 数据源隔离：老师单卡 → 只显示老师面板
+  check("老师单卡 → data-view=teacher", modal.dataset.view === "teacher", modal.dataset.view);
 
   // 点遮罩关闭
   modal.click();
@@ -88,7 +101,10 @@ function check(name, cond, extra) {
   // Esc 关闭
   q("#card-edge").click();
   check("点 Edge Score 卡 → 弹窗打开", modal.classList.contains("open"));
-  check("弹窗标题 = 策略结算明细", q("#dt-modal-title").textContent === "策略结算明细");
+  check("弹窗标题 = 平台策略单交易明细", q("#dt-modal-title").textContent === "平台策略单交易明细",
+    q("#dt-modal-title").textContent);
+  // ★ 2026-10-30 数据源隔离：系统策略卡 → 只显示策略面板
+  check("Edge Score 卡 → data-view=settle", modal.dataset.view === "settle", modal.dataset.view);
   dom.window.document.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
   check("Esc → 弹窗关闭", !modal.classList.contains("open"));
 
@@ -96,6 +112,24 @@ function check(name, cond, extra) {
   q("#nav-trades").click();
   check("侧栏「交易明细」→ 弹窗打开", modal.classList.contains("open"));
   check("弹窗标题 = 交易明细", q("#dt-modal-title").textContent === "交易明细");
+  check("侧栏 → data-view=both", modal.dataset.view === "both", modal.dataset.view);
+
+  console.log("\n── ②b 数据源隔离 CSS 规则 ──");
+  check("CSS 有 teacher→隐藏策略面板规则",
+    /\.dt-modal\[data-view="teacher"\]\s*#panel-settle\s*\{\s*display:\s*none/.test(html));
+  check("CSS 有 settle→隐藏老师面板规则",
+    /\.dt-modal\[data-view="settle"\]\s*#panel-teacher\s*\{\s*display:\s*none/.test(html));
+  check("CSS 单面板时网格退化 1 列",
+    /\[data-view="teacher"\]\s*#sec-trades-grid[\s\S]{0,120}grid-template-columns:\s*1fr/.test(html));
+  check("平台策略单面板汇总行 5 个指标齐全",
+    !!q("#settle-stat-total") && !!q("#settle-stat-settled") && !!q("#settle-stat-pending")
+    && !!q("#settle-stat-net") && !!q("#settle-stat-winrate"));
+  check("平台策略单面板标题 = 平台策略单",
+    q("#settle-title").textContent === "平台策略单", q("#settle-title").textContent);
+  check("存在数据存疑角标元素", !!q("#settle-suspect-note"));
+  check("源码含 suspect 角标渲染", /tc-suspect/.test(html));
+  check("openDtModal 已改签名（第一参是 view）",
+    /function openDtModal\(view, title, sub\)/.test(html));
 
   console.log("\n── ③ 刷新按钮不旋转 ──");
   const css = html;
@@ -105,7 +139,9 @@ function check(name, cond, extra) {
   check("ma-refresh 按钮存在", !!q("#ma-refresh"));
 
   console.log("\n── ④ 行情剧震事件触发 ──");
-  const src = fs.readFileSync("/root/.hermes/cache/scratch/idx_script_0.js", "utf8");
+  // ★ 2026-10-30：直接从 index.html 里抽 script 段（原来读 /root/.hermes/cache/scratch/
+  //   idx_script_0.js —— 那是临时目录，scratch 清理后测试就崩，自包含才可靠）
+  const src = (html.match(/<script>([\s\S]*?)<\/script>/) || [, ""])[1];
   check("checkShockTrigger 函数已定义", /function checkShockTrigger/.test(src));
   check("剧震轮询 setInterval 已接", /setInterval\(checkShockTrigger/.test(src));
   check("启动时立即调用一次", /^\s*checkShockTrigger\(\);/m.test(src));
