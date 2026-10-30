@@ -704,9 +704,12 @@
       grid-template-columns: 1fr 1fr 1fr;
     }
     @media (max-width: 900px) { .data-grid { grid-template-columns: 1fr; } }
-    /* 训练数据分析只有 2 张卡（训练 API 不给 ES/P&L/错误）→ 2 列铺满，不留空位 */
-    #sec-train-analysis.data-grid { grid-template-columns: 1fr 1fr; }
-    @media (max-width: 900px) { #sec-train-analysis.data-grid { grid-template-columns: 1fr; } }
+    /* 训练数据分析只有 2 张卡（训练 API 不给 ES/P&L/错误）→ 2 列铺满，不留空位
+       ★ minmax(0, 1fr) 不是 1fr：1fr 的最小值 = auto = min-content，
+         里面的宽表格（recent-table 7 列）会把 grid 列撑爆 → 页面横向溢出。
+         实测 docW 1265 / bodyW 1312，元凶 data-card 541px×2 + gap > 可用宽。 */
+    #sec-train-analysis.data-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+    @media (max-width: 900px) { #sec-train-analysis.data-grid { grid-template-columns: minmax(0, 1fr); } }
     .data-card {
       background: #fff; border: 1px solid var(--border); border-radius: 10px;
       padding: 18px 20px; display: flex; flex-direction: column; min-height: 0;
@@ -832,20 +835,24 @@
        现在只做静态禁用态 —— 文字改「拉取中…」+ 灰化 + 禁点，不再转。 */
     .btn-tiny.spinning { pointer-events: none; opacity: 0.55; cursor: wait; }
 
-    /* 策略-效果矩阵（训练版）—— 1 行 = 1 策略，列：源 / 笔数 / 净利 / 胜率 / PF / DD */
-    .smx-table { width: 100%; border-collapse: collapse; font-size: 12px; }
-    .smx-table th, .smx-table td { padding: 5px 8px; text-align: right; border-bottom: 1px solid var(--border); }
+    /* 策略-效果矩阵（训练版）—— 1 行 = 1 策略，列：源 / 笔数 / 净利 / 胜率 / PF / DD
+       table-layout:fixed 让表格不靠内容 min-content 撑开容器（配合 minmax(0,1fr)） */
+    .smx-table { width: 100%; table-layout: fixed; border-collapse: collapse; font-size: 12px; }
+    .smx-table th, .smx-table td { padding: 5px 8px; text-align: right; border-bottom: 1px solid var(--border); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .smx-table th { font-weight: 600; color: var(--muted); font-size: 10.5px; }
-    .smx-table th:first-child, .smx-table td:first-child { text-align: left; }
+    .smx-table th:first-child, .smx-table td:first-child { text-align: left; width: 32%; }
     .smx-table td.num { font-variant-numeric: tabular-nums; }
     .smx-table tr.bad { background: rgba(239, 68, 68, 0.05); }
     .smx-table tr.good { background: rgba(16, 185, 129, 0.05); }
     .smx-table .src { font-weight: 600; }
     .smx-foot { font-size: 10.5px; color: var(--muted); margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--border); }
 
-    /* 最近 N 笔训练明细 */
-    .recent-table { width: 100%; border-collapse: collapse; font-size: 12px; }
-    .recent-table th, .recent-table td { padding: 4px 6px; text-align: right; border-bottom: 1px solid var(--border); }
+    /* 最近 N 笔训练明细
+       table-layout:fixed + 首列留宽 + 省略号：7 列表格不撑破 grid 列，
+       长时间戳/信号源名截断成省略号而不是横向溢出 */
+    .recent-table { width: 100%; table-layout: fixed; border-collapse: collapse; font-size: 12px; }
+    .recent-table th, .recent-table td { padding: 4px 6px; text-align: right; border-bottom: 1px solid var(--border); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .recent-table th:first-child, .recent-table td:first-child { text-align: left; width: 26%; }
     .recent-table th { font-weight: 600; color: var(--muted); font-size: 10.5px; }
     .recent-table th:first-child, .recent-table td:first-child { text-align: left; }
     .recent-table td.num { font-variant-numeric: tabular-nums; }
