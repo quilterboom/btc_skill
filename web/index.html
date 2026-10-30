@@ -1403,6 +1403,21 @@
   max-height: 620px !important;
 }
 .dt-modal .dt-modal-bd .split-grid { align-items: start; }
+/* ★ 2026-10-30 数据源隔离：一张卡只展示自己来源的数据
+   —— 老师单卡 → 只显示老师直播单面板；系统策略卡 → 只显示平台策略单面板。
+   用弹窗容器上的 data-view 驱动 CSS（不用 inline style 互相覆盖）。
+   单面板时网格退化成 1 列，让表格占满浮层宽度。 */
+.dt-modal[data-view="teacher"] #panel-settle { display: none; }
+.dt-modal[data-view="settle"] #panel-teacher { display: none; }
+.dt-modal[data-view="teacher"] #sec-trades-grid,
+.dt-modal[data-view="settle"] #sec-trades-grid { grid-template-columns: 1fr; }
+/* 数据存疑角标（2026-10-30）：重复单 / 出场数据被重写的记录仍展示，但不进统计 */
+.tc-suspect {
+  display: inline-block; font-size: 10px; line-height: 1.4;
+  padding: 1px 5px; border-radius: 4px; margin-left: 4px;
+  background: var(--amber-bg, #fffbeb); color: var(--amber, #b45309);
+  border: 1px solid var(--amber-border, #fde68a); cursor: help;
+}
 /* 卡片可点击提示 */
 .data-card.dt-clickable { cursor: pointer; position: relative; }
 .data-card.dt-clickable:hover { border-color: var(--tc-blue); }
@@ -1869,10 +1884,10 @@
       </div>
     </div>
 
-    <!-- 右：结算明细 -->
+    <!-- 右：平台策略单（2026-10-30：「结算明细」→「平台策略单」，名词性命名） -->
     <div class="panel" id="panel-settle">
       <div class="panel-hd">
-        <h3><span id="settle-title">结算明细</span><span class="meta" id="settle-filter-note"></span></h3>
+        <h3><span id="settle-title">平台策略单</span><span class="meta" id="settle-filter-note"></span></h3>
         <div class="panel-actions">
           <label class="meta" style="cursor:pointer">
             <input type="checkbox" id="settle-include-test" style="vertical-align:middle"> 含测试
@@ -1884,9 +1899,15 @@
           </select>
         </div>
       </div>
+      <!-- 2026-10-30：汇总行与老师面板同格式（总单数/已结算/持仓中/累计净利/胜率）
+           数据源 = /api/settlements 的 summary（与下方列表同源同口径） -->
       <div class="panel-stats">
-        <span><b id="settle-page-info">第 1 页</b></span>
-        <span><b id="settle-summary">—</b></span>
+        <span><b id="settle-stat-total">—</b> 总单数</span>
+        <span><b id="settle-stat-settled">—</b> 已结算</span>
+        <span><b id="settle-stat-pending">—</b> 持仓中</span>
+        <span>累计净利 <b id="settle-stat-net" class="pos">—</b></span>
+        <span>胜率 <b id="settle-stat-winrate">—</b></span>
+        <span class="meta" id="settle-suspect-note" style="display:none"></span>
       </div>
       <!-- 2026-10-18 redesign: settlement cards (replaces bare HTML table) -->
       <div id="settle-toolbar" class="trade-toolbar">
@@ -2692,19 +2713,31 @@ function renderTeacherEntry(d) {
 
 // ─────────────────────────────────────────────────────────────
 // 悬浮列表框（2026-10-28）：交易明细从常驻区块改成点卡片弹出
+// ★ 2026-10-30 数据源隔离（liusir）：
+//   一张卡只展示自己来源的数据 —— 老师单卡 → 只取老师单；
+//   系统策略卡 → 只取系统策略。两侧各自独立取数 + 各自统计，
+//   不共用一个混合端点（skill：隔离在「取数」层做，不在渲染层 filter）。
 // ─────────────────────────────────────────────────────────────
-function openDtModal(title, sub) {
+function openDtModal(view, title, sub) {
   const m = document.getElementById("dt-modal");
   if (!m) return;
   const t = document.getElementById("dt-modal-title");
   const s = document.getElementById("dt-modal-sub");
   if (t) t.textContent = title || "交易明细";
   if (s) s.textContent = sub || "";
+  // data-view 驱动 CSS：teacher → 只显示老师面板；settle → 只显示策略面板
+  m.dataset.view = view || "both";
   m.classList.add("open");
   document.body.style.overflow = "hidden";
-  // 弹窗里的列表需要数据：老师单 / 结算明细各拉一次
-  if (typeof loadTeacher === "function") loadTeacher();
-  if (typeof fetchSettlements === "function") fetchSettlements();
+  // ★ 只拉当前视图需要的那一份数据（取数层隔离）
+  if (view === "teacher") {
+    if (typeof loadTeacher === "function") loadTeacher();
+  } else if (view === "settle") {
+    if (typeof fetchSettlements === "function") fetchSettlements();
+  } else {
+    if (typeof loadTeacher === "function") loadTeacher();
+    if (typeof fetchSettlements === "function") fetchSettlements();
+  }
 }
 
 function closeDtModal() {
@@ -2725,23 +2758,24 @@ function closeDtModal() {
   if (close) close.addEventListener("click", closeDtModal);
   document.addEventListener("keydown", e => { if (e.key === "Escape") closeDtModal(); });
 
-  // 侧栏「交易明细」→ 弹窗
+  // 侧栏「交易明细」→ 弹窗（两个来源都要看 → view=both）
   const navTrades = document.getElementById("nav-trades");
   if (navTrades) {
     navTrades.addEventListener("click", e => {
       e.preventDefault();
-      openDtModal("交易明细", "左：老师直播单（手动录入） · 右：策略结算明细（自动）");
+      openDtModal("both", "交易明细", "左：老师直播单（手动录入） · 右：平台策略单（自动结算）");
     });
   }
 
   // 卡片 → 弹窗（对应关系写在 data-dt-open 上）
+  // ★ 2026-10-30：每张卡只展示自己来源的数据
   document.querySelectorAll("[data-dt-open]").forEach(el => {
     el.addEventListener("click", () => {
       const kind = el.dataset.dtOpen;
       if (kind === "teacher") {
-        openDtModal("老师单交易明细", "手动录入 + 自动结算 · 共 " + ((_taData && _taData.summary && _taData.summary.total) || 0) + " 笔");
+        openDtModal("teacher", "老师单交易明细", "手动录入 · 共 " + ((_taData && _taData.summary && _taData.summary.total) || 0) + " 笔");
       } else {
-        openDtModal("策略结算明细", "自动结算 · 生产环境真实成交");
+        openDtModal("settle", "平台策略单交易明细", "自动结算 · 生产环境真实成交");
       }
     });
   });
@@ -3078,12 +3112,17 @@ function renderSettlements(d) {
       const id = r.id || "";
       const idShort = id.length > 28 ? id.slice(0, 28) + "…" : id;
       const reason = r.reason || "";
+      // ★ 2026-10-30：数据存疑角标（重复单 / 出场数据被重写）
+      //   这些单仍展示，但**不计入上方汇总**（重复计数 + 净值虚高）
+      const suspectBadge = r.suspect
+        ? `<span class="tc-suspect" title="${r.suspect_reason || "数据存疑，未计入统计"}">存疑</span>`
+        : "";
 
       return `
         <tr class="tl-row t-${cat}${_expanded.has("st-" + id) ? " open" : ""}" data-cid="st-${id}">
           <td class="tl-time">${fmtTimeShort(r.ts)}</td>
           <td><span class="tc-side ${r.side}">${sideTxt}</span></td>
-          <td><span class="tc-outcome ${outcomeClass}">${outcome}</span></td>
+          <td><span class="tc-outcome ${outcomeClass}">${outcome}</span>${suspectBadge}</td>
           <td class="tl-num" style="text-align:right">${entryTxt}</td>
           <td class="tl-num" style="text-align:right">${exitTxt}</td>
           <td class="tl-move-cell">${moveHtml}</td>
@@ -3109,6 +3148,30 @@ function renderSettlements(d) {
   const settleSum = document.getElementById("settle-summary");
   if (settleSum) settleSum.textContent = `共 ${d.total} 条${filterInfo} · 文件总数 ${d.total_all} 条`;
   _setPager("settle", d.page, d.size, d.total);
+  // ★ 2026-10-30：汇总行（与老师面板同格式），数据源 = summary（与列表同源）
+  const sm = d.summary || {};
+  const setStat = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+  setStat("settle-stat-total", sm.total != null ? sm.total : "—");
+  setStat("settle-stat-settled", sm.settled != null ? sm.settled : "—");
+  setStat("settle-stat-pending", sm.pending != null ? sm.pending : "—");
+  const netEl = document.getElementById("settle-stat-net");
+  if (netEl) {
+    if (sm.net_usd == null) { netEl.textContent = "—"; netEl.className = "pos"; }
+    else {
+      netEl.textContent = (sm.net_usd >= 0 ? "+" : "") + sm.net_usd.toFixed(2) + "U";
+      netEl.className = sm.net_usd >= 0 ? "pos" : "neg";
+    }
+  }
+  setStat("settle-stat-winrate", sm.win_rate || "—");
+  // 数据存疑提示（重复单 / 出场数据被重写 → 展示了但不进统计）
+  // ★ 用独立元素，不用 settle-filter-note（那个被 switchEnv 按环境覆盖）
+  const noteEl = document.getElementById("settle-suspect-note");
+  if (noteEl) {
+    const n = sm.suspect_n || 0;
+    noteEl.textContent = n > 0 ? `${n} 笔数据存疑，未计入统计` : "";
+    noteEl.title = n > 0 ? "重复单（双胞胎）+ 出场价/时间被系统重写的记录，仍展示但不计入汇总" : "";
+    noteEl.style.display = n > 0 ? "" : "none";
+  }
   // 标记主列表已接管，阻止 render() 里的 latest_5 兜底再覆盖
   cards.dataset.ready = "1";
 }
@@ -3350,9 +3413,9 @@ function switchEnv(env) {
   // badge 切换
   document.getElementById("env-badge-prod").classList.toggle("hidden", env !== "prod");
   document.getElementById("env-badge-training").classList.toggle("hidden", env !== "training");
-  // 结算明细标题
+  // 平台策略单标题（2026-10-30：「结算明细」→「平台策略单」）
   document.getElementById("settle-title").textContent =
-    env === "training" ? "训练结算明细" : "结算明细";
+    env === "training" ? "训练平台策略单" : "平台策略单";
   document.getElementById("settle-filter-note").textContent =
     env === "training" ? "" : "（已过滤测试单）";
   // 训练版无 BTC / 胜率字段，但 process 仍有 settler_ok / heartbeat_age_sec

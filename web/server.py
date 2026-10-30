@@ -322,34 +322,22 @@ def _journal_state_training() -> dict:
 
 
 def _winrate() -> dict:
-    """胜率：从 position_events.jsonl + journal 算（dedupe by id，取最新）
+    """胜率：**journal 真相口径**（strategy_truth.py），列表与汇总同源。
 
     ★ 2026-10-26 修：原来用 `category == "profit"` 判赢，但 BE_STOPPED（打保本）
       的净额常常是 **负数**（只够覆盖手续费，实测 5 笔 -0.85/-0.86U），
       却被标成 category=profit 算「赢」→ 胜率虚高 10.7pp（51.1% vs 真实 40.4%）。
       判据改为**净额符号**：net_usd > 0 才算赢，= 0 算保本（不算赢也不算输）。
 
-      同时加一个分代口径：主胜率只算**当前代**（15m 形态信号），
-      旧代（1h 主信号，-95.59U）不再污染当前策略的健康度判断。
+    ★ 2026-10-30 修：**数据源从 events 换成 journal 真相口径**
+      原来读 position_events.jsonl（events 是通知流，可能过期），跟
+      「交易明细」列表（同一屏）口径不一致 → 汇总卡和列表合计对不上。
+      现在两者都走 strategy_truth（同一份真相），必然自洽。
+      同时剔掉：双胞胎重复单 + 出场数据被 risk_guard 重写的 4 笔（净值虚高 208U）。
     """
-    ev = _read_jsonl(DATA_DIR / "position_events.jsonl")
-    # dedupe by id, 取最新一条（ts 最大）
-    by_id: dict[str, dict] = {}
-    for r in ev:
-        rid = r.get("id")
-        ts = r.get("ts", 0)
-        if rid and ts >= by_id.get(rid, {}).get("ts", -1):
-            by_id[rid] = r
+    truth = _strategy_truth()
+    counted = truth["records"]          # 已结算可信记录（净值有值）
 
-    # 2026-10-05：过滤掉测试前缀（TEST-/test-）的事件，不进 winrate 统计
-    # 2026-10-07 liusir 规则：category=skip（MISSED/未进场）也不进 winrate
-    # 2026-10-25：统一走 _is_test_id()（含合成短数字段 id），不再在这里抄一份过滤条件
-    closed = [r for r in by_id.values()
-              if not _is_test_id(r.get("id", ""))
-              and r.get("category") != "skip"]
-
-    # ★ 2026-10-26：赢 = 净额 > 0（不看 category）。
-    #   net_usd 为 None 的（结算失败留空的）不计入分母。
     def _is_win(r: dict) -> bool:
         n = r.get("net_usd")
         return n is not None and n > 0
@@ -358,7 +346,6 @@ def _winrate() -> dict:
         n = r.get("net_usd")
         return n is not None and n < 0
 
-    counted = [r for r in closed if r.get("net_usd") is not None]
     wins = [r for r in counted if _is_win(r)]
     losses = [r for r in counted if _is_loss(r)]
     breakeven = [r for r in counted if r.get("net_usd") == 0]
@@ -371,7 +358,7 @@ def _winrate() -> dict:
 
     # 近 7 天
     week_ago = time.time() - 7 * 86400
-    week = [r for r in counted if r.get("ts", 0) >= week_ago]
+    week = [r for r in counted if (r.get("ts", 0) or 0) >= week_ago]
     week_win = sum(1 for r in week if _is_win(r))
 
     # 累计净盈亏
@@ -389,6 +376,11 @@ def _winrate() -> dict:
         "last_7d": {"total": len(week), "wins": week_win,
                      "winrate_pct": round(week_win / len(week) * 100, 1) if week else None},
         "net_usd_total": round(total_pnl, 2),
+        # ★ 2026-10-30：汇总行要展示的字段（跟交易明细面板同一套口径）
+        "pending": truth["pending"],
+        "total_all": truth["summary"]["total"],
+        "win_rate": f"{win_n}/{total}" if total else "0/0",
+        "suspect_n": len(truth["excluded"]),
         "latest_5": [
             {"id": r.get("id", "")[:35], "outcome": r.get("outcome", "?"),
              "category": r.get("category", "?"), "net_usd": round(r.get("net_usd", 0), 2),
@@ -488,6 +480,47 @@ def _journal_lookup() -> dict:
     return by_id
 
 
+def _strategy_truth(env: str = "prod") -> dict:
+    """平台策略单真相口径（列表 + 汇总同源）。
+
+    ★ 2026-10-30 新增。口径细则见 strategy_truth.py 的模块 docstring。
+    env="prod" 读 /root/data/journal.jsonl
+    env="training" 读 /root/data/training/journal.jsonl
+    """
+    import strategy_truth as _st
+    path = _st.TRAIN_JOURNAL if env == "training" else (_st.DATA_DIR / "journal.jsonl")
+    return _st.strategy_truth(path)
+
+
+def _suspect_records(excluded_ids: dict) -> list:
+    """把被剔除的记录（双胞胎 / 出场数据被重写）从原始账本取回来。
+
+    这些单**要显示在列表里**（用户有权看到它们），只是：
+      - 不进汇总统计
+      - 行上标「数据存疑」角标，鼠标悬停给出原因
+    """
+    if not excluded_ids:
+        return []
+    recs = _read_jsonl(DATA_DIR / "journal.jsonl")
+    return [r for r in recs if (r.get("id") or "") in excluded_ids]
+
+
+def _missed_records() -> list:
+    """未进场（MISSED / 作废）的记录 —— 默认不显示，?include_missed=1 才带出来。"""
+    recs = _read_jsonl(DATA_DIR / "journal.jsonl")
+    out = []
+    for r in recs:
+        if r.get("outcome") in ("MISSED", "NOISE_INVALIDATED", "DUPLICATE_BLOCKED"):
+            out.append(r)
+    return out
+
+
+def _test_records() -> list:
+    """测试/合成 id 的记录 —— 默认不显示，?include_test=1 才带出来。"""
+    recs = _read_jsonl(DATA_DIR / "journal.jsonl")
+    return [r for r in recs if _is_test_id(r.get("id", ""))]
+
+
 def _settlements_api(path: str) -> dict:
     """
     分页结算列表：
@@ -496,6 +529,14 @@ def _settlements_api(path: str) -> dict:
         size: 每页条数（默认 20，最大 100）
         include_test: 0 默认（过滤 TEST- 前缀）；1 显示全部
       返回 {items, total, page, size, has_more, included_test}
+
+    ★ 2026-10-30：**数据源换成 journal 真相口径**（strategy_truth.py）
+      原来列表读 position_events.jsonl（events），跟同页的汇总卡（_winrate）
+      口径不一致 → 同一屏上「列表合计」和「汇总数字」对不上（实测差 271U）。
+      现在列表和汇总**同源同口径**（都出自 strategy_truth），必然自洽。
+
+      被剔除的记录（双胞胎 / 出场数据被重写）**仍然照常出现在列表里**
+      —— 用户要看到它们，只是标一个「数据存疑」角标且不进汇总。
     """
     from urllib.parse import urlparse, parse_qs
     q = parse_qs(urlparse(path).query)
@@ -504,19 +545,25 @@ def _settlements_api(path: str) -> dict:
     include_test = q.get("include_test", ["0"])[0] in ("1", "true", "yes")
     include_missed = q.get("include_missed", ["0"])[0] in ("1", "true", "yes")
 
-    all_recs = _all_settled()
-    total_all = len(all_recs)
+    # ★ 真相口径一次取全（列表 + 汇总共用）
+    truth = _strategy_truth()
+    trusted = truth["records"]
+    excluded_ids = {e["id"]: e["reason"] for e in truth["excluded"]}
+
+    # 「待复核」记录（双胞胎 / 出场被重写）也要显示 —— 从原始账本取回来
+    suspect_recs = _suspect_records(excluded_ids)
+
+    all_recs = list(trusted)
+    if include_missed:
+        all_recs += _missed_records()
+    if include_test:
+        all_recs += _test_records()
+    all_recs += suspect_recs
+
+    total_all = len(trusted) + truth["pending"]
     test_n = sum(1 for r in all_recs if _is_test_id(r.get("id", "")))
 
-    # 默认过滤：去掉 TEST 前缀；2026-10-07 liusir 规则：category=skip（MISSED/未进场）也不算结算
-    if include_test:
-        recs = all_recs
-    else:
-        recs = [r for r in all_recs if not _is_test_id(r.get("id", ""))]
-    if not include_missed:
-        recs = [r for r in recs if r.get("category") != "skip"]
-
-    recs_sorted = sorted(recs, key=lambda r: r.get("ts", 0), reverse=True)
+    recs_sorted = sorted(all_recs, key=lambda r: r.get("ts", 0), reverse=True)
     total = len(recs_sorted)
     start = (page - 1) * size
     end = start + size
@@ -535,6 +582,7 @@ def _settlements_api(path: str) -> dict:
         pos_state = jr.get("pos_state") or ""
         outcome_raw = r.get("outcome", "?")
         label = _outcome_label(outcome_raw, pos_state)
+        suspect = excluded_ids.get(rid)
         items.append({
             "id": rid,
             "side": side,
@@ -548,8 +596,17 @@ def _settlements_api(path: str) -> dict:
             "exit_ts": r.get("exit_ts"),
             "ts": r.get("ts"),
             "reason": r.get("reason", ""),
+            # ★ 2026-10-30：数据存疑标记（双胞胎 / 出场数据被重写）
+            #   前端据此显示角标并说明「未计入统计」
+            "suspect": suspect,
+            "suspect_reason": (
+                "重复单（双胞胎），未计入统计" if suspect == "twin"
+                else "出场价/出场时间被系统重写，净值存疑，未计入统计" if suspect == "rewritten_exit"
+                else ""
+            ),
         })
 
+    s = truth["summary"]
     return {
         "items": items,
         "total": total,
@@ -559,6 +616,18 @@ def _settlements_api(path: str) -> dict:
         "included_test": include_test,
         "filtered_test_n": test_n,
         "total_all": total_all,
+        # ★ 2026-10-30：汇总与列表同源（strategy_truth）
+        "summary": {
+            "total": s["total"],
+            "settled": s["settled"],
+            "pending": s["pending"],
+            "net_usd": s["net_usd"],
+            "win_rate": s["win_rate"],
+            "wins": s["wins"],
+            "losses": s["losses"],
+            "suspect_n": len([e for e in truth["excluded"]]),
+        },
+        "suspect_ids": sorted(excluded_ids.keys()),
     }
 
 
