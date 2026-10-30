@@ -107,7 +107,8 @@ def _canonical_close(sig: Dict, exit_px: float, exit_ts: int) -> Dict:
     cur_sl = float(sig.get("active_sl") or sig.get("sl") or 0)
     be_moved = (bool(sig.get("tp1_hit"))
                 or bool(sig.get("ema_warning_done"))
-                or bool(sig.get("partial_close_done")))
+                or bool(sig.get("partial_close_done"))
+                or bool(sig.get("guard_partial_done")))
     is_be = be_moved and abs(cur_sl - entry) < 1.0
     outcome = "BE_STOPPED" if is_be else "SL_STOPPED"
     category = "profit" if is_be else "loss"
@@ -190,6 +191,14 @@ def _apply_sl(rec: Dict, last: float, now_ts: int) -> Optional[Dict]:
     rec["net_usd"] = res["net_usd"]
     rec["gross_usd"] = res["gross_usd"]
     rec["category"] = res["category"]
+    # ★ 2026-10-30：outcome 必须采用 canonical 判定，不能用上面那个粗略猜测。
+    #   上面只看 tp1_hit，漏了 EMA 预警 / 1h 浮亏减仓 两个保本移动来源，
+    #   会把「保本被打」误写成「止损扫掉」（反之亦然）。
+    #   以 _canonical_close 的 outcome 为准（它按「保本移动过 + 出场价在 entry
+    #   附近」双重确认），跟 category 同源，不会自相矛盾。
+    if res.get("outcome"):
+        rec["outcome"] = res["outcome"]
+        rec["pos_state"] = res.get("pos_state") or rec["outcome"]
     return {"id": rec.get("id"), "outcome": rec["outcome"],
             "net_usd": res["net_usd"], "category": res["category"],
             "exit_ts": now_ts, "ts": int(time.time())}
@@ -206,39 +215,70 @@ def _ticker_last(contract="BTC_USDT") -> Optional[float]:
     return None
 
 
-def _try_partial_close(sig: Dict, last: float, qty_pct: int, reason: str) -> bool:
-    """减仓 qty_pct % 仓位 + 推保本。返回是否成功执行。
+def _try_partial_close(sig: Dict, last: float, qty_pct: int, reason: str,
+                       kind: str = "tp1") -> bool:
+    """减仓 + 推保本。返回是否成功执行。
 
-    简化: 通过 _settle_one 不行 — 这里只做"标记 tp1_hit + 设 active_sl=entry"让 settler 接手平仓。
-    真正的市价减仓由 position_tracker 处理（但要先触发 tp1_hit）。
+    kind="tp1"   价格**到了** tp1 → 真部分止盈（锁利）
+    kind="guard" 价格**反向**走 → 主动防御减仓（锁亏）
 
-    ★ 2026-10-29 修复：risk_guard 的 TP1 分支原来**只改内存状态、从不推卡**。
-      实测 10-22 ~ 10-26 有 6 笔 TP1 命中零卡片（生产 4 + 训练 2），
-      用户完全不知道"已经减仓锁利、止损上移到保本"。
-      根因：settler 下一轮看到 tp1_hit=True 就走「跳过重复 partial」分支，
-      永远不会补推这张卡 → 卡永久丢失。
-      修复：这里直接推 TP1 部分止盈卡（幂等 key {id}:partial:TP1）。
+    ★ 2026-10-30 修复（严重）：两种触发原来共用同一条 TP1 路径。
+      实测训练单 BTC_USDT-1793320220-long（10-30 08:32，做多 @77146.7）：
+        价格1.4 分钟内反向 0.3% 到 76,870（TP1=78,149.6 从未触达），
+        却写 `tp1_hit=True` + `tp1_hit_px=76870`（亏损价），
+        卡片推「🟢 BTC 部分止盈 TP1 ｜ 锁利 ≈ -5.98U」——
+        负数写「锁利」、绿色图标、还谎称 TP1。**做多亏钱却说止盈。**
+      根因 3 层：
+        ① adverse 分支复用 `_try_partial_close` → 无条件 stamp tp1_hit
+        ② `_notify_partial` 文案硬编码「部分止盈 / 锁利 / 🟢」，不看盈亏符号
+        ③ `_close` 的 category 只看「是否推过保本」，net=-22.87 也写 category=profit
+      修：kind 分流字段（guard 走 guard_partial_*，**不碰 tp1_hit**），
+          卡片文案按 pnl 符号分流，category 由 net 符号定。
     """
     side = sig.get("side")
     entry = float(sig.get("entry", 0))
     tp1 = float(sig.get("tp1", 0))
-    if not side or not entry or not tp1:
+    if not side or not entry:
         return False
-    # 标记: tp1_hit (虽然价格未必真到 TP1, 但手动逻辑是"立即推保本"等价于 TP1 减半)
-    sig["tp1_hit"] = True
-    sig["tp1_hit_ts"] = int(time.time())
-    sig["tp1_hit_px"] = round(last, 1)
+    if kind == "tp1" and not tp1:
+        return False
+    now = int(time.time())
+    # 本段卖出张数：原始总量 // PARTS —— 与 position_tracker._close 的
+    # part_size 同口径（qty_pct 参数当前未生效，见文末 D5，先保持记账不变）
+    from position_tracker import PARTS as _PARTS
+    base = int(sig.get("_orig_contracts") or sig.get("contracts") or 0)
+    if base <= 0:
+        return False
+    qty = max(1, base // _PARTS)
+    if not sig.get("_orig_contracts"):
+        sig["_orig_contracts"] = base
+    if kind == "tp1":
+        # 真 TP1：价格到 tp1，这段是**锁利**
+        sig["tp1_hit"] = True
+        sig["tp1_hit_ts"] = now
+        sig["tp1_hit_px"] = round(last, 1)
+        sig["pos_state"] = "TP1_PARTIAL"
+    else:
+        # 主动防御：价格反向，这段是**锁亏**，不是止盈。
+        # 独立字段，绝不写 tp1_hit —— 否则下游把亏损价当止盈价
+        # （_close 会拿 tp1_hit_px 算「止盈腿」、category 会被判成 profit）。
+        sig["guard_partial_done"] = True
+        sig["guard_partial_ts"] = now
+        sig["guard_partial_px"] = round(last, 1)
+        sig["guard_partial_qty"] = qty
+        sig["pos_state"] = "GUARD_PARTIAL"
     sig["active_sl"] = entry    # 推保本
-    sig["pos_state"] = "TP1_PARTIAL"
     sig["partial_exits"] = sig.get("partial_exits", 0) + 1
+    sig["partial_exit_count"] = sig.get("partial_exit_count", 0) + 1
     sig["note"] = (sig.get("note", "") or "") + f" | [risk_guard] {reason} @ {last:.1f}"
-    # ★ 2026-10-29：推 TP1 部分止盈卡（settler 不会补推，见上方说明）
-    _notify_partial_from_record(sig, last)
+    # ★ 2026-10-29：这里必须自己推卡（settler 不会补推，见上方说明）
+    _notify_partial_from_record(sig, last,
+                                label=("TP1" if kind == "tp1" else "GUARD"))
     return True
 
 
-def _notify_partial_from_record(sig: Dict, px: float) -> None:
-    """★ 2026-10-29：risk_guard 触发 TP1 时推部分止盈卡。
+def _notify_partial_from_record(sig: Dict, px: float, label: str = "TP1") -> None:
+    """★ 2026-10-29：risk_guard 触发减仓时推卡（settler 不补推）。
 
     张数口径：本段卖出 = 原始总量 // PARTS（与 position_tracker._close 里
     part_size = contracts_orig // PARTS 一致）。risk_guard 不实际减仓，
@@ -253,11 +293,11 @@ def _notify_partial_from_record(sig: Dict, px: float) -> None:
     try:
         contracts = int(sig.get("contracts") or 0)
         base = int(sig.get("_orig_contracts") or contracts)
-        qty = max(1, base // PARTS)
-        _notify_partial(sig, "TP1", px, contracts or base, int(sig.get("tp1_hit_ts") or time.time()),
-                        qty=qty)
+        qty = int(sig.get("guard_partial_qty") or 0) or max(1, base // PARTS)
+        _ts = int(sig.get("guard_partial_ts") or sig.get("tp1_hit_ts") or time.time())
+        _notify_partial(sig, label, px, contracts or base, _ts, qty=qty)
     except Exception as e:
-        log(f"[risk_guard] TP1 部分止盈卡推送失败 {sig.get('id')}: {e}")
+        log(f"[risk_guard] 部分减仓卡推送失败 {sig.get('id')}: {e}")
 
 
 def _check_one(sig: Dict, last: float, now_ts: int):
@@ -284,20 +324,23 @@ def _check_one(sig: Dict, last: float, now_ts: int):
     # 2) TP1 hit (实时价检测, 加速 settler)
     if TP1_PUSH_BE and not cur_tp1_hit:
         if side == "long" and last >= tp1:
-            _try_partial_close(sig, last, 50, f"tp1_hit @ {last:.1f}")
+            _try_partial_close(sig, last, 50, f"tp1_hit @ {last:.1f}", kind="tp1")
             return "TP1"
         if side == "short" and last <= tp1:
-            _try_partial_close(sig, last, 50, f"tp1_hit @ {last:.1f}")
+            _try_partial_close(sig, last, 50, f"tp1_hit @ {last:.1f}", kind="tp1")
             return "TP1"
 
     # 3) 主动防御: 进场 N 分钟内反向 X%
+    #    ★ 2026-10-30：这条是**亏损方向**的减仓，必须 kind="guard"（锁亏），
+    #      绝不能沿用 TP1 路径 —— 否则亏损单会被写成「部分止盈 TP1」。
     minutes_since_fill = (now_ts - fill_ts) / 60
-    if minutes_since_fill <= ACTIVE_GUARD_MINUTES and not cur_tp1_hit:
+    if minutes_since_fill <= ACTIVE_GUARD_MINUTES and not cur_tp1_hit \
+            and not sig.get("guard_partial_done"):
         if side == "long" and last < entry * (1 - ADVERSE_MOVE_PCT):
-            _try_partial_close(sig, last, 50, f"adverse_long {minutes_since_fill:.1f}min {last:.1f}<entry-{ADVERSE_MOVE_PCT*100:.1f}%")
+            _try_partial_close(sig, last, 50, f"adverse_long {minutes_since_fill:.1f}min {last:.1f}<entry-{ADVERSE_MOVE_PCT*100:.1f}%", kind="guard")
             return "GUARD"
         if side == "short" and last > entry * (1 + ADVERSE_MOVE_PCT):
-            _try_partial_close(sig, last, 50, f"adverse_short {minutes_since_fill:.1f}min {last:.1f}>entry+{ADVERSE_MOVE_PCT*100:.1f}%")
+            _try_partial_close(sig, last, 50, f"adverse_short {minutes_since_fill:.1f}min {last:.1f}>entry+{ADVERSE_MOVE_PCT*100:.1f}%", kind="guard")
             return "GUARD"
 
     return "hold"
@@ -307,10 +350,15 @@ def _check_one(sig: Dict, last: float, now_ts: int):
 def risk_guard_loop():
     log("[risk_guard] 线程启动")
     # ★ 2026-10-25 特征串（journalctl 可见）：证明 canonical 结算新代码已加载。
-    #   注意 log() 只在 isatty 时打 stdout，systemd 下不走 journald；
-    #   run 命令不 daemonize，直接 print 才能进 journalctl 供验证。
-    print("[risk_guard] FEATURE canonical-settle-v2 enabled "
-          "(SL→net_usd/gross_usd/category + outcome event)", flush=True)
+    #   2026-10-30 修：原来用 print() —— systemd `StandardOutput=append:` 下
+    #   print 不落 watch.log（log() 是直接写文件的），导致这个"特征串验证"从没生效过，
+    #   连 10-25 那条都从没出现在日志里。改用 log() 才真进日志。
+    log("[risk_guard] FEATURE canonical-settle-v2 enabled "
+        "(SL→net_usd/gross_usd/category + outcome event)")
+    # ★ 2026-10-30 特征串：证明「主动防御≠TP1」修复已加载
+    #   （guard 走 guard_partial_*、卡片按盈亏符号分流、category 由 net 符号定）
+    log("[risk_guard] FEATURE guard-not-tp1-v1 enabled "
+        "(adverse→guard_partial_*, card wording by pnl sign, category by net sign)")
     try:
         contract = fetch_contract("BTC_USDT")
     except Exception as e:
