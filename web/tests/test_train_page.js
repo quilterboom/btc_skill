@@ -142,6 +142,22 @@ function check(name, ok, extra = "") {
   check("最近 10 笔已填（非加载中）",
     recent && recent.innerHTML.indexOf("加载中") === -1 && recent.innerHTML.length > 50);
 
+  // ★ 训练策略清单走 fetchSettlements 的训练分支（不走 renderTraining），
+  //   单独喂数据验 —— 它是「当前策略」全宽卡的主体
+  const settleData = await fetch(BASE + "/api/settlements/training?page=1&size=20&include_test=0")
+    .then(r => r.json());
+  window.eval(`window.__SETTLE_D = ${JSON.stringify(settleData)};`);
+  try { window.eval("renderTrainingStrategyList(window.__SETTLE_D)"); }
+  catch (e) { check("renderTrainingStrategyList 不抛错", false, e.message); }
+  const stratList = q("#train-strategy-list");
+  check("训练策略清单已填（含表格）",
+    stratList && /<table/.test(stratList.innerHTML) && stratList.innerHTML.indexOf("加载中") === -1,
+    stratList ? `len=${stratList.innerHTML.length}` : "未找到");
+  check("策略清单按信号源聚类（tl-table 结构）",
+    stratList && /class="tl-table"/.test(stratList.innerHTML));
+  check("策略清单含真实信号源名",
+    stratList && /left_side_oversold_bounce|信号源/.test(stratList.innerHTML));
+
   console.log("\n── ④ 死壳字段已删（API 根本不返回这些）──");
   check("train-hb-niter DOM 不存在", !q("#train-hb-niter"));
   check("train-hb-done DOM 不存在", !q("#train-hb-done"));
@@ -171,7 +187,9 @@ function check(name, ok, extra = "") {
   check("CSS 强制训练概览 4 列",
     /#sec-train-overview\.grid\s*\{[^}]*repeat\(4,\s*1fr\)/.test(css));
   check("CSS 训练数据分析 2 列铺满",
-    /#sec-train-analysis\.data-grid\s*\{[^}]*grid-template-columns:\s*1fr 1fr/.test(css));
+    /#sec-train-analysis\.data-grid\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s*minmax\(0,\s*1fr\)/.test(css));
+  check("CSS 用 minmax(0,1fr) 防表格撑爆 grid 列",
+    /grid-template-columns:\s*minmax\(0,\s*1fr\)/.test(css));
   check("CSS 窄屏退化规则存在",
     /@media \(max-width: 1100px\)[^}]*#sec-train-overview/.test(css));
 
