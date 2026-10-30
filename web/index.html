@@ -2115,8 +2115,12 @@ function renderTraining(d) {
   const totalN = st.total ?? 0;
   const settledN = counters.settled ?? 0;
   const pendingN = counters.pending ?? 0;
-  const netUsd = counters.net_usd ?? 0;
+  // ★ net_usd 未就绪时显示「—」而不是 0：0.00U 看着像「没赚没亏」，
+  //   实际是数据没到（服务刚重启/settler 未写）——诚实区分「无数据」和「真 0」
+  const netUsdRaw = counters.net_usd;
+  const netUsd = netUsdRaw ?? 0;
   const netColor = netUsd >= 0 ? "var(--green)" : "var(--red)";
+  const netTxt = netUsdRaw == null ? "—" : (netUsd >= 0 ? "+" : "") + netUsd.toFixed(2) + "U";
 
   // ── ① 训练进程（对应 prod 的「进程状态」卡）──
   let procPill, procMeta;
@@ -2137,8 +2141,8 @@ function renderTraining(d) {
   // ── ② 训练结算（对应 prod 的「胜率」卡：big 大字 + row 键值）──
   const settleBig = document.getElementById("train-settle-big");
   if (settleBig) {
-    settleBig.textContent = (netUsd >= 0 ? "+" : "") + netUsd.toFixed(2) + "U";
-    settleBig.style.color = netColor;
+    settleBig.textContent = netTxt;
+    settleBig.style.color = netUsdRaw == null ? "" : netColor;
   }
   const setTxt = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
   setTxt("train-settle-n", totalN);
@@ -2188,7 +2192,7 @@ function renderTraining(d) {
   // ── ⑤ 当前策略清单（对应 prod 的「当前策略」全宽卡）──
   const sumEl = document.getElementById("train-strategy-summary");
   if (sumEl) {
-    sumEl.innerHTML = `共 <b>${totalN}</b> 单 · 已结算 <b>${settledN}</b> · 待结 <b>${pendingN}</b> · 净利 <b style="color:${netColor}">${netUsd >= 0 ? "+" : ""}${netUsd.toFixed(2)}U</b>`;
+    sumEl.innerHTML = `共 <b>${totalN}</b> 单 · 已结算 <b>${settledN}</b> · 待结 <b>${pendingN}</b> · 净利 <b style="color:${netUsdRaw == null ? "var(--muted)" : netColor}">${netTxt}</b>`;
   }
 
   // ── ⑥ 数据分析（只填训练 API 真返回的两张）──
