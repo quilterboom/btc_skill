@@ -215,6 +215,10 @@ def _settle_one(sig: Dict, bars: List[List]) -> Optional[Dict]:
     #   实现：按 ts 比较 tp1_hit_ts / tp2_hit_ts，只有 ts >= 命中时刻才认为已触发。
     _tp1_hit_ts = int(sig.get("tp1_hit_ts") or 0)
     _tp2_hit_ts = int(sig.get("tp2_hit_ts") or 0)
+    # ★ 2026-10-30：保本移动的时刻不止 tp1_hit_ts —— 主动防御减仓
+    #   （guard_partial_ts）同样会把 active_sl 推到 entry。回放必须在那个
+    #   时刻之后才认新 SL，否则用旧 SL 判定会漏掉保本出场。
+    _guard_ts = int(sig.get("guard_partial_ts") or 0)
     _active_sl_now = float(sig.get("active_sl") or sl)
     _sl_base = float(sig.get("sl") or sl)
 
@@ -222,7 +226,10 @@ def _settle_one(sig: Dict, bars: List[List]) -> Optional[Dict]:
     cur_sl = _sl_base
     cur_tp1_hit = bool(sig.get("tp1_hit")) and (_tp1_hit_ts == 0)
     cur_tp2_hit = bool(sig.get("tp2_hit")) and (_tp2_hit_ts == 0)
-    cur_state = sig.get("pos_state", "OPEN")    # OPEN / TP1_PARTIAL
+    cur_guard = bool(sig.get("guard_partial_done")) and (_guard_ts == 0)
+    if cur_guard:
+        cur_sl = _active_sl_now
+    cur_state = sig.get("pos_state", "OPEN")    # OPEN / TP1_PARTIAL / GUARD_PARTIAL
 
     pending_ts = int(sig["ts"])
 
@@ -255,6 +262,9 @@ def _settle_one(sig: Dict, bars: List[List]) -> Optional[Dict]:
         #   正确：只有 ts >= tp1_hit_ts 才认为 TP1 已发生、SL 已推到保本。
         if _tp1_hit_ts and ts >= _tp1_hit_ts and not cur_tp1_hit:
             cur_tp1_hit = True
+            cur_sl = _active_sl_now
+        if _guard_ts and ts >= _guard_ts and not cur_guard:
+            cur_guard = True
             cur_sl = _active_sl_now
         if _tp2_hit_ts and ts >= _tp2_hit_ts and not cur_tp2_hit:
             cur_tp2_hit = True
@@ -417,7 +427,8 @@ def _settle_one(sig: Dict, bars: List[List]) -> Optional[Dict]:
         if t_sl:
             _be_moved = (cur_tp1_hit
                          or bool(sig.get("ema_warning_done"))
-                         or bool(sig.get("partial_close_done")))
+                         or bool(sig.get("partial_close_done"))
+                         or bool(sig.get("guard_partial_done")))
             _be_at_entry = abs(float(cur_sl) - float(entry)) < 1.0
             _is_be = _be_moved and _be_at_entry
             return _close(sig, "BE_STOPPED" if _is_be else "SL_STOPPED",
@@ -566,7 +577,7 @@ def _close(sig: Dict, outcome: str, exit_px: float, exit_ts: int,
             #     同根影线跌破 BE 止损，但 tp1_hit_ts 是 04:42 → 必抛错）。
             #   正确口径：BE 只需晚于「**最近一次保本移动**」。
             _be_move_ts = _tp1_hit_ts
-            for _k in ("ema_warning_ts", "partial_close_ts"):
+            for _k in ("ema_warning_ts", "partial_close_ts", "guard_partial_ts"):
                 _v = int(sig.get(_k) or 0)
                 if _v > _be_move_ts:
                     _be_move_ts = _v
@@ -592,6 +603,13 @@ def _close(sig: Dict, outcome: str, exit_px: float, exit_ts: int,
     # 预警分支不写 tp1_hit/_orig_contracts（已有此修复），所以这里要单独走一遍
     if sig.get("ema_warning_done") and sig.get("ema_partial_qty"):
         pnl_parts.append((int(sig["ema_partial_qty"]), float(sig["ema_partial_px"])))
+    # ★ 2026-10-30：主动防御减仓腿（risk_guard 的 adverse 分支）。
+    #   它是**锁亏**腿，价格在亏损方向 —— 绝不能写进 tp1_hit_px（那会让
+    #   下游把它当「止盈腿」，category 也会被误判成 profit）。
+    #   独立字段记账，PnL 数值与旧口径一致（旧代码把亏损价塞进 tp1_hit_px，
+    #   账面净值恰好是对的，错的只是标签）。
+    if sig.get("guard_partial_done") and sig.get("guard_partial_qty"):
+        pnl_parts.append((int(sig["guard_partial_qty"]), float(sig["guard_partial_px"])))
 
     # 剩余部分按当前 exit_px 平
     closed_qty = sum(q for q, _ in pnl_parts)
@@ -601,6 +619,17 @@ def _close(sig: Dict, outcome: str, exit_px: float, exit_ts: int,
 
     gross = sum(_pnl_usd(side, entry, px, q) for q, px in pnl_parts)
     net = gross - FEE_USD
+
+    # ★ 2026-10-30 修复（严重）：category 原来由调用方按 outcome 类型给，
+    #   完全不看真实盈亏 → 出现「net_usd=-22.87U 却写 category=profit」
+    #   的自相矛盾记录（实测训练单 BTC_USDT-1793320220-long）。
+    #   下游 backtest_teacher_bias.py 按 category==profit 数赢 → 亏损被数成赢；
+    #   卡片图标也拿 category 取 🟢 → 亏损单显示绿点。
+    #   口径与 web/server.py _winrate 一致（2026-10-26 liusir 定）：
+    #   **net_usd > 0 才是赢**，= 0 算保本，< 0 是亏。
+    #   非盈亏类目（skip = 未进场作废）不动。
+    if category in ("profit", "loss"):
+        category = "profit" if net > 0 else ("loss" if net < 0 else category)
 
     # 2026-10-11 v5 风控（非调参）：单笔亏损深度安全阀
     # 背景: 历史数据最大单笔亏损 -44.85U，接近 50U 本金。无任何风控机制
@@ -644,7 +673,7 @@ def _notify_fill(sig: Dict, fill_px: float, contracts: int, ts: int) -> None:
 
 def _notify_partial(sig: Dict, label: str, px: float, contracts: int, ts: int,
                     qty: Optional[int] = None) -> None:
-    """TP1/TP2 部分止盈推送
+    """TP1/TP2/GUARD 部分减仓推送
 
     ★ 2026-10-29 新增 qty 参数：本段**实际卖出**的张数。
       原来靠 `contracts // PARTS` 反推，两个调用方口径不同：
@@ -653,6 +682,13 @@ def _notify_partial(sig: Dict, label: str, px: float, contracts: int, ts: int,
         · risk_guard TP1 路径：contracts 没减 → 反推 1/3 反而是对的。
       两条路径出来的卡数字对不上 → 同一笔单在两条路径下显示不同张数。
       现在由调用方显式传「实际卖出张数」，公式只在这里一处。
+
+    ★ 2026-10-30 修复（严重）：文案原来**硬编码**「🟢 部分止盈 / 锁利」，
+      完全不看盈亏符号。实测训练单 BTC_USDT-1793320220-long：
+      做多 @77146.7，主动防御在 76870（亏损价）减仓，卡片却推
+      「🟢 BTC 部分止盈 TP1 ｜ 锁利 ≈ -5.98U」——负数写"锁利"、
+      绿色图标、还谎称 TP1（TP1=78149.6 从未触达）。**做多亏钱却说止盈。**
+      修：图标 / 标题 / 动词三分流，全部由 pnl 符号决定，不许自相矛盾。
     """
     # 实际卖出张数：优先用调用方给的 qty；否则按原始总量 // PARTS 兜底
     if qty is None:
@@ -663,15 +699,31 @@ def _notify_partial(sig: Dict, label: str, px: float, contracts: int, ts: int,
     side_cn = "做多" if sig["side"] == "long" else "做空"
     sign = 1 if sig["side"] == "long" else -1
     pnl = sign * (px - entry) * partial_qty * QUANT_MULT
-    new_sl = entry if label == "TP1" else px
-    sl_cn = "BE (开仓价)" if label == "TP1" else f"TP1 {sig['tp1']:,.0f}"
+    # 到底是「止盈」还是「止损」只看这一段的真实盈亏符号
+    is_win = pnl > 0
+    icon = "🟢" if is_win else "🔴"
+    verb = "锁利" if is_win else "锁亏"
+    act = "止盈" if is_win else "止损"
+    # label 是触发来源（TP1 / TP2 / GUARD / PARTIAL_CLOSE），不再冒充盈亏语义
+    src_cn = {"TP1": "TP1 触发", "TP2": "TP2 触发",
+              "GUARD": "主动防御（行情不按预期走）",
+              "PARTIAL_CLOSE": "1h 浮亏主动减仓"}.get(label, label)
+    # ★ 止损移到哪读 sig 的真实字段，不按 label 猜 —— 三条减仓路径
+    #   （TP1 / GUARD / PARTIAL_CLOSE）都是推保本，但旧代码只认 label=="TP1"，
+    #   于是 PARTIAL_CLOSE 卡片写「止损上移到 TP1 xxxxx」（实际推的是 BE）。
+    _sl_val = float(sig.get("active_sl") or 0)
+    to_be = abs(_sl_val - entry) < 1.0
+    new_sl = entry if to_be else (_sl_val or px)
+    sl_cn = "BE (开仓价)" if to_be else f"{new_sl:,.1f}"
+    tail = ("持仓继续监控，按 TP2/TP3 推进" if label in ("TP1", "TP2")
+            else "持仓继续监控，止损已上移到保本")
 
     card = (
-        f"🟢 <b>BTC 部分止盈 {label}</b>\n"
+        f"{icon} <b>BTC 部分{act} · {src_cn}</b>\n"
         f"{side_cn} {contracts} 张入场 @ <b>{entry:,.1f}</b>\n"
-        f"{label} 触发 @ <b>{px:,.1f}</b> ｜ 本段 1/{PARTS} 仓位（{partial_qty} 张）锁利 ≈ <b>{pnl:+.2f}U</b>\n"
+        f"{src_cn} @ <b>{px:,.1f}</b> ｜ 本段 1/{PARTS} 仓位（{partial_qty} 张）{verb} ≈ <b>{pnl:+.2f}U</b>\n"
         f"止损上移到 <b>{sl_cn}</b>\n"
-        f"持仓继续监控，按 TP2/TP3 推进"
+        f"{tail}"
     )
     _push_once(f"{sig.get('id')}:partial:{label}", card)
 
@@ -721,6 +773,18 @@ def _notify_close(sig: Dict, res: Dict) -> None:
         "TIMEOUT": "超时未触发",
         "MISSED":  "24h 未成交"
     }.get(res["outcome"], res["outcome"])
+    # ★ 2026-10-30：BE_STOPPED 的标题原来写死「TP1 后保本被打」，
+    #   但保本可能由**主动防御减仓**推上去的（TP1 从未触发）——
+    #   标题说「TP1 后」就是谎。按真实来源分流。
+    if res["outcome"] == "BE_STOPPED" and not sig.get("tp1_hit"):
+        if sig.get("guard_partial_done"):
+            head = "主动防御减仓后保本被打"
+        elif sig.get("ema_warning_done"):
+            head = "EMA 预警减仓后保本被打"
+        elif sig.get("partial_close_done"):
+            head = "浮亏减仓后保本被打"
+        else:
+            head = "保本被打（未触发 TP1）"
 
     card = (
         f"{icon} <b>BTC 平仓 · {head}</b>\n"
