@@ -42,11 +42,12 @@
   }
   @media (max-width: 900px) { #sec-winrate.grid { grid-template-columns: 1fr; } }
   /* 概览专用 4 列：强制撑满，< 1100px 退 2x2，< 600px 单列 */
-  #sec-overview.grid {
+  #sec-overview.grid,
+  #sec-train-overview.grid {
     grid-template-columns: repeat(4, 1fr);
   }
-  @media (max-width: 1100px) { #sec-overview.grid { grid-template-columns: repeat(2, 1fr); } }
-  @media (max-width: 600px)  { #sec-overview.grid { grid-template-columns: 1fr; } }
+  @media (max-width: 1100px) { #sec-overview.grid, #sec-train-overview.grid { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 600px)  { #sec-overview.grid, #sec-train-overview.grid { grid-template-columns: 1fr; } }
   .card {
     background: var(--card);
     border: 1px solid var(--border);
@@ -703,6 +704,9 @@
       grid-template-columns: 1fr 1fr 1fr;
     }
     @media (max-width: 900px) { .data-grid { grid-template-columns: 1fr; } }
+    /* 训练数据分析只有 2 张卡（训练 API 不给 ES/P&L/错误）→ 2 列铺满，不留空位 */
+    #sec-train-analysis.data-grid { grid-template-columns: 1fr 1fr; }
+    @media (max-width: 900px) { #sec-train-analysis.data-grid { grid-template-columns: 1fr; } }
     .data-card {
       background: #fff; border: 1px solid var(--border); border-radius: 10px;
       padding: 18px 20px; display: flex; flex-direction: column; min-height: 0;
@@ -1698,71 +1702,68 @@
     </div>
   </div>
 
-  <!-- 训练版：策略 + 效果双栏（2026-10-18 重设计：聚焦「策略」和「效果」两件事） -->
-  <div class="sec-hd" id="sec-train-strategy" data-env-show="training" style="margin-top:8px">
-    <h2>训练策略</h2><span class="meta">左：策略明细 · 右：效果数据</span>
-  </div>
-  <div class="split-grid" style="margin-top:6px" data-env-show="training">
-    <!-- 左：策略（活跃持仓 + 策略清单） -->
-    <div class="panel" id="panel-train-strategy">
-      <div class="panel-hd">
-        <h3>策略 <span class="meta" id="train-strategy-summary"></span></h3>
-      </div>
-      <div class="trade-list" style="margin-top:6px">
-        <div id="train-strategy-list">加载中…</div>
-      </div>
+  <!-- 训练版：排版与正式环境一致（2026-10-30 liusir 要求）
+       纵向分区 + 网格铺开，与 prod 的 sec-overview / sec-strategy / sec-analysis 同构。
+       ★ 训练环境没有的数据（Edge Score / P&L 日历 / 错误归因）不展示 —— API 不返回这些字段，
+         留着只会永远停在「加载中…」的死壳。判定见 renderTraining() 注释。 -->
+  <div id="sec-train-overview" class="grid" data-env-show="training" style="margin-top:8px">
+    <div class="sec-hd" style="grid-column:1/-1; margin:0"><h2>概览</h2><span class="meta">进程 · 结算 · 行情 · 持仓</span></div>
+
+    <div class="card">
+      <h3>训练进程</h3>
+      <div id="train-proc-pill"></div>
+      <div class="row"><span class="lbl">settler 心跳</span><span class="val" id="train-hb-age">—</span></div>
+      <div class="meta" id="train-hb-meta"></div>
     </div>
 
-    <!-- 右：效果（Edge Score / P&L 日历 / 错误归因） -->
-    <div class="panel" id="panel-train-effect">
-      <div class="panel-hd">
-        <h3>效果 <span class="meta" id="train-effect-meta"></span></h3>
-      </div>
-      <div class="data-grid" style="grid-template-columns: 1fr; gap:10px; margin-top:6px">
-        <div class="data-card">
-          <h3>Edge Score <small>v2</small></h3>
-          <div id="train-edge-score">加载中…</div>
-        </div>
-        <div class="data-card">
-          <h3>P&L 日历 <small>30 天</small></h3>
-          <div id="train-pnl-calendar">加载中…</div>
-        </div>
-        <div class="data-card">
-          <h3>错误归因 <small>近期</small></h3>
-          <div id="train-mistakes">加载中…</div>
-        </div>
-        <div class="data-card">
-          <h3>策略-效果矩阵 <small>按 signal_source 聚合</small></h3>
-          <div id="train-strategy-matrix">加载中…</div>
-        </div>
-        <div class="data-card">
-          <h3>最近 10 笔 <small>训练明细</small></h3>
-          <div id="train-recent-trades">加载中…</div>
-        </div>
-      </div>
+    <div class="card">
+      <h3>训练结算</h3>
+      <div class="big" id="train-settle-big">—</div>
+      <div class="row"><span class="lbl">总单数</span><span class="val" id="train-settle-n">—</span></div>
+      <div class="row"><span class="lbl">已结算</span><span class="val" id="train-settle-settled">—</span></div>
+      <div class="row"><span class="lbl">待结算</span><span class="val" id="train-settle-pending">—</span></div>
+    </div>
+
+    <div class="card">
+      <h3>BTC 现价</h3>
+      <div class="big" id="train-btc-price">—</div>
+      <div class="meta" id="train-btc-meta"></div>
+    </div>
+
+    <div class="card">
+      <h3>当前持仓</h3>
+      <div id="train-active">—</div>
+    </div>
+  </div>
+
+  <!-- 当前策略：训练策略清单（与 prod 的 sec-strategy 同排版） -->
+  <div id="sec-train-strategy" class="grid" style="margin-top:16px" data-env-show="training">
+    <div class="card" style="grid-column: 1 / -1">
+      <h3>当前策略 <span class="meta" id="train-strategy-summary"></span></h3>
+      <div id="train-strategy-list">加载中…</div>
+    </div>
+  </div>
+
+  <!-- 数据分析（与 prod 的 sec-analysis 同排版：data-grid 铺开）
+       ★ 只放训练 API 真返回的两张：strategy_matrix / recent_training_trades -->
+  <div id="sec-train-analysis" class="data-grid" style="margin-top:16px" data-env-show="training">
+    <div class="sec-hd" style="grid-column:1/-1; margin:0"><h2>数据分析</h2><span class="meta">策略-效果矩阵 · 最近 10 笔</span></div>
+    <div class="data-card">
+      <h3>策略-效果矩阵 <small>按信号源聚合</small></h3>
+      <div id="train-strategy-matrix">加载中…</div>
+    </div>
+    <div class="data-card">
+      <h3>最近 10 笔 <small>训练明细</small></h3>
+      <div id="train-recent-trades">加载中…</div>
     </div>
   </div>
 
   <!-- 训练版：辅助分析（默认折叠，降低干扰） -->
   <details class="train-aux" id="train-aux" data-env-show="training" style="margin-top:14px">
-    <summary><span>辅助分析</span><span class="meta">波浪 · settler 心跳 · 训练策略概览</span></summary>
-    <div class="grid" style="margin-top:10px">
-      <div class="card">
-        <h3>训练 settler 心跳</h3>
-        <div class="big" id="train-hb-age">—</div>
-        <div class="row"><span class="lbl">n_iter</span><span class="val" id="train-hb-niter">—</span></div>
-        <div class="row"><span class="lbl">n_done_total</span><span class="val" id="train-hb-done">—</span></div>
-        <div class="row"><span class="lbl">n_still</span><span class="val" id="train-hb-still">—</span></div>
-        <div class="meta" id="train-hb-meta"></div>
-      </div>
-      <div class="card">
-        <h3>训练策略概览</h3>
-        <div id="train-strategy-overview">暂无</div>
-      </div>
-      <div class="card" style="grid-column: 1 / -1">
-        <h3>艾略特波浪分析 <small>swing + 斐波那契，仅供判读参考</small></h3>
-        <div id="train-waves">加载中…</div>
-      </div>
+    <summary><span>辅助分析</span><span class="meta">艾略特波浪</span></summary>
+    <div class="card" style="margin-top:10px">
+      <h3>艾略特波浪分析 <small>swing + 斐波那契，仅供判读参考</small></h3>
+      <div id="train-waves">加载中…</div>
     </div>
   </details>
 
@@ -2092,12 +2093,25 @@ function pillClass(ok, warn) {
 }
 
 function renderTraining(d) {
-  // 训练版（2026-10-18 重设计）：聚焦「策略」+「效果」
-  // 左：策略（活跃持仓 + 策略清单聚类），右：效果（ES / P&L / 错误 / 聪明钱）
-  // settler 心跳 + 概览 + 波浪 挪到辅助折叠区（默认收起，避免视觉噪音）
+  // 训练版排版与正式环境一致（2026-10-30 liusir 要求）：纵向分区 + 网格铺开。
+  // ★ 训练 API 只返回这些字段（curl /api/status/training 实测）：
+  //     process{heartbeat_age_sec, settler_ok} / strategy{active, recent_invalidated, total}
+  //     settler_counters{pending, settled, net_usd} / btc / btc_meta
+  //     strategy_matrix[] / recent_training_trades[] / waves{1d,4h,1h}
+  //   不返回 edge_score / pnl_calendar / mistakes —— 这三张卡在训练环境**不展示**，
+  //   否则永远停在「加载中…」的死壳。同理 train-hb-niter/done/still 三个字段 API 也没有，已删。
   document.getElementById("updated").textContent = "更新时间：" + (d.ts_str || "—") + "  ·  自动每 1s 刷新";
 
   const proc = d.process || {};
+  const st = d.strategy || {};
+  const counters = d.settler_counters || {};
+  const totalN = st.total ?? 0;
+  const settledN = counters.settled ?? 0;
+  const pendingN = counters.pending ?? 0;
+  const netUsd = counters.net_usd ?? 0;
+  const netColor = netUsd >= 0 ? "var(--green)" : "var(--red)";
+
+  // ── ① 训练进程（对应 prod 的「进程状态」卡）──
   let procPill, procMeta;
   if (!proc.settler_ok) {
     procPill = `<span class="pill warn">心跳异常</span>`;
@@ -2106,78 +2120,73 @@ function renderTraining(d) {
     procPill = `<span class="pill ok">训练运行中</span>`;
     procMeta = "settler 正常";
   }
-  // ── 辅助区的 settler 心跳 ──
+  const procPillEl = document.getElementById("train-proc-pill");
+  if (procPillEl) procPillEl.innerHTML = procPill;
   const hbAge = document.getElementById("train-hb-age");
   if (hbAge) hbAge.textContent = proc.heartbeat_age_sec == null ? "—" : fmtAge(proc.heartbeat_age_sec);
   const hbMeta = document.getElementById("train-hb-meta");
-  if (hbMeta) hbMeta.innerHTML = procPill + " · " + procMeta;
+  if (hbMeta) hbMeta.textContent = procMeta;
 
-  // ── 顶部统计（写入 panel-hd 的 meta）──
-  const st = d.strategy || {};
-  const counters = d.settler_counters || {};
-  const totalN = st.total ?? 0;
-  const settledN = counters.settled ?? 0;
-  const pendingN = counters.pending ?? 0;
-  const netUsd = counters.net_usd ?? 0;
-  const netColor = netUsd >= 0 ? "var(--green)" : "var(--red)";
+  // ── ② 训练结算（对应 prod 的「胜率」卡：big 大字 + row 键值）──
+  const settleBig = document.getElementById("train-settle-big");
+  if (settleBig) {
+    settleBig.textContent = (netUsd >= 0 ? "+" : "") + netUsd.toFixed(2) + "U";
+    settleBig.style.color = netColor;
+  }
+  const setTxt = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+  setTxt("train-settle-n", totalN);
+  setTxt("train-settle-settled", settledN);
+  setTxt("train-settle-pending", pendingN);
+
+  // ── ③ BTC 现价（对应 prod 的「BTC 现价」卡）──
+  const curPx = d.btc != null ? d.btc : null;
+  setTxt("train-btc-price", curPx == null ? "—" : "$" + Number(curPx).toLocaleString("en-US", { maximumFractionDigits: 1 }));
+  const bm = d.btc_meta || {};
+  const btcMeta = document.getElementById("train-btc-meta");
+  if (btcMeta) {
+    const chg = bm.change_pct != null ? Number(bm.change_pct).toFixed(2) + "%" : "—";
+    const chgNum = Number(bm.change_pct);
+    const chgColor = isNaN(chgNum) ? "var(--muted)" : (chgNum >= 0 ? "var(--green)" : "var(--red)");
+    btcMeta.innerHTML = `24h <span style="color:${chgColor}">${chg}</span> · 资金费率 ${bm.funding ?? "—"}` +
+      (bm.stale ? ' · <span style="color:var(--amber)">数据可能过期</span>' : "");
+  }
+
+  // ── ④ 当前持仓（对应 prod 的「当前策略」卡）──
+  const a = st.active;
+  const activeEl = document.getElementById("train-active");
+  if (activeEl) {
+    if (a) {
+      const filledBadge = a.filled ? '<span class="pill ok">已成交</span>' : '<span class="pill idle">等待成交</span>';
+      const pnl = a.fill_px && curPx ? ((a.side === "short" ? a.fill_px - curPx : curPx - a.fill_px) / a.fill_px * 100).toFixed(3) : null;
+      const pnlColor = pnl == null ? "var(--muted)" : (parseFloat(pnl) >= 0 ? "var(--green)" : "var(--red)");
+      activeEl.innerHTML = `
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px">
+          <b style="font-size:15px">${a.side === "short" ? "做空" : "做多"} ${a.filled ? "持仓中" : "待入场"}</b>
+          ${filledBadge}
+        </div>
+        <div class="row"><span class="lbl">入场价</span><span class="val"><b>${a.entry?.toLocaleString("en-US", { maximumFractionDigits: 1 })}</b></span></div>
+        ${a.fill_px ? `<div class="row"><span class="lbl">成交价</span><span class="val">${a.fill_px?.toLocaleString("en-US", { maximumFractionDigits: 1 })}</span></div>` : ""}
+        ${a.contracts ? `<div class="row"><span class="lbl">数量</span><span class="val">${a.contracts} 张</span></div>` : ""}
+        <div class="row"><span class="lbl">止损</span><span class="val" style="color:var(--red)">${a.sl?.toLocaleString("en-US", { maximumFractionDigits: 1 })}</span></div>
+        <div class="row"><span class="lbl">止盈一</span><span class="val" style="color:var(--green)">${a.tp1?.toLocaleString("en-US", { maximumFractionDigits: 1 })}</span></div>
+        <div class="row"><span class="lbl">止盈二</span><span class="val" style="color:var(--green)">${a.tp2?.toLocaleString("en-US", { maximumFractionDigits: 1 })}</span></div>
+        <div class="row"><span class="lbl">最新价</span><span class="val" id="training-cur-px">${curPx?.toLocaleString("en-US", { maximumFractionDigits: 1 })}</span></div>
+        ${pnl != null ? `<div class="row"><span class="lbl">浮动盈亏</span><span class="val" style="color:${pnlColor}">${pnl}%</span></div>` : ""}
+        <div class="meta" style="margin-top:6px">${a.verdict || ""}</div>`;
+    } else {
+      activeEl.innerHTML = `<div class="empty">当前无活跃持仓</div>`;
+    }
+  }
+
+  // ── ⑤ 当前策略清单（对应 prod 的「当前策略」全宽卡）──
   const sumEl = document.getElementById("train-strategy-summary");
   if (sumEl) {
     sumEl.innerHTML = `共 <b>${totalN}</b> 单 · 已结算 <b>${settledN}</b> · 待结 <b>${pendingN}</b> · 净利 <b style="color:${netColor}">${netUsd >= 0 ? "+" : ""}${netUsd.toFixed(2)}U</b>`;
   }
 
-  // ── 左栏：活跃持仓 + counters 卡（挪进策略 overview）──
-  const a = st.active;
-  const curPx = d.btc != null ? d.btc : (a ? a.last : null);
-  let activeBlock;
-  if (a) {
-    const filledBadge = a.filled ? '<span class="pill ok">已成交</span>' : '<span class="pill idle">等待成交</span>';
-    const pnl = a.fill_px && curPx ? ((a.side === "short" ? a.fill_px - curPx : curPx - a.fill_px) / a.fill_px * 100).toFixed(3) : null;
-    const pnlColor = pnl == null ? "var(--muted)" : (parseFloat(pnl) >= 0 ? "var(--green)" : "var(--red)");
-    activeBlock = `
-      <div style="padding:10px; border:1px solid var(--border); border-radius:8px">
-        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px">
-          <b style="font-size:15px">${a.side === "short" ? "做空" : "做多"} ${a.filled ? "持仓中" : "待入场"}</b>
-          ${filledBadge}
-        </div>
-        <div class="row"><span class="lbl">入场价</span><span class="val"><b>${a.entry?.toLocaleString("en-US", {maximumFractionDigits: 1})}</b></span></div>
-        ${a.fill_px ? `<div class="row"><span class="lbl">成交价</span><span class="val">${a.fill_px?.toLocaleString("en-US", {maximumFractionDigits: 1})}</span></div>` : ""}
-        ${a.contracts ? `<div class="row"><span class="lbl">数量</span><span class="val">${a.contracts} 张</span></div>` : ""}
-        <div class="row"><span class="lbl">SL</span><span class="val" style="color:var(--red)">${a.sl?.toLocaleString("en-US", {maximumFractionDigits: 1})}</span></div>
-        <div class="row"><span class="lbl">TP1</span><span class="val" style="color:var(--green)">${a.tp1?.toLocaleString("en-US", {maximumFractionDigits: 1})}</span></div>
-        <div class="row"><span class="lbl">TP2</span><span class="val" style="color:var(--green)">${a.tp2?.toLocaleString("en-US", {maximumFractionDigits: 1})}</span></div>
-        <div class="row"><span class="lbl">最新价</span><span class="val" id="training-cur-px">${curPx?.toLocaleString("en-US", {maximumFractionDigits: 1})}</span></div>
-        ${pnl != null ? `<div class="row"><span class="lbl">浮动盈亏</span><span class="val" style="color:${pnlColor}">${pnl}%</span></div>` : ""}
-        <div class="meta" style="margin-top:6px">${a.verdict || ""}</div>
-      </div>`;
-  } else {
-    activeBlock = `<div class="empty">当前无活跃持仓</div>`;
-  }
-
-  const overviewBlock = `
-    <div style="display:flex; flex-direction:column; gap:10px">
-      ${activeBlock}
-      <div style="padding:10px; border:1px solid var(--border); border-radius:8px">
-        <div class="row"><span class="lbl">已记录总单数</span><span class="val">${totalN}</span></div>
-        <div class="row"><span class="lbl">近 12 笔被否</span><span class="val">${st.recent_invalidated ?? 0}</span></div>
-        <div class="row"><span class="lbl">pending</span><span class="val">${pendingN}</span></div>
-        <div class="row"><span class="lbl">已结算</span><span class="val">${settledN}</span></div>
-        <div class="row"><span class="lbl">累计净利</span><span class="val" style="color:${netColor}">${netUsd.toFixed(2)}U</span></div>
-      </div>
-    </div>`;
-  const overviewEl = document.getElementById("train-strategy-overview");
-  if (overviewEl) overviewEl.innerHTML = overviewBlock;
-
-  // ── 右栏：效果数据（ES / P&L / 错误）──
-  if (d.edge_score) renderEdgeScore(d.edge_score, "train-edge-score");
-  if (d.pnl_calendar) renderPnlCalendar(d.pnl_calendar, "train-pnl-calendar");
-  if (d.mistakes) renderMistakes(d.mistakes, "train-mistakes");
+  // ── ⑥ 数据分析（只填训练 API 真返回的两张）──
   if (d.strategy_matrix) renderStrategyMatrix(d.strategy_matrix, "train-strategy-matrix");
   if (d.recent_training_trades) renderRecentTrades(d.recent_training_trades, "train-recent-trades");
-
-  const effectMeta = document.getElementById("train-effect-meta");
-  if (effectMeta) {
-    effectMeta.textContent = `Edge ${d.edge_score?.total ?? "—"} · 净利 ${netUsd.toFixed(2)}U`;
-  }
 
   // ── 辅助区：艾略特波浪分析（1d / 4h / 1h）──
   const waves = d.waves || {};
