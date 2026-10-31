@@ -1410,32 +1410,6 @@ def _compute_trade_net_usd(t: dict) -> Optional[float]:
 #   3) 关键位（24h 最高最低 + 距现价，+1% / -1% 阈值）
 #   4) 资金费率（最新 + 上次，方向）
 
-def _ema(values, n):
-    if not values:
-        return None
-    k = 2 / (n + 1)
-    e = values[0]
-    for v in values[1:]:
-        e = v * k + e * (1 - k)
-    return e
-
-
-def _atr(klines, n):
-    """Average True Range（n 周期）。klines: [[t, o, h, l, c, v], ...]。"""
-    if len(klines) < 2:
-        return None
-    trs = []
-    prev_c = float(klines[0][4])
-    for k in klines[1:]:
-        h, l, c = float(k[2]), float(k[3]), float(k[4])
-        tr = max(h - l, abs(h - prev_c), abs(l - prev_c))
-        trs.append(tr)
-        prev_c = c
-    if not trs:
-        return None
-    return sum(trs[-n:]) / min(n, len(trs))
-
-
 def _v2_gate_safe() -> dict:
     """
     ★ 2026-10-24：取 v2.1 开仓闸门状态，失败也不拖垮行情分析端点。
@@ -1454,93 +1428,59 @@ def _v2_gate_safe() -> dict:
 
 
 def build_market_analysis() -> dict:
-    """BTC 行情多周期分析（4 维）。详见模块顶部注释。"""
+    """BTC 行情多周期分析（4 维）。详见模块顶部注释。
+
+    ★ 2026-10-31 改用**共享分析层**（market_board.analyze_market）。
+      原来这里自研一套（`_trend_from` + `_atr` + 只拉 60 根 K 线），
+      而 /market 那张卡走 trader_view.analyze_tf（320/480 根）——
+      **两张卡的方向标签实测能不一样**（同一时刻 15m: flat vs up、
+      1h: down vs「反抽 EMA20（空）」、4h: down vs「空头排列」）。
+      60 根还热机不出 EMA200，「空头排列」这类判定根本给不出。
+      现在两边共用 analyze_tf → 和 Telegram 判读同源，数字必然一致。
+    """
     try:
         sys.path.insert(0, str(SKILL_ROOT / "scripts"))
-        from gate_fetch import fetch_public, fetch_ticker
+        from gate_fetch import fetch_ticker
+        import market_board as _mb
     except Exception as e:
-        return {"error": f"gate_fetch 不可用：{e}",
+        return {"error": f"分析引擎不可用：{e}",
                 "ts": int(time.time()), "ts_str": time.strftime("%Y-%m-%d %H:%M:%S")}
 
-    def _klines(interval, limit):
-        try:
-            data = fetch_public(
-                "/futures/usdt/candlesticks",
-                {"contract": "BTC_USDT", "interval": interval, "limit": limit},
-            )
-            out = []
-            for k in data:
-                out.append([
-                    float(k["t"]),
-                    float(k["o"]),
-                    float(k["h"]),
-                    float(k["l"]),
-                    float(k["c"]),
-                    float(k.get("v", 0)),
-                ])
-            return out
-        except Exception:
-            return []
+    now = time.time()
+    ts_str = time.strftime("%Y-%m-%d %H:%M:%S")
 
-    def _trend_from(closes):
-        if len(closes) < 30:
-            return "flat", None, None
-        ema20 = _ema(closes, 20)
-        ema50 = _ema(closes, 50) if len(closes) >= 50 else ema20
-        diff_pct = (ema20 - ema50) / ema50 * 100 if ema50 else 0
-        if diff_pct > 0.15:
-            return "up", ema20, ema50
-        if diff_pct < -0.15:
-            return "down", ema20, ema50
-        return "flat", ema20, ema50
+    am = _mb.analyze_market(_mb.DEFAULT_TF_LIMITS)
+    tfs = am["tfs"]
+    aggregate = am["aggregate"]
+    last_px = am["last_px"]
 
-    k15 = _klines("15m", 60)
-    k1h = _klines("1h", 60)
-    k4h = _klines("4h", 60)
+    # 方向标签（up/down/flat）由共享层给出，与 /market 那张卡、Telegram 判读同源
+    trend_15m = _mb._bias_word(tfs.get("15m", {}))
+    trend_1h = _mb._bias_word(tfs.get("1h", {}))
+    trend_4h = _mb._bias_word(tfs.get("4h", {}))
+    convergence = _mb._convergence(tfs)
 
-    trend_15m, _, _ = _trend_from([k[4] for k in k15])
-    trend_1h, ema20_1h, ema50_1h = _trend_from([k[4] for k in k1h])
-    trend_4h, ema20_4h, ema50_4h = _trend_from([k[4] for k in k4h])
-
-    trends = [trend_15m, trend_1h, trend_4h]
-    if len(set(trends)) == 1:
-        convergence = "converging" if trends[0] != "flat" else "flat"
-    else:
-        convergence = "diverging"
-
-    atr_1h = _atr(k1h, 14)
-    last_px = float(k1h[-1][4]) if k1h else None
-    atr_pct = (atr_1h / last_px * 100) if (atr_1h and last_px) else None
+    atr_1h = (tfs.get("1h") or {}).get("atr")
+    atr_pct = (tfs.get("1h") or {}).get("atr_pct")
+    regime = "normal"
     if atr_pct is not None:
         if atr_pct < 0.30:
             regime = "low"
         elif atr_pct > 1.00:
             regime = "high"
-        else:
-            regime = "normal"
-    else:
-        regime = "normal"
 
-    key_levels = {"high_24h": None, "low_24h": None,
-                  "dist_to_high_pct": None, "dist_to_low_pct": None,
-                  "near_resistance": False, "near_support": False}
+    # 关键位（24h 高低）+ 区间位置
+    hi = lo = None
+    pos_in_range = None
     try:
         tk = fetch_ticker("BTC_USDT")
         if tk:
             t = tk[0]
-            hi = float(t.get("high_24h") or 0)
-            lo = float(t.get("low_24h") or 0)
+            hi = float(t.get("high_24h") or 0) or None
+            lo = float(t.get("low_24h") or 0) or None
             last_tk = float(t.get("last") or 0) or last_px
-            key_levels["high_24h"] = hi
-            key_levels["low_24h"] = lo
-            if hi and last_tk:
-                d_hi = (hi - last_tk) / last_tk * 100
-                key_levels["dist_to_high_pct"] = round(d_hi, 2)
-                key_levels["near_resistance"] = 0 < d_hi < 0.5
-            if lo and last_tk:
-                d_lo = (last_tk - lo) / last_tk * 100
-                key_levels["dist_to_low_pct"] = round(d_lo, 2)
-                key_levels["near_support"] = 0 < d_lo < 0.5
+            if hi and lo and hi > lo:
+                pos_in_range = round((last_tk - lo) / (hi - lo) * 100, 1)
     except Exception:
         pass
 
@@ -1558,22 +1498,28 @@ def build_market_analysis() -> dict:
                 funding["sign"] = "long_pay"
             elif cur < -0.0001:
                 funding["sign"] = "short_pay"
-            else:
-                funding["sign"] = "neutral"
     except Exception:
         pass
 
+    # ★ ma_payload 用共享构造器 —— 两个 namespace 的 payload 结构从此完全一致
+    ma_payload = _mb.build_ma_payload(
+        tfs=tfs, aggregate=aggregate, last_px=last_px, ts_str=ts_str,
+        hi24=hi, lo24=lo, pos_in_range=pos_in_range,
+        atr_pct=atr_pct, regime=regime, funding=funding,
+    )
+    key_levels = ma_payload["key_levels"]
+
     return {
-        "ts": int(time.time()),
-        "ts_str": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "ts": int(now),
+        "ts_str": ts_str,
         "last_px": last_px,
         "trend": {
             "15m": trend_15m, "1h": trend_1h, "4h": trend_4h,
             "convergence": convergence,
-            "ema20_1h": round(ema20_1h, 2) if ema20_1h else None,
-            "ema50_1h": round(ema50_1h, 2) if ema50_1h else None,
-            "ema20_4h": round(ema20_4h, 2) if ema20_4h else None,
-            "ema50_4h": round(ema50_4h, 2) if ema50_4h else None,
+            "ema20_1h": ma_payload["trend"]["ema20_1h"],
+            "ema50_1h": ma_payload["trend"]["ema50_1h"],
+            "ema20_4h": ma_payload["trend"]["ema20_4h"],
+            "ema50_4h": ma_payload["trend"]["ema50_4h"],
         },
         "volatility": {
             "atr_1h": round(atr_1h, 2) if atr_1h else None,
@@ -1596,20 +1542,7 @@ def build_market_analysis() -> dict:
                               ma_funding_cur=funding.get("current"),
                               ma_near_res=key_levels.get("near_resistance"),
                               ma_near_sup=key_levels.get("near_support"),
-                              ma_payload={
-                                  "ts_str": time.strftime("%Y-%m-%d %H:%M:%S"),
-                                  "last_px": last_px,
-                                  "trend": {"15m": trend_15m, "1h": trend_1h, "4h": trend_4h,
-                                            "convergence": convergence,
-                                            "ema20_1h": round(ema20_1h, 2) if ema20_1h else None,
-                                            "ema50_1h": round(ema50_1h, 2) if ema50_1h else None,
-                                            "ema20_4h": round(ema20_4h, 2) if ema20_4h else None,
-                                            "ema50_4h": round(ema50_4h, 2) if ema50_4h else None},
-                                  "volatility": {"atr_pct": round(atr_pct, 3) if atr_pct is not None else None,
-                                                 "regime": regime},
-                                  "key_levels": key_levels,
-                                  "funding": funding,
-                              }),
+                              ma_payload=ma_payload),
     }
 
 
@@ -1722,6 +1655,10 @@ def _mm_advice(ma_payload: dict, ns: str = "main") -> "str | None":
     v = ma_payload.get("volatility") or {}
     k = ma_payload.get("key_levels") or {}
     f = ma_payload.get("funding") or {}
+    st = ma_payload.get("structure") or {}
+    mo = ma_payload.get("momentum") or {}
+    vo = ma_payload.get("volume") or {}
+    vt = ma_payload.get("voting") or {}
     last_px = ma_payload.get("last_px")
     hi = k.get("high_24h")
     lo = k.get("low_24h")
@@ -1735,8 +1672,66 @@ def _mm_advice(ma_payload: dict, ns: str = "main") -> "str | None":
     )
     if hi and lo and last_px:
         # 当前价在 24h 区间的位置（0%=最低，100%=最高）
-        pos_pct = (last_px - lo) / (hi - lo) * 100 if hi > lo else 50
+        # ★ 2026-10-31：优先用 ma_payload 给的 pos_in_range_pct（准确值），
+        #   缺失时才自己算 —— 自己算的那次被 LLM 引用成了 58%（实际 57.5%）
+        pos_pct = k.get("pos_in_range_pct")
+        if pos_pct is None:
+            pos_pct = (last_px - lo) / (hi - lo) * 100 if hi > lo else 50
         data_summary += f" · 24h 区间 ${lo:.0f}-${hi:.0f}（当前位于 {pos_pct:.0f}%）"
+
+    # ---------- 结构 / 动能 / 量能 / 投票（2026-10-31 新增）----------
+    # 原来这些字段没进 prompt → LLM 顺着 up/down 编出与页面「多周期结构」卡
+    # 相反的行情叙事（实测：判读说"下跌中继"，结构卡写"上涨段·末段"）。
+    struct_lines = []
+    for tf in ("15m", "1h", "4h"):
+        s = st.get(tf) or {}
+        m = mo.get(tf) or {}
+        vl = vo.get(tf) or {}
+        if not s.get("label"):
+            continue
+        bits = [f"{tf} {s.get('label')}"]
+        if s.get("bias"):
+            bits.append(f"结构方向 {s.get('bias')}")
+        if s.get("pos_in_leg") is not None:
+            bits.append(f"段内位置 {s.get('pos_in_leg')}")
+        if s.get("lo") is not None and s.get("hi") is not None:
+            bits.append(f"摆动区间 ${s.get('lo'):.0f}-${s.get('hi'):.0f}")
+        if m.get("macd"):
+            bits.append(f"MACD {m.get('macd')}")
+        if m.get("rsi") is not None:
+            bits.append(f"RSI {m.get('rsi')}({m.get('rsi_state')})")
+        if vl.get("regime"):
+            bits.append(f"量能 {vl.get('regime')}")
+        struct_lines.append("      " + " / ".join(bits))
+    struct_block = "\n".join(struct_lines)
+
+    voting_line = ""
+    if vt.get("bias"):
+        voting_line = (f"跨周期投票：{vt.get('bias')}（一致性 {vt.get('consensus')}，"
+                       f"加权得分 {vt.get('score')}）")
+
+    # 可引用的关键位白名单 —— 硬约束用
+    allowed_levels = []
+    if hi:
+        allowed_levels.append(f"24h 高 {hi:.0f}")
+    if lo:
+        allowed_levels.append(f"24h 低 {lo:.0f}")
+    for tf in ("15m", "1h", "4h"):
+        s = st.get(tf) or {}
+        if s.get("hi") is not None:
+            allowed_levels.append(f"{tf} 摆动高 {s.get('hi'):.0f}")
+        if s.get("lo") is not None:
+            allowed_levels.append(f"{tf} 摆动低 {s.get('lo'):.0f}")
+    for nm, key in (("1h EMA20", "ema20_1h"), ("1h EMA50", "ema50_1h"),
+                    ("4h EMA20", "ema20_4h"), ("4h EMA50", "ema50_4h")):
+        val = t.get(key)
+        if val is not None:
+            allowed_levels.append(f"{nm} {val:.0f}")
+    levels_block = "、".join(allowed_levels) if allowed_levels else "（无）"
+
+    # ★ 分隔符必须在 f-string 外算好 —— Python 3.11 的 f-string 表达式里不能出现反斜杠
+    struct_sep = "\n" if struct_block else ""
+    voting_sep = "\n" if voting_line else ""
 
     user_msg = f"""以下是 BTC 当前行情数据（{ma_payload.get('ts_str')}）：
 
@@ -1744,14 +1739,23 @@ def _mm_advice(ma_payload: dict, ns: str = "main") -> "str | None":
 趋势：15m {t.get('15m')} / 1h {t.get('1h')} / 4h {t.get('4h')}（收敛性：{t.get('convergence')}）
       EMA20/50 (1h): {t.get('ema20_1h')} / {t.get('ema50_1h')}
       EMA20/50 (4h): {t.get('ema20_4h')} / {t.get('ema50_4h')}
-波动率：1h ATR {v.get('atr_pct')}%（regime: {v.get('regime')}）
+{struct_block}{struct_sep}{voting_line}{voting_sep}波动率：1h ATR {v.get('atr_pct')}%（regime: {v.get('regime')}）
 资金费率（8h）：{funding_pct:.4f}%（{fund_sign_zh}）
 关键位：距 24h 高 {k.get('dist_to_high_pct')}% / 距 24h 低 {k.get('dist_to_low_pct')}%
         近阻力: {k.get('near_resistance')} / 近支撑: {k.get('near_support')}
 
+【硬性规则，违反即错】
+1. 只能引用下面这份清单里的价格：{levels_block}
+   不得自行推算、四舍五入到整数、或补充任何未给出的目标位/支撑阻力位。
+   清单里没有的数字一律不许出现在文中。
+2. 行情分类必须以「结构」为准，不要只看 up/down 就下结论。
+   例如结构写着"上涨段"时，就不能把它描述成"下跌中继"。
+   如果结构与均线方向矛盾，就如实说"结构与均线背离"，不要编一个自洽的故事。
+3. 上面的 up/down/flat 只是均线口径的方向标签，与「结构」是两件事，不要混用。
+
 请按「数据 → 分类 → 方向」三段式给一段 100-150 字的中文交易员判读：
 1. **数据** 一句话说出当前最显眼的数据特征（位置 + 趋势方向 + 资金费率/波动是否异常）
-2. **分类** 一句话定义当前是什么行情（趋势/区间/转折/突破前夜等）
+2. **分类** 一句话定义当前是什么行情（趋势/区间/转折/突破前夜等），以结构字段为依据
 3. **方向** 1-2 句指出近期最可能走的方向 + 关键位（突破哪里看多，跌破哪里看空，没信号就老实说观望）
 
 口吻要求：像有 3-5 年经验的 BTC 交易员在群里发的简评，不绕弯不堆术语。少用 emoji。不用 markdown 加粗。用句号分句，不要换行。""".strip()
@@ -1764,10 +1768,19 @@ def _mm_advice(ma_payload: dict, ns: str = "main") -> "str | None":
         mimo_key = "***REMOVED***"
         body = json.dumps({
             "model": mimo_model,
-            "max_tokens": 320,
+            # ★ 2026-10-31：320 → 1200。
+            #   mimo-v2.6-pro 是**推理型**模型，max_tokens 同时给「思考」和「输出」用。
+            #   实测 finish_reason=length 时 completion_tokens=320 但 reasoning_tokens=320
+            #   → 320 根全被思考吃掉，正文输出 0 字 → 页面上判读只写半句就断了。
+            #   1200 实测：reasoning 82 + 正文 188 = 270 tokens，finish_reason=stop，
+            #   稳定输出完整「数据→分类→方向」三段。
+            "max_tokens": 1200,
             "temperature": 0.5,
             "messages": [
-                {"role": "system", "content": "你是一个有 3-5 年经验的 BTC 合约交易员，习惯用一两句短话说清行情，不绕弯不堆术语。"},
+                # ★ 2026-10-31：原文「习惯用一两句短话说清行情」跟 user prompt 的
+                #   「三段式 100-150 字」自相矛盾 —— 两个指令打架会让模型往短里写，
+                #   叠加 max_tokens 问题就是判读只写半句。现在改成跟 user prompt 同向。
+                {"role": "system", "content": "你是一个有 3-5 年经验的 BTC 合约交易员，用简评口吻把行情说清楚：先说数据特征，再说行情分类，最后给方向。不绕弯、不堆术语、不加 emoji、不用 markdown 加粗。"},
                 {"role": "user", "content": user_msg},
             ],
         }).encode("utf-8")
@@ -1859,6 +1872,39 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.startswith("/api/market_board"):
             try:
                 payload = _build_market_board_payload()
+                body = json.dumps(payload, ensure_ascii=False).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception as e:
+                self.send_error(500, str(e))
+            return
+        # ===== 主图历史窗口（2026-10-31 liusir：主图要能左右滑动 + 看得更久）=====
+        #   GET /api/market_chart?tf=1h&bars=600[&end=<unix ts>]
+        #   end 省略 = 最新 600 根；给了 end = 该时刻及之前的 600 根（往回翻页）
+        #   数据源 = 本地 K 线缓存（深）+ Gate 实时 API（新鲜），按 ts 合并。
+        #   指标在**全序列**上算 → 任意窗口切法数值一致，客户端拼接无缝。
+        if self.path.startswith("/api/market_chart"):
+            try:
+                from urllib.parse import urlparse, parse_qs
+                q = parse_qs(urlparse(self.path).query)
+                tf = (q.get("tf", ["1h"])[0] or "1h").strip()
+                try:
+                    bars = int(q.get("bars", ["600"])[0])
+                except (TypeError, ValueError):
+                    bars = 600
+                end_raw = q.get("end", [""])[0]
+                end_ts = None
+                if end_raw:
+                    try:
+                        end_ts = int(float(end_raw))
+                    except (TypeError, ValueError):
+                        end_ts = None
+                import market_chart
+                payload = market_chart.build_chart_window(tf, bars=bars, end_ts=end_ts)
                 body = json.dumps(payload, ensure_ascii=False).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json; charset=utf-8")

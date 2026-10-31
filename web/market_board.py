@@ -30,6 +30,11 @@ sys.path.insert(0, str(SKILL_ROOT / "scripts"))
 BARS_PER_TF = {"4h": 160, "1h": 240, "15m": 160}
 TF_ORDER = ["4h", "1h", "15m"]
 
+# 分析用的 K 线根数（2026-10-31 新增，两个 namespace 共用）
+# ★ 下限 320：EMA200 需要 200 根热机 —— 原来 main namespace 只用 60 根，
+#   算不出 EMA200，趋势判定跟 Telegram 判读对不上（实测 15m flat vs up）。
+DEFAULT_TF_LIMITS = {"4h": 320, "1h": 480, "15m": 320}
+
 # 缓存：K 线 + 指标整体缓存 60s（多标签页 / 频繁刷新别把 gate 打爆）
 _CACHE: dict = {"ts": 0.0, "data": None}
 _CACHE_TTL = 60.0
@@ -242,37 +247,25 @@ def build_market_board(force: bool = False) -> dict:
     }
 
     # ---------- 2. 多周期 K 线 + 指标 ----------
-    per_tf = {}
+    # ★ 2026-10-31：改走共享层 analyze_market() —— 原来这里自己 fetch + analyze_tf，
+    #   而 index.html 那张卡走的是另一套自研实现 → 两张卡方向标签都能不一样。
+    #   现在两边共用同一个分析器，数字必然一致（也和 Telegram 判读同源）。
+    am = analyze_market(DEFAULT_TF_LIMITS)
+    per_tf = am["per_tf"]
+    out["tfs"] = am["tfs"]
+    out["aggregate"] = am["aggregate"]
     for tf in TF_ORDER:
         n = BARS_PER_TF.get(tf, 160)
-        try:
-            # 多拉一些给 EMA200 热机，图表只画最后 n 根
-            bars = _fetch_bars(tf, max(n * 2, 320))
-        except Exception as e:
-            out["tfs"][tf] = {"error": f"K 线获取失败：{e}"}
+        bars = am["bars_by_tf"].get(tf) or []
+        if not bars:
             out["chart"][tf] = {"t": [], "o": [], "h": [], "l": [], "c": [],
                                 "v": [], "ema20": [], "ema50": [], "rsi": []}
             continue
         out["chart"][tf] = _chart_payload(bars, n)
-        try:
-            per_tf[tf] = tv.analyze_tf(tf, bars, last_px)
-        except Exception as e:
-            per_tf[tf] = {"tf": tf, "error": f"指标计算失败：{e}"}
-        out["tfs"][tf] = _tf_summary(per_tf[tf])
 
-    # ---------- 3. 跨周期投票 ----------
-    try:
-        agg = tv.aggregate_bias(per_tf)
-        out["aggregate"] = {
-            "bias": agg.get("bias"),
-            "norm": agg.get("norm"),
-            "score": agg.get("score"),
-            "consensus": agg.get("consensus"),
-            "consensus_score": agg.get("consensus_score"),
-            "rows": agg.get("rows") or [],
-        }
-    except Exception as e:
-        out["aggregate"] = {"error": f"跨周期投票失败：{e}"}
+    # ---------- 3. 跨周期投票（已在 analyze_market 里算好） ----------
+    if out["aggregate"].get("error"):
+        out["aggregate"] = {"error": out["aggregate"]["error"]}
 
     # ---------- 4. 波动率（1h ATR 口径）----------
     atr_1h = out["tfs"].get("1h", {})
@@ -319,30 +312,14 @@ def build_market_board(force: bool = False) -> dict:
                        "vol_pass": None, "blocked_24h": None}
 
     # ---------- 7. AI 判读用的 payload（数字必须跟图上一致） ----------
-    t = out["tfs"]
-    out["ma_payload"] = {
-        "ts_str": out["ts_str"],
-        "last_px": last_px,
-        "trend": {
-            "15m": _bias_word(t.get("15m", {})),
-            "1h": _bias_word(t.get("1h", {})),
-            "4h": _bias_word(t.get("4h", {})),
-            "convergence": _convergence(t),
-            "ema20_1h": t.get("1h", {}).get("ema20"),
-            "ema50_1h": t.get("1h", {}).get("ema50"),
-            "ema20_4h": t.get("4h", {}).get("ema20"),
-            "ema50_4h": t.get("4h", {}).get("ema50"),
-        },
-        "volatility": {"atr_pct": atr_pct, "regime": regime},
-        "key_levels": {
-            "high_24h": hi24, "low_24h": lo24,
-            "dist_to_high_pct": _round((hi24 - last_px) / last_px * 100, 2) if hi24 else None,
-            "dist_to_low_pct": _round((last_px - lo24) / last_px * 100, 2) if lo24 else None,
-            "near_resistance": bool(hi24 and 0 < (hi24 - last_px) / last_px * 100 < 0.5),
-            "near_support": bool(lo24 and 0 < (last_px - lo24) / last_px * 100 < 0.5),
-        },
-        "funding": out["funding"],
-    }
+    # ★ 2026-10-31：改用共享构造器 build_ma_payload()（两个 namespace 共用）。
+    #   原来这里内联拼 payload，main namespace 那边是另一份手写实现 →
+    #   两张卡的方向标签都能不一样。共享之后必然一致。
+    out["ma_payload"] = build_ma_payload(
+        tfs=out["tfs"], aggregate=out["aggregate"], last_px=last_px,
+        ts_str=out["ts_str"], hi24=hi24, lo24=lo24, pos_in_range=pos_in_range,
+        atr_pct=atr_pct, regime=regime, funding=out["funding"],
+    )
 
     _CACHE["data"] = out
     _CACHE["ts"] = now
@@ -375,3 +352,146 @@ def _convergence(t: dict) -> str:
     if len(set(words)) == 1:
         return "converging" if words[0] != "flat" else "flat"
     return "diverging"
+
+
+# ============================================================
+# 共享分析层（2026-10-31 新增）
+# ============================================================
+# 背景：页面上有**两张**都会出「交易员判读」的卡 ——
+#   /market 的「交易员判读」卡（ns="board"）
+#   / 主 dashboard 的「行情分析」卡（ns="main"）
+# 它们共用同一个 LLM（_mm_advice），但**取数口径本来是分叉的**：
+#   board：trader_view.analyze_tf（320/480 根，有 EMA200 + 摆动结构）
+#   main ：自研 _trend_from（只有 60 根，无 EMA200、无结构）
+# 实测同一时刻：15m 判成 flat vs up、1h 判成 down vs「反抽 EMA20（空）」、
+#   4h 判成 down vs「空头排列」—— 两张卡给的方向标签就不一样。
+#
+# 现在统一到 analyze_tf（= 生产 Telegram 判读用的那套），两边必然一致。
+def analyze_market(tf_limits: dict | None = None) -> dict:
+    """多周期分析（统一口径）。返回 {per_tf, tfs, aggregate, last_px}。
+
+    tf_limits: {"4h": 320, "1h": 480, "15m": 320}，缺省用 DEFAULT。
+    ★ 根数下限 320 —— EMA200 需要 200 根热机，60 根算不出 EMA200。
+    """
+    import trader_view as tv
+
+    limits = dict(DEFAULT_TF_LIMITS)
+    if tf_limits:
+        limits.update(tf_limits)
+
+    per_tf = {}
+    tfs = {}
+    bars_by_tf = {}
+    last_px = None
+    try:
+        tk = tv.fetch_ticker("BTC_USDT")
+        if tk:
+            last_px = float(tk.get("last") or 0) or None
+    except Exception:
+        pass
+
+    for tf in TF_ORDER:
+        n = limits.get(tf, 320)
+        try:
+            bars = _fetch_bars(tf, n)
+        except Exception:
+            bars = []
+        bars_by_tf[tf] = bars
+        if not bars:
+            per_tf[tf] = {"tf": tf, "error": "K 线获取失败"}
+            tfs[tf] = {"error": "K 线获取失败"}
+            continue
+        px = last_px if last_px else float(bars[-1]["c"])
+        try:
+            an = tv.analyze_tf(tf, bars, px)
+        except Exception as e:
+            an = {"tf": tf, "error": f"指标计算失败：{e}"}
+        per_tf[tf] = an
+        tfs[tf] = _tf_summary(an)
+
+    try:
+        agg = tv.aggregate_bias(per_tf)
+    except Exception:
+        agg = {}
+    aggregate = {
+        "bias": agg.get("bias"),
+        "norm": agg.get("norm"),
+        "score": agg.get("score"),
+        "consensus": agg.get("consensus"),
+        "consensus_score": agg.get("consensus_score"),
+        "rows": agg.get("rows") or [],
+    }
+
+    return {"per_tf": per_tf, "tfs": tfs, "aggregate": aggregate,
+            "bars_by_tf": bars_by_tf, "last_px": last_px}
+
+
+def build_ma_payload(tfs: dict, aggregate: dict, last_px, ts_str: str,
+                     hi24=None, lo24=None, pos_in_range=None,
+                     atr_pct=None, regime="normal", funding=None) -> dict:
+    """喂给 AI 判读用的 payload（**两个 namespace 共用这一份构造逻辑**）。
+
+    ★ 2026-10-31 扩充：原来只喂 12 个数，导致两个具体问题：
+      ① 判读与同屏「多周期结构」卡打架 —— trend 只给 up/down/flat，
+         而这个 down 来自 trend_score（只看 EMA 排列 + 价格位置），
+         **摆动结构（上涨段/下跌段）根本没进 prompt** → LLM 顺着 "down"
+         编出"下跌中继"，而同屏结构卡写的是"上涨段·末段"。
+      ② 关键位幻觉 —— 没给摆动高低点，LLM 自己补了个 75000。
+      现在把 analyze_tf 已经算好的结构/动能/量能/投票一起喂进去
+      （**零额外请求**，全是现成结果）。
+    """
+    def _struct(tf):
+        s = tfs.get(tf) or {}
+        return {
+            "label": s.get("structure"),
+            "bias": s.get("structure_bias"),
+            "pos_in_leg": s.get("pos_in_leg"),
+            "lo": s.get("swing_lo"),
+            "hi": s.get("swing_hi"),
+        }
+
+    def _mom(tf):
+        s = tfs.get(tf) or {}
+        return {
+            "macd": s.get("macd_state"),
+            "rsi": s.get("rsi"),
+            "rsi_state": s.get("rsi_state"),
+        }
+
+    def _vol(tf):
+        s = tfs.get(tf) or {}
+        return {"regime": s.get("vol_regime"), "ratio": s.get("vol_ratio")}
+
+    return {
+        "ts_str": ts_str,
+        "last_px": last_px,
+        "trend": {
+            "15m": _bias_word(tfs.get("15m", {})),
+            "1h": _bias_word(tfs.get("1h", {})),
+            "4h": _bias_word(tfs.get("4h", {})),
+            "convergence": _convergence(tfs),
+            "ema20_1h": tfs.get("1h", {}).get("ema20"),
+            "ema50_1h": tfs.get("1h", {}).get("ema50"),
+            "ema20_4h": tfs.get("4h", {}).get("ema20"),
+            "ema50_4h": tfs.get("4h", {}).get("ema50"),
+        },
+        "structure": {tf: _struct(tf) for tf in ("15m", "1h", "4h")},
+        "momentum": {tf: _mom(tf) for tf in ("15m", "1h", "4h")},
+        "volume": {tf: _vol(tf) for tf in ("15m", "1h", "4h")},
+        "voting": {
+            "bias": (aggregate or {}).get("bias"),
+            "norm": (aggregate or {}).get("norm"),
+            "score": (aggregate or {}).get("score"),
+            "consensus": (aggregate or {}).get("consensus"),
+        },
+        "volatility": {"atr_pct": atr_pct, "regime": regime},
+        "key_levels": {
+            "high_24h": hi24, "low_24h": lo24,
+            "dist_to_high_pct": _round((hi24 - last_px) / last_px * 100, 2) if hi24 and last_px else None,
+            "dist_to_low_pct": _round((last_px - lo24) / last_px * 100, 2) if lo24 and last_px else None,
+            "near_resistance": bool(hi24 and last_px and 0 < (hi24 - last_px) / last_px * 100 < 0.5),
+            "near_support": bool(lo24 and last_px and 0 < (last_px - lo24) / last_px * 100 < 0.5),
+            "pos_in_range_pct": pos_in_range,
+        },
+        "funding": funding or {},
+    }

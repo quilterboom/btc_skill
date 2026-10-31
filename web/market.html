@@ -1212,7 +1212,7 @@ function renderAdvisory(d) {
     <div class="ai-label"><span>${isLong ? "交易员判读" : "规则判读"}</span><span>${adv.risk || ""}</span></div>
     <div class="ai-body">${text}</div>
   </div>
-  <div class="foot-note">数据源：gate.io 实时行情 · 行情指标 30 秒刷新 · 判读由 ${adv.text_source === "mimo" ? "AI 模型生成" : "规则兜底"}（与 Telegram 判读同一套指标口径）· 判读文中的价格为生成时刻快照，最多滞后 15 分钟</div>`;
+  <div class="foot-note">数据源：gate.io 实时行情 · 行情指标 30 秒刷新 · 判读由 ${adv.text_source === "mimo" ? "AI 模型生成" : "规则兜底"}（指标口径与 Telegram 判读同源，均走 trader_view 指标引擎；Telegram 版是规则模板逐项展开，本卡是 AI 综合叙述）· 判读文中的价格为生成时刻快照，最多滞后 15 分钟</div>`;
   document.getElementById("adv-meta").textContent = adv.verdict || "";
 }
 
