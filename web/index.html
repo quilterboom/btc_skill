@@ -2560,12 +2560,15 @@ function renderMistakes(ms, elId = "mistakes-summary") {
   // by_type 全部铺，按 count 比例条形可视化
   const list = [...ms.by_type].sort((a, b) => (b.count || 0) - (a.count || 0));
   const maxCount = list[0]?.count || 1;
+  // ★ 2026-10-31：显示每类的净值，颜色区分赚/亏 —— 归因必须能看出「哪类真的亏钱」
+  const netCls = (v) => v > 0 ? "var(--green)" : v < 0 ? "var(--red)" : "var(--muted)";
+  const netTxt = (v) => (v > 0 ? "+" : "") + Number(v || 0).toFixed(1) + "U";
   el.innerHTML = `
     <div class="ms-board">
       <div class="ms-row" style="margin-bottom:4px">
         <span class="meta" style="font-size:11px">类型</span>
         <span></span>
-        <span class="meta" style="text-align:right; font-size:11px">笔 / 占比</span>
+        <span class="meta" style="text-align:right;font-size:11px">笔 / 占比 · 净值</span>
       </div>
       ${list.map(m => {
         const pct = Math.max(4, (m.count / maxCount * 100));
@@ -2573,10 +2576,10 @@ function renderMistakes(ms, elId = "mistakes-summary") {
       <div class="ms-row">
         <span class="lbl">${m.label}</span>
         <span class="bar"><i style="width:${pct.toFixed(1)}%"></i></span>
-        <span class="n">${m.count}<span class="meta"> · ${m.pct}%</span></span>
+        <span class="n">${m.count}<span class="meta"> · ${m.pct}%</span><span class="meta" style="color:${netCls(m.net_usd)}"> · ${netTxt(m.net_usd)}</span></span>
       </div>`;
       }).join("")}
-      <div class="ms-foot">共 <b>${ms.total_with_mistake}</b> 笔有效标记 · 详见 journal.mistake 字段（手动标记）</div>
+      <div class="ms-foot">分母 <b>${ms.trade_count ?? 0}</b> 笔已成交结算 · ${ms.total_with_mistake ?? 0} 笔有问题 · 另有 ${ms.not_filled ?? 0} 笔信号未成交${ms.excluded ? ` · ${ms.excluded} 笔数据存疑已剔除` : ""}</div>
     </div>`;
 }
 

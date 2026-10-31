@@ -760,12 +760,26 @@ def _pnl_calendar() -> dict:
 
 
 def _mistakes_summary() -> dict:
-    """错误归因（按 mistake 分类统计 top3）"""
+    """错误归因（按 mistake 分类统计 top3）
+
+    ★ 2026-10-31 修：**数据源换成 strategy_truth 可信记录**。
+      原来直接读 journal 原始行（含 invalidated / MISSED / 双胞胎 / 出场被重写的单），
+      分母被撑大，且这些行会被自动打上错误标签。
+      实测旧口径：36 笔「TP1 后没推保本」占 50.0% —— 但那 36 笔的 active_sl
+      全部 == entry（保本确实推了），是 BE_STOPPED 被打错标签（见 scripts/mistakes.py）。
+      现在与胜率卡同源（_strategy_truth），同屏数字必然自洽。
+    """
     try:
         sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
         from mistakes import summarize_mistakes
-        recs = _read_jsonl(DATA_DIR / "journal.jsonl")
-        return summarize_mistakes(recs)
+        truth = _strategy_truth()
+        res = summarize_mistakes(truth["records"])
+        res["excluded"] = len(truth["excluded"])
+        # MISSED（信号出了没成交）不在 truth["records"] 里（被当非成交剔掉了），
+        # 单独从原始账本数，不然「未成交」永远是 0。
+        raw = _read_jsonl(DATA_DIR / "journal.jsonl")
+        res["not_filled"] = sum(1 for r in raw if r.get("outcome") == "MISSED")
+        return res
     except Exception as e:
         return {"error": str(e)}
 
