@@ -1765,7 +1765,13 @@ def _mm_advice(ma_payload: dict, ns: str = "main") -> "str | None":
         import urllib.error
         mimo_url = "https://token-plan-cn.xiaomimimo.com/v1/chat/completions"
         mimo_model = "mimo-v2.6-pro"
-        mimo_key = "***REMOVED***"
+        # ★ 凭证走环境变量（2026-11-01：明文进过 git 历史，已清洗）。
+        #   systemd 侧 EnvironmentFile=web/.mimo_key.env（chmod 600，gitignore）。
+        #   缺失时返回 None → 前端 fallback 规则 verdict，不静默用空串。
+        mimo_key = os.environ.get("MIMO_API_KEY", "").strip()
+        if not mimo_key:
+            print("[mimo] MIMO_API_KEY 未配置，判读回落规则模板", flush=True)
+            return None
         body = json.dumps({
             "model": mimo_model,
             # ★ 2026-10-31：320 → 1200。

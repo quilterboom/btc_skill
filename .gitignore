@@ -22,3 +22,6 @@ config.yaml.bak-*
 config.yaml.*-bak-*
 # 开发期带时间戳的备份（*.bak 匹配不到 .bak.2026xxxx）
 *.bak.*
+
+# LLM 凭证（本地 EnvironmentFile，绝不入库）
+web/.mimo_key.env
