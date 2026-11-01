@@ -1243,6 +1243,17 @@ def main():
     #     5. 拉最强反弹确认（点火后 20min ≥ 0.3%）
     #   输出：推 teacher TG 卡（不进 journal，teacher 手动下）
     # ============================================================
+    # ★ 2026-11-01 liusir：训练策略加清算地图参考（CoinAnk liq-map，Plan4 apikey）
+    #   只做参考输入：挂进信号 meta.liq_ref 供回测归因 + 扫描日志展示；
+    #   不做决策门（没回测数字不下结论）。拿不到数据如实显示不可用，不编造。
+    _liq_ref = None
+    if TRAINING_SINGLE_STRATEGY:
+        try:
+            from liq_map import liq_reference, format_reference
+            _liq_ref = liq_reference(last)
+            P(f"\n  🧲 {format_reference(_liq_ref)}")
+        except Exception as _lqe:
+            P(f"\n  🧲 清算地图：加载异常（{_lqe}）")
     _left_signal = None
     try:
         _left_signal = _detect_left_side_long(contract=CONTRACT)
@@ -1398,7 +1409,10 @@ def main():
                                  "hammer_L": _left_signal.get("hammer_L", 0),
                                  "hammer_C": _left_signal.get("hammer_C", 0),
                                  "hammer_v": _left_signal.get("hammer_v", 0),
-                                 "trigger_pct": 0.003},  # 与 hammer_watcher.TRIGGER_PCT 对齐
+                                 "trigger_pct": 0.003,  # 与 hammer_watcher.TRIGGER_PCT 对齐
+                                 # ★ 清算地图参考（2026-11-01，CoinAnk）：只做归因参考，不参与决策门
+                                 **({"liq_ref": _liq_ref} if _liq_ref and _liq_ref.get("available") else {}),
+                                },
                                 preview_secs=_HAMMER_PREVIEW_SECS)
                             P(f"\n  ✅ 左侧超跌反弹已写入 journal: {_left_jstat}")
                             P(f"     entry={_e:.1f}  SL={_lplan['sl']:.1f}  TP1={_lplan['tp1']:.1f}  TP2={_lplan['tp2']:.1f}")
