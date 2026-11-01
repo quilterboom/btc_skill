@@ -160,6 +160,10 @@
   .tf-tabs button { padding: 3px 11px; font-size: 12px; }
   .chart-wrap { position: relative; }
   #chart-canvas { width: 100%; height: 460px; display: block; cursor: crosshair; }
+  .chart-wrap.dragging #chart-canvas { cursor: grabbing; }
+  .chart-msg { position: absolute; top: 8px; left: 10px; padding: 3px 10px;
+               background: rgba(255,255,255,.92); border: 1px solid var(--border);
+               border-radius: 6px; font-size: 11px; color: var(--muted); pointer-events: none; }
   @media (max-width: 700px) { #chart-canvas { height: 340px; } }
   .chart-legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 11px; color: var(--muted);
                   margin-top: 8px; font-variant-numeric: tabular-nums; }
@@ -846,9 +850,11 @@
               <button data-tf="1h" class="active" onclick="switchTf('1h')">1 小时</button>
               <button data-tf="15m" onclick="switchTf('15m')">15 分钟</button>
             </div>
+            <button id="chart-reset" title="翻看历史后回到最新 K 线">⟲ 回到最新</button>
           </div>
           <div class="chart-wrap" id="chart-wrap">
             <canvas id="chart-canvas"></canvas>
+            <div class="chart-msg" id="chart-msg" hidden></div>
             <div class="tip" id="chart-tip" hidden></div>
           </div>
           <div class="chart-legend" id="chart-legend"></div>
@@ -895,6 +901,10 @@ let _board = null;          // 最近一次 /api/market_board 响应
 let _tf = "1h";             // 当前主图周期
 let _hover = -1;            // 十字光标落在第几根 K 线
 let _chartGeom = null;      // 画图时的坐标映射（供 tooltip 用）
+let _chartStore = {};       // tf → 已加载的深历史序列（/api/market_chart，往左翻页拼接）
+let _viewBars = 160;        // 视口显示多少根 K 线（滚轮改这个）
+let _rightGap = 0;          // 视口右端离最新一根还有几根（0 = 贴着最新；拖拽改这个）
+let _histLoading = false;   // 历史翻页请求进行中
 
 const TF_LABEL = { "4h": "4 小时", "1h": "1 小时", "15m": "15 分钟" };
 
@@ -926,6 +936,7 @@ async function loadBoard(manual) {
     const d = await r.json();
     _board = d;
     renderBoard(d);
+    _refreshTail();   // 顺带把深历史尾部刷到最新（chart 翻页数据）
   } catch (e) {
     // 页面被销毁（切标签页/关闭）时 document 可能已不可用 → 别在错误处理里再抛一次
     if (typeof document === "undefined" || !document.getElementById) return;
@@ -1217,24 +1228,53 @@ function renderAdvisory(d) {
 }
 
 // ============================ 主图绘制 ============================
+// ---------- 深历史序列（/api/market_chart）----------
+// 主图数据两级：_chartStore[tf] 是深历史分页序列（拖拽/翻页往左拼），
+// 拉不到时回落 _board.chart[tf] 的固定窗口。指标在服务端全序列算好，
+// 这里只做切片 —— 任意窗口切法 EMA/数值一致，拼接无缝。
+function _chartSeries() {
+  const s = _chartStore[_tf];
+  if (s && s.t && s.t.length) return s;
+  return (_board && _board.chart && _board.chart[_tf]) || null;
+}
+
+function _chartView() {
+  const s = _chartSeries();
+  if (!s || !s.t || !s.t.length) return null;
+  const total = s.t.length;
+  const vb = Math.max(10, Math.min(_viewBars, total));
+  const gap = Math.max(0, Math.min(_rightGap, total - vb));
+  const hi = total - gap;   // exclusive
+  const lo = hi - vb;
+  const out = { _lo: lo, _hi: hi, _total: total };
+  for (const k of ["t", "o", "h", "l", "c", "v", "ema20", "ema50", "rsi"]) {
+    out[k] = Array.isArray(s[k]) ? s[k].slice(lo, hi) : new Array(vb).fill(null);
+  }
+  return out;
+}
+
 function switchTf(tf) {
   _tf = tf;
   _hover = -1;
+  _rightGap = 0;
+  _viewBars = 160;
   document.querySelectorAll("#tf-tabs button").forEach(b => {
     b.classList.toggle("active", b.dataset.tf === tf);
   });
+  loadChartHistory();   // 深历史（失败时 drawChart 自动回落 board 窗口）
   drawChart();
 }
 
 function drawChart() {
   const cv = document.getElementById("chart-canvas");
-  if (!cv || !_board || !_board.chart) return;
-  const data = _board.chart[_tf];
+  if (!cv) return;
+  const data = _chartView();
   if (!data || !data.t || !data.t.length) {
     const g = cv.getContext("2d");
     g.clearRect(0, 0, cv.width, cv.height);
     return;
   }
+  _rightGap = data._total - data._hi;   // 归一化：缩放/翻页后以实际视口为准
 
   const dpr = window.devicePixelRatio || 1;
   const cssW = cv.clientWidth || 800;
@@ -1329,16 +1369,18 @@ function drawChart() {
   drawLine(data.ema50, "#8b5cf6", 1.4);
   drawLine(data.ema20, "#f59e0b", 1.4);
 
-  // ---- 现价线 ----
-  const lastC = data.c[n - 1];
-  const lastY = Y(lastC);
-  g.strokeStyle = "#111827"; g.lineWidth = 1; g.setLineDash([3, 3]);
-  g.beginPath(); g.moveTo(padL, lastY); g.lineTo(padL + plotW, lastY); g.stroke();
-  g.setLineDash([]);
-  g.fillStyle = "#111827";
-  g.fillRect(padL + plotW + 2, lastY - 8, padR - 4, 16);
-  g.fillStyle = "#fff"; g.textAlign = "left"; g.font = "10px -apple-system, sans-serif";
-  g.fillText(_fmtPx(lastC, 0), padL + plotW + 6, lastY + 3.5);
+  // ---- 现价线（只有视口贴着最新一根时才是「现价」；翻看历史时不画，避免把历史价位误读成现价）----
+  if (data._hi === data._total) {
+    const lastC = data.c[n - 1];
+    const lastY = Y(lastC);
+    g.strokeStyle = "#111827"; g.lineWidth = 1; g.setLineDash([3, 3]);
+    g.beginPath(); g.moveTo(padL, lastY); g.lineTo(padL + plotW, lastY); g.stroke();
+    g.setLineDash([]);
+    g.fillStyle = "#111827";
+    g.fillRect(padL + plotW + 2, lastY - 8, padR - 4, 16);
+    g.fillStyle = "#fff"; g.textAlign = "left"; g.font = "10px -apple-system, sans-serif";
+    g.fillText(_fmtPx(lastC, 0), padL + plotW + 6, lastY + 3.5);
+  }
 
   // ---- 成交量 ----
   let vmax = 0;
@@ -1378,13 +1420,16 @@ function drawChart() {
   _chartGeom = { X, Y, n, data, padL, plotW, padR };
 
   // ---- 图例 ----
-  const tfs = (_board.tfs || {})[_tf] || {};
+  const tfs = ((_board || {}).tfs || {})[_tf] || {};
+  const moreBefore = !!(_chartSeries() || {}).has_more_before;
+  const rangeTxt = data._total > data.t.length
+    ? `显示 ${data.t.length} / 已载 ${data._total} 根` : `共 ${n} 根`;
   document.getElementById("chart-legend").innerHTML = `
     <span class="lg"><i class="sq" style="background:#10b981"></i>涨</span>
     <span class="lg"><i class="sq" style="background:#ef4444"></i>跌</span>
     <span class="lg"><i style="background:#f59e0b"></i>EMA20 ${_fmtNum(tfs.ema20, 1)}</span>
     <span class="lg"><i style="background:#8b5cf6"></i>EMA50 ${_fmtNum(tfs.ema50, 1)}</span>
-    <span class="lg">${TF_LABEL[_tf]} 共 ${n} 根 · 趋势 ${tfs.trend || "—"} · ${tfs.structure || "—"}</span>`;
+    <span class="lg">${TF_LABEL[_tf]} ${rangeTxt} · 趋势 ${tfs.trend || "—"} · ${tfs.structure || "—"}${moreBefore ? " · ← 左右拖动回看更早" : ""}</span>`;
 
   if (_hover >= 0 && _hover < n) drawCrosshair(g, _hover);
 }
@@ -1412,8 +1457,8 @@ function drawCrosshair(g, idx) {
 
 function updateTip(idx) {
   const tip = document.getElementById("chart-tip");
-  if (!_chartGeom || idx < 0 || !_board) { tip.hidden = true; return; }
-  const d = _board.chart[_tf];
+  if (!_chartGeom || idx < 0) { tip.hidden = true; return; }
+  const d = _chartGeom.data;
   const o = d.o[idx], h = d.h[idx], l = d.l[idx], c = d.c[idx];
   const prev = idx > 0 ? d.c[idx - 1] : o;
   const chg = prev ? ((c - prev) / prev) * 100 : 0;
@@ -1438,9 +1483,168 @@ function updateTip(idx) {
   tip.style.top = "10px";
 }
 
+// ============================ 深历史：加载 / 翻页 / 尾部刷新 ============================
+async function loadChartHistory() {
+  const tf = _tf;
+  try {
+    const r = await fetch(`/api/market_chart?tf=${tf}&bars=600`, { cache: "no-store" });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const w = await r.json();
+    if (!w || w.error || !w.t) throw new Error((w && w.error) || "空数据");
+    if (tf !== _tf) return;               // 期间切了周期 → 丢弃这份
+    _chartStore[tf] = w;
+    drawChart();
+  } catch (e) {
+    // 深历史拉不到 → drawChart 自动回落 market_board 的固定窗口，主图不空
+    console.error("[chart] 深历史加载失败:", e);
+  }
+}
+
+// 往左拼一段更早的窗口（w 必须全部早于 s 最左一根）；返回新增根数
+function _prependOlder(s, w) {
+  if (!w || !w.t || !w.t.length || !s.t.length) return 0;
+  if (w.t[w.t.length - 1] >= s.t[0]) return 0;    // 有重叠不拼（防御）
+  for (const k of ["t", "o", "h", "l", "c", "v", "ema20", "ema50", "rsi"]) {
+    s[k] = (w[k] || []).concat(s[k] || []);
+  }
+  return w.t.length;
+}
+
+// 往右拼新收盘的 K 线（只取 w 里比 s 最右一根更新的部分）；返回新增根数
+function _appendNewer(s, w) {
+  if (!w || !w.t || !w.t.length) return 0;
+  if (!s.t.length) {
+    for (const k of ["t", "o", "h", "l", "c", "v", "ema20", "ema50", "rsi"]) s[k] = w[k] || [];
+    return w.t.length;
+  }
+  const m = w.t.findIndex(t => t > s.t[s.t.length - 1]);
+  if (m < 0) return 0;
+  for (const k of ["t", "o", "h", "l", "c", "v", "ema20", "ema50", "rsi"]) {
+    s[k] = (s[k] || []).concat((w[k] || []).slice(m));
+  }
+  return w.t.length - m;
+}
+
+// 拖到左边界附近时自动补 600 根更早的（严格早于当前最左一根）
+async function _ensureMoreHistory() {
+  if (_histLoading) return;
+  const s = _chartStore[_tf];
+  if (!s || !s.has_more_before || !s.t.length) return;
+  const vb = Math.max(10, Math.min(_viewBars, s.t.length));
+  const lo = s.t.length - _rightGap - vb;
+  if (lo > 60) return;                    // 离左边界还远，不翻
+  const tf = _tf;
+  _histLoading = true;
+  _showChartMsg("加载更早历史…");
+  try {
+    const r = await fetch(`/api/market_chart?tf=${tf}&bars=600&end=${s.t[0] - 1}`, { cache: "no-store" });
+    const w = await r.json();
+    if (_chartStore[tf] !== s) return;    // 周期切换过，旧 store 丢弃
+    const added = _prependOlder(s, w);
+    if (added) _rightGap += added;        // 保持视觉位置不动
+    if (w && w.t && w.t.length) s.has_more_before = !!w.has_more_before;
+  } catch (e) {
+    // 下次拖动再试，不弹错
+  } finally {
+    _histLoading = false;
+    _showChartMsg(null);
+    drawChart();
+  }
+}
+
+// board 每次刷新时顺带补最新收盘的 K 线（深历史尾部保持新鲜）
+function _refreshTail() {
+  const tf = _tf;
+  fetch(`/api/market_chart?tf=${tf}&bars=600`, { cache: "no-store" })
+    .then(r => (r.ok ? r.json() : null))
+    .then(w => {
+      if (!w || !w.t || !w.t.length) return;
+      const s = _chartStore[tf];
+      if (tf !== _tf) return;
+      if (!s) { _chartStore[tf] = w; drawChart(); return; }
+      const added = _appendNewer(s, w);
+      // 翻看历史时（_rightGap>0）视觉位置保持不动；贴最新时保持贴最新
+      if (added && _rightGap > 0) _rightGap += added;
+      drawChart();
+    })
+    .catch(() => {});
+}
+
+function _showChartMsg(txt) {
+  const el = document.getElementById("chart-msg");
+  if (!el) return;
+  el.textContent = txt || "";
+  el.hidden = !txt;
+}
+
 // ============================ 事件绑定 ============================
-document.getElementById("chart-canvas").addEventListener("mousemove", function (e) {
-  if (!_chartGeom) return;
+const _cvEl = document.getElementById("chart-canvas");
+
+// ---- 拖拽平移：改 _rightGap，重画同一份数据的不同切片 ----
+let _drag = null;
+_cvEl.addEventListener("mousedown", function (e) {
+  _drag = { x0: e.clientX, gap0: _rightGap, moved: false };
+  document.getElementById("chart-tip").hidden = true;
+});
+window.addEventListener("mousemove", function (e) {
+  if (!_drag || !_chartGeom) return;
+  const dx = e.clientX - _drag.x0;
+  if (Math.abs(dx) > 3) {
+    _drag.moved = true;
+    document.getElementById("chart-wrap").classList.add("dragging");
+  }
+  const barW = _chartGeom.plotW / _chartGeom.n;
+  // 右拖 → 内容跟着右移 → 窗口往过去走（_rightGap 变大）
+  const gap = _drag.gap0 + Math.round(dx / barW);
+  _rightGap = Math.max(0, Math.min(gap, _chartGeom.data._total - _chartGeom.n));
+  _hover = -1;
+  drawChart();
+  _ensureMoreHistory();
+});
+window.addEventListener("mouseup", function () {
+  if (_drag && _drag.moved) _ensureMoreHistory();
+  _drag = null;
+  document.getElementById("chart-wrap").classList.remove("dragging");
+});
+
+// ---- 滚轮缩放（改视口根数）----
+_cvEl.addEventListener("wheel", function (e) {
+  e.preventDefault();
+  const factor = e.deltaY > 0 ? 1.15 : 1 / 1.15;
+  _viewBars = Math.max(60, Math.min(600, Math.round(_viewBars * factor)));
+  drawChart();
+  _ensureMoreHistory();
+}, { passive: false });
+
+// ---- 触屏滑动（横向拖动平移；纵向手势留给页面滚动）----
+let _touch = null;
+_cvEl.addEventListener("touchstart", function (e) {
+  if (e.touches.length !== 1) { _touch = null; return; }
+  _touch = { x0: e.touches[0].clientX, y0: e.touches[0].clientY, gap0: _rightGap, pan: false };
+}, { passive: true });
+_cvEl.addEventListener("touchmove", function (e) {
+  if (!_touch || !_chartGeom || e.touches.length !== 1) return;
+  const dx = e.touches[0].clientX - _touch.x0;
+  const dy = e.touches[0].clientY - _touch.y0;
+  if (!_touch.pan) {
+    if (Math.abs(dx) < 8 || Math.abs(dx) <= Math.abs(dy)) return;   // 纵向/未达阈值 → 不拦截
+    _touch.pan = true;
+  }
+  e.preventDefault();
+  const barW = _chartGeom.plotW / _chartGeom.n;
+  _rightGap = Math.max(0, Math.min(_touch.gap0 + Math.round(dx / barW), _chartGeom.data._total - _chartGeom.n));
+  _hover = -1;
+  drawChart();
+}, { passive: false });
+_cvEl.addEventListener("touchend", function () {
+  const wasPan = _touch && _touch.pan;
+  _touch = null;
+  if (wasPan) _ensureMoreHistory();
+});
+
+// ---- 十字光标（拖拽期间不画）----
+_cvEl.addEventListener("mousemove", function (e) {
+  if (_drag || !_chartGeom) return;
   const rect = this.getBoundingClientRect();
   const x = e.clientX - rect.left;
   const idx = Math.floor((x - _chartGeom.padL) / ((_chartGeom.plotW) / _chartGeom.n));
@@ -1450,11 +1654,22 @@ document.getElementById("chart-canvas").addEventListener("mousemove", function (
   drawChart();
   updateTip(clamped);
 });
-document.getElementById("chart-canvas").addEventListener("mouseleave", function () {
+_cvEl.addEventListener("mouseleave", function () {
   _hover = -1;
   document.getElementById("chart-tip").hidden = true;
   drawChart();
 });
+
+// ---- 回到最新 ----
+document.getElementById("chart-reset").addEventListener("click", function () {
+  _rightGap = 0;
+  _viewBars = 160;
+  _hover = -1;
+  document.getElementById("chart-tip").hidden = true;
+  loadChartHistory();
+  drawChart();
+});
+
 window.addEventListener("resize", () => drawChart());
 
 // ============================ 启动 ============================
