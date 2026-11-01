@@ -784,6 +784,45 @@ def _mistakes_summary() -> dict:
         return {"error": str(e)}
 
 
+def _mistakes_summary_training() -> dict:
+    """训练错误归因（2026-11-01 liusir：数据 = 亏损策略的原因分析 = 优化策略的输入）。
+
+    两层：
+      causes   —— 亏损主因分布（追单/逆势/假止损/回吐/方向错…），
+                  判定 = 账本事实 + 15m K 线上下文（24h 区间位置 / 止损后 12h 走势）
+      by_type  —— 操作/配置错误（mistakes.py 事实判据），与生产卡同口径
+    分母都是 strategy_truth 可信记录（剔双胞胎/污染/未成交），与胜率卡同源。
+    """
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+        from mistakes import summarize_mistakes, summarize_loss_causes
+        import strategy_truth as st
+        train_path = Path("/root/data/training/journal.jsonl")
+        recs, _pending, excl = st.truth_records(train_path)
+        # 15m K 线（本地缓存，不走网络）：追单位置 + 假止损判定用
+        bars = None
+        try:
+            import kline_store
+            import gate_fetch
+            rows, _depth = kline_store.load_bars(gate_fetch.DATA_DIR, "BTC_USDT", "15m")
+            bars = [(int(r[0]), float(r[1]), float(r[2]), float(r[3]),
+                     float(r[4]), float(r[5])) for r in rows]
+        except Exception:
+            pass  # K 线不可用时追单/假止损判不出 → 归入其它主因，不猜
+        res = summarize_loss_causes(recs, bars)
+        ops = summarize_mistakes(recs)
+        res["by_type"] = ops.get("by_type", [])
+        res["total_with_mistake"] = ops.get("total_with_mistake", 0)
+        raw = _read_jsonl(train_path)
+        res["not_filled"] = sum(1 for r in raw if r.get("outcome") == "MISSED")
+        res["excluded"] = len(excl)
+        res["source_note"] = ("账本事实（方向×排列/结局×净值）+ 15m K 线上下文"
+                              "（24h 区间位置/止损后 12h 走势）")
+        return res
+    except Exception as e:
+        return {"error": str(e)}
+
+
 def _wave_analysis_training() -> dict:
     """艾略特波浪分析（2026-10-12 加）：1d/4h/1h 三周期浪形 + 斐波那契位"""
     try:
@@ -836,6 +875,8 @@ def build_status_training() -> dict:
         "strategy_matrix": _strategy_matrix_training(),
         # 2026-10-18：最近 10 笔训练明细（按时间倒序）
         "recent_training_trades": _recent_training_trades(),
+        # 2026-11-01 liusir：错误归因卡（数据=亏损原因分析=优化输入）
+        "mistakes": _mistakes_summary_training(),
     }
 
 

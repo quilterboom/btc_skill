@@ -69,7 +69,7 @@ function check(name, ok, extra = "") {
   check("sec-train-strategy 是全宽 .grid + .card", !!q("#sec-train-strategy.grid > .card"));
   check("sec-train-analysis 是 .data-grid", !!q("#sec-train-analysis.data-grid"));
   check("sec-train-analysis 有 sec-hd 标题", !!q("#sec-train-analysis .sec-hd"));
-  check("sec-train-analysis 有 2 张 .data-card", qa("#sec-train-analysis > .data-card").length === 2,
+  check("sec-train-analysis 有 3 张 .data-card", qa("#sec-train-analysis > .data-card").length === 3,
     `实际 ${qa("#sec-train-analysis > .data-card").length}`);
   check("老的 split-grid 双栏已移除（panel-train-strategy）", !q("#panel-train-strategy"));
   check("老的 panel-train-effect 已移除", !q("#panel-train-effect"));
@@ -79,7 +79,8 @@ function check(name, ok, extra = "") {
   console.log("\n── ② 训练环境没数据的卡不展示（不留「加载中」死壳）──");
   check("Edge Score 卡已删", !q("#train-edge-score") && !/train-edge-score/.test(html));
   check("P&L 日历卡已删", !q("#train-pnl-calendar") && !/train-pnl-calendar/.test(html));
-  check("错误归因卡已删", !q("#train-mistakes") && !/train-mistakes/.test(html));
+  // 2026-11-01 liusir 要求：错误归因卡回归（数据=亏损原因分析=优化输入，由 renderLossCauses 渲染）
+  check("错误归因卡已回归（#train-mistakes）", !!q("#train-mistakes") && /train-mistakes/.test(html));
   check("renderTraining 不再调 renderEdgeScore", !/renderEdgeScore\(d\.edge_score,\s*"train-/.test(html));
   check("renderTraining 不再调 renderPnlCalendar", !/renderPnlCalendar\(d\.pnl_calendar,\s*"train-/.test(html));
   check("renderTraining 不再调 renderMistakes", !/renderMistakes\(d\.mistakes,\s*"train-/.test(html));
@@ -203,10 +204,11 @@ function check(name, ok, extra = "") {
   check("switchEnv 切 body[data-env]",
     /document\.body\.dataset\.env = env/.test(html));
 
-  console.log("\n── ⑧ 训练数据确实不含 ES/P&L/错误（印证「不展示」是对的）──");
+  console.log("\n── ⑧ 训练数据不含 ES/P&L（错误归因 2026-11-01 已回归）──");
   check("API 不返回 edge_score", trainData.edge_score === undefined);
   check("API 不返回 pnl_calendar", trainData.pnl_calendar === undefined);
-  check("API 不返回 mistakes", trainData.mistakes === undefined);
+  check("API 返回 mistakes（亏损归因，2026-11-01 回归）",
+    trainData.mistakes && Array.isArray(trainData.mistakes.by_cause));
 
   console.log(`\n结果: ${pass} 通过 / ${fail} 失败`);
   dom.window.close();

@@ -1752,12 +1752,16 @@
   </div>
 
   <!-- 数据分析（与 prod 的 sec-analysis 同排版：data-grid 铺开）
-       ★ 只放训练 API 真返回的两张：strategy_matrix / recent_training_trades -->
+       ★ 只放训练 API 真返回的三张：strategy_matrix / mistakes（亏损归因）/ recent_training_trades -->
   <div id="sec-train-analysis" class="data-grid" style="margin-top:16px" data-env-show="training">
-    <div class="sec-hd" style="grid-column:1/-1; margin:0"><h2>数据分析</h2><span class="meta">策略-效果矩阵 · 最近 10 笔</span></div>
+    <div class="sec-hd" style="grid-column:1/-1; margin:0"><h2>数据分析</h2><span class="meta">策略-效果矩阵 · 错误归因 · 最近 10 笔</span></div>
     <div class="data-card">
       <h3>策略-效果矩阵 <small>按信号源聚合</small></h3>
       <div id="train-strategy-matrix">加载中…</div>
+    </div>
+    <div class="data-card">
+      <h3>错误归因 <small>亏损原因 · 优化策略的输入</small></h3>
+      <div id="train-mistakes">加载中…</div>
     </div>
     <div class="data-card">
       <h3>最近 10 笔 <small>训练明细</small></h3>
@@ -2195,9 +2199,10 @@ function renderTraining(d) {
     sumEl.innerHTML = `共 <b>${totalN}</b> 单 · 已结算 <b>${settledN}</b> · 待结 <b>${pendingN}</b> · 净利 <b style="color:${netUsdRaw == null ? "var(--muted)" : netColor}">${netTxt}</b>`;
   }
 
-  // ── ⑥ 数据分析（只填训练 API 真返回的两张）──
+  // ── ⑥ 数据分析（只填训练 API 真返回的三张）──
   if (d.strategy_matrix) renderStrategyMatrix(d.strategy_matrix, "train-strategy-matrix");
   if (d.recent_training_trades) renderRecentTrades(d.recent_training_trades, "train-recent-trades");
+  if (d.mistakes) renderLossCauses(d.mistakes, "train-mistakes");
 
   // ── 辅助区：艾略特波浪分析（1d / 4h / 1h）──
   const waves = d.waves || {};
@@ -2580,6 +2585,38 @@ function renderMistakes(ms, elId = "mistakes-summary") {
       </div>`;
       }).join("")}
       <div class="ms-foot">分母 <b>${ms.trade_count ?? 0}</b> 笔已成交结算 · ${ms.total_with_mistake ?? 0} 笔有问题 · 另有 ${ms.not_filled ?? 0} 笔信号未成交${ms.excluded ? ` · ${ms.excluded} 笔数据存疑已剔除` : ""}</div>
+    </div>`;
+}
+
+// 训练错误归因卡（2026-11-01 liusir：数据 = 亏损策略的原因分析 = 优化策略的输入）
+// 每笔亏损交易判一个主因（互斥），by_cause 各行 count 之和 = n_losses
+function renderLossCauses(ms, elId = "train-mistakes") {
+  const el = document.getElementById(elId);
+  if (!el) return;
+  if (!ms || ms.error || !ms.by_cause) {
+    el.innerHTML = `<div class="empty">${ms && ms.error ? ms.error : "暂无亏损记录"}</div>`;
+    return;
+  }
+  const list = [...ms.by_cause].sort((a, b) => (b.count || 0) - (a.count || 0));
+  const maxCount = list[0]?.count || 1;
+  const netTxt = (v) => (v > 0 ? "+" : "") + Number(v || 0).toFixed(1) + "U";
+  el.innerHTML = `
+    <div class="ms-board">
+      <div class="ms-row" style="margin-bottom:4px">
+        <span class="meta" style="font-size:11px">亏损主因</span>
+        <span></span>
+        <span class="meta" style="text-align:right;font-size:11px">笔 / 占比 · 净值</span>
+      </div>
+      ${list.map(m => {
+        const pct = Math.max(4, (m.count / maxCount * 100));
+        return `
+      <div class="ms-row">
+        <span class="lbl">${m.label}</span>
+        <span class="bar"><i style="width:${pct.toFixed(1)}%;background:var(--red, #ef4444)"></i></span>
+        <span class="n">${m.count}<span class="meta"> · ${m.pct}%</span><span class="meta neg"> · ${netTxt(m.net_usd)}</span></span>
+      </div>`;
+      }).join("")}
+      <div class="ms-foot">亏损 <b>${ms.n_losses ?? 0}</b> / ${ms.trade_count ?? 0} 笔已结算 · 判定依据：${ms.source_note || "账本事实"}${ms.excluded ? ` · ${ms.excluded} 笔数据存疑已剔除` : ""}</div>
     </div>`;
 }
 
