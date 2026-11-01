@@ -1252,7 +1252,14 @@ def main():
                         # 准入守卫 ②: hammer 是主信号级别最高，**不**走"成立"门槛
                         #     （verdict 可能是"无信号·观望"，但 hammer 自己 4 项进程条已验过）
                         # 准入守卫 ③: 二次确认（C/D 盘口 + OI），与主信号同套
-                        if not _skip:
+                        #   ★ 2026-11-01 liusir「训练的策略生成要比生产更丰富」：
+                        #     实测两个 daemon 对同一个 hammer 一边过一边被挡（10-29 13:00 /
+                        #     10-30 04:45/08:15/10:15/22:45 五个 hammer 训练全漏、prod 全进，
+                        #     其中 10:15/22:45 是 prod 超跌反弹策略的全部利润来源）。
+                        #     检测层重放证明是确定性的（26 个 hammer 三变体一致），
+                        #     分叉就在这道实时盘口/OI 竞态门 + HammerWatcher 120s 成交窗。
+                        #     训练是模拟盘不吃真实流动性 → 跳过守卫③，完整吃到每个 hammer。
+                        if not _skip and not (os.environ.get("TRAINING_MODE") == "1"):
                             try:
                                 from secondary_confirm import check_secondary_confirm
                                 _pass2, _reason2 = check_secondary_confirm("long", CONTRACT)
