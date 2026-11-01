@@ -556,6 +556,15 @@ def _close(sig: Dict, outcome: str, exit_px: float, exit_ts: int,
       - exit_ts 必须 > fill_ts，否则直接 raise 阻断污染 journal
       - TP1 hit 时 exit_ts 必须 > tp1_hit_ts（同根双触会优先 TP2，但 BE 必须晚于 TP1）
     """
+    # ★ 2026-11-01 结算幂等守卫：已结算的单禁止二次结算。
+    #   重复结算会伪造出场（实测 BTC_USDT-1792980010-long：10-26 真实结算 +3.14U，
+    #   10-28 外部脚本绕过 settle_all 再次结算改写成 +24.88U，凭空多出 21.74U）。
+    #   要修历史数据走 btc-position-ops 的回填流程，不允许结算路径自己改已结算记录。
+    if sig.get("status") == "settled":
+        raise ValueError(
+            f"[position_tracker] _close 拒绝二次结算 id={sig.get('id', '?')} "
+            f"（已结算 outcome={sig.get('outcome')} net={sig.get('net_usd')}）。"
+        )
     # 2026-10-18 sanity check
     _fill_ts = int(sig.get("fill_ts") or 0)
     if _fill_ts and exit_ts <= _fill_ts:

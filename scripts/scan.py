@@ -767,6 +767,55 @@ def _save_last_left_signal(contract: str, hammer_ts: float) -> None:
         pass  # 写失败不阻塞推送
 
 
+# ---- 2026-11-01：被准入守卫挡下的 hammer 可重试（训练环境）-----------------
+#   旧语义：守卫挡下也推掉去重状态 → 同一根 hammer 永不重试，错过就真错过
+#   （实测 10-30 10:15/22:45 两个 prod 赢单训练全漏）。
+#   新语义（TRAINING_MODE）：挡下记录到 blocked 文件，去重状态**不**推 →
+#   下次扫描（≤15min）重试；超过 LEFT_RETRY_MAX_AGE 仍过不了守卫才永久放弃
+#   （老 hammer 反弹已走完，再进就是追高）。生产保持旧语义不动。
+_LEFT_BLOCKED_PATH = os.path.join(DATA_DIR, "last_left_blocked.json")
+LEFT_RETRY_MAX_AGE = 1800  # 30min ≈ 2 个扫描周期
+
+
+def _load_left_blocked(contract: str) -> dict:
+    try:
+        if os.path.exists(_LEFT_BLOCKED_PATH):
+            data = json.load(open(_LEFT_BLOCKED_PATH, encoding="utf-8"))
+            return data.get(contract) or {}
+    except Exception:
+        pass
+    return {}
+
+
+def _save_left_blocked(contract: str, hammer_ts: float) -> None:
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        old = {}
+        if os.path.exists(_LEFT_BLOCKED_PATH):
+            try:
+                old = json.load(open(_LEFT_BLOCKED_PATH, encoding="utf-8"))
+            except Exception:
+                old = {}
+        old[contract] = {"hammer_ts": float(hammer_ts), "ts": time.time()}
+        tmp = _LEFT_BLOCKED_PATH + ".tmp"
+        json.dump(old, open(tmp, "w", encoding="utf-8"))
+        os.replace(tmp, _LEFT_BLOCKED_PATH)
+    except Exception:
+        pass
+
+
+def _clear_left_blocked(contract: str) -> None:
+    try:
+        if os.path.exists(_LEFT_BLOCKED_PATH):
+            old = json.load(open(_LEFT_BLOCKED_PATH, encoding="utf-8"))
+            old.pop(contract, None)
+            tmp = _LEFT_BLOCKED_PATH + ".tmp"
+            json.dump(old, open(tmp, "w", encoding="utf-8"))
+            os.replace(tmp, _LEFT_BLOCKED_PATH)
+    except Exception:
+        pass
+
+
 # ============================ 主流程 ============================
 def main():
     ap = argparse.ArgumentParser(add_help=False)
@@ -809,6 +858,14 @@ def main():
         os.environ["TRAINING_DATA_DIR"] = "/root/data/training"
         os.environ["TRAINING_JOURNAL"] = "/root/data/training/journal.jsonl"
         print(f"[training] 训练环境模式启用，journal 隔离到 /root/data/training/journal.jsonl")
+
+    # ★ 2026-11-01 liusir：训练环境单策略 —— 只生成 left_side_oversold_bounce（超跌反弹）
+    #   依据（可信口径，两环境合计）：超跌反弹 16 笔 胜率 56.2% 净 +11.23U
+    #   （唯一胜率过半、唯一正净利的信号源）；15m 形态 32 笔 46.9% 净 -157.79U。
+    #   生产不受影响（TRAINING_MODE 未设时恒 False）。
+    TRAINING_SINGLE_STRATEGY = os.environ.get("TRAINING_MODE") == "1"
+    if TRAINING_SINGLE_STRATEGY:
+        print("[training] 单策略模式：只生成 left_side_oversold_bounce（15m 形态 / 1h 主信号停用）")
 
     # 解析情绪上下文（news_watcher 注入或人工传）
     EVENT = None
@@ -1151,7 +1208,8 @@ def main():
     #   - + 1h score 叠加 (5/8+形态 = "7 中过 4 + 形态" 才放行)
     #   - TP1=400 / TP2=850 手工指定 (B-改方案, 跟回测数据对齐)
     # ============================================================
-    _15m_signal = _detect_15m_pattern(contract=CONTRACT)
+    _15m_signal = None if TRAINING_SINGLE_STRATEGY else _detect_15m_pattern(contract=CONTRACT)
+    # ★ 2026-11-01 liusir：训练环境单策略 —— 只生成超跌反弹（唯一胜率过半、唯一正净利的信号源）
     _pattern_trigger = None  # {"side": "long"/"short", "score_combined": int, "ts": int}
     if _15m_signal:
         _pside = _15m_signal["side"]
@@ -1194,9 +1252,28 @@ def main():
             # 新的 hammer 出现（比如几小时后新一根 pin）会自然通过
             _last_left_ts = _load_last_left_signal(CONTRACT)
             _cur_hammer_ts = float(_left_signal["ts"])
-            if _cur_hammer_ts <= _last_left_ts:
+            # ★ 2026-11-01 重试语义（TRAINING_MODE，生产旧语义不变）：
+            #   被守卫挡下的 hammer 去重状态不再推进 → 下次扫描会再次命中同一根。
+            #   30min 内重试（守卫过了就进），超龄永久放弃（反弹已走完，再进=追高）。
+            _is_retry = False
+            _dead_retry = False
+            if os.environ.get("TRAINING_MODE") == "1":
+                _blocked = _load_left_blocked(CONTRACT)
+                if _blocked and abs(float(_blocked.get("hammer_ts") or 0) - _cur_hammer_ts) < 1:
+                    if time.time() - _cur_hammer_ts > LEFT_RETRY_MAX_AGE:
+                        P(f"\n  ⏭️  左侧信号 hammer_ts={int(_cur_hammer_ts)} 被守卫挡下且超龄"
+                          f"（{LEFT_RETRY_MAX_AGE}s）→ 永久放弃")
+                        _save_last_left_signal(CONTRACT, _cur_hammer_ts)
+                        _clear_left_blocked(CONTRACT)
+                        _dead_retry = True
+                    else:
+                        _is_retry = True
+                        P(f"\n  🔁 左侧信号 hammer_ts={int(_cur_hammer_ts)} 上次被守卫挡下 → "
+                          f"重试（{int(time.time() - _cur_hammer_ts)}s 前的 hammer）")
+            if _dead_retry or _cur_hammer_ts <= _last_left_ts:
                 # 已推过同一根 hammer：跳过 TG 推送，但仍走主流程其它环节
-                P(f"\n  ⏭️  左侧信号 hammer_ts={int(_cur_hammer_ts)} 已推过（last={int(_last_left_ts)}）→ 跳过")
+                if not _dead_retry:
+                    P(f"\n  ⏭️  左侧信号 hammer_ts={int(_cur_hammer_ts)} 已推过（last={int(_last_left_ts)}）→ 跳过")
             else:
                 P(f"\n  🔔 左侧超跌反弹信号命中 @ {datetime.fromtimestamp(_left_signal['ts'], timezone(timedelta(hours=8))).strftime('%H:%M')}")
                 P(f"     drop={_left_signal['drop_pct']:.2f}%  volx={_left_signal['volx']:.2f}x  hammer L={_left_signal['hammer_L']:.0f}  rebound={_left_signal['rebound_pct']:.2f}%")
@@ -1296,7 +1373,9 @@ def main():
                             #     · 120s 过期 → 标 cancelled
                             #   - 触发后 entry/fill_px 都用 ticker（不用 hammer_H），
                             #     跟现有 TP/SL 计算公式自动对齐
-                            _HAMMER_PREVIEW_SECS = 120  # 2 分钟监测窗
+                            _HAMMER_PREVIEW_SECS = 300 if os.environ.get("TRAINING_MODE") == "1" else 120
+                            # 训练放宽到 5min（2026-11-01）：实测同一 hammer prod 等到反弹成交、
+                            # 训练 2min 窗先过期 —— 竞速漏单。模拟盘不吃流动性，窗宽 ≥ 生产即可。
                             _left_jstat = _J.log_signal(
                                 CONTRACT, last, "long",
                                 7,   # hammer = 最高级别，1h score 不参与门槛判定
@@ -1366,8 +1445,9 @@ def main():
                             f"  TP1: {_left_signal['tp1']:,.1f} (1.30%)\n"
                             f"  TP2: {_left_signal['tp2']:,.1f} (2.90%)"
                         )
-                    elif _left_jstat in ("skipped_duplicate", "blocked_account_safety") and _left_skip_reason:
+                    elif _left_jstat in ("skipped_duplicate", "blocked_account_safety") and _left_skip_reason and not _is_retry:
                         # 已被准入守卫拦下 → 推"候选卡"告知但不挂单（保留旧行为）
+                        # （重试再被挡不重复推卡，避免刷屏）
                         push(
                             f"🔔 *左侧超跌反弹候选* (liusir-style)\n"
                             f"形态: {_left_signal['hammer_kind']} (1m pin bar @ {_ts_label})\n"
@@ -1383,13 +1463,27 @@ def main():
                             f"  TP2: {_left_signal['tp2']:.1f} ({_left_signal['tp2_pct']*100:.2f}%) 全部走\n"
                             f"\n⛔ 未挂单：{_left_skip_reason}"
                         )
-                    # 推送成功 → 持久化 hammer_ts（无论 push 内部 fail/pass 都写，避免重试 spam）
-                    _save_last_left_signal(CONTRACT, _cur_hammer_ts)
+                    # 持久化语义（2026-11-01）：
+                    #   added              → 推掉去重状态 + 清 blocked（正常闭环）
+                    #   被守卫挡下（训练） → 记 blocked、**不**推去重状态 → 下次扫描重试
+                    #   其它（error 等）  → 推掉去重状态，避免无限重试 spam
+                    if _left_jstat == "added":
+                        _save_last_left_signal(CONTRACT, _cur_hammer_ts)
+                        _clear_left_blocked(CONTRACT)
+                    elif _left_jstat in ("skipped_duplicate", "blocked_account_safety") \
+                            and os.environ.get("TRAINING_MODE") == "1":
+                        _save_left_blocked(CONTRACT, _cur_hammer_ts)
+                    else:
+                        _save_last_left_signal(CONTRACT, _cur_hammer_ts)
                 except Exception as _tg_e:
                     P(f"\n  ⚠️ 左侧信号 TG 推送失败 (非阻塞): {_tg_e}")
                     # TG 失败也要持久化，否则下次还会重推同一根 hammer
                     try:
-                        _save_last_left_signal(CONTRACT, _cur_hammer_ts)
+                        if _left_jstat in ("skipped_duplicate", "blocked_account_safety") \
+                                and os.environ.get("TRAINING_MODE") == "1":
+                            _save_left_blocked(CONTRACT, _cur_hammer_ts)
+                        else:
+                            _save_last_left_signal(CONTRACT, _cur_hammer_ts)
                     except Exception:
                         pass
     except Exception as _le:
@@ -1565,7 +1659,13 @@ def main():
                 jstat = "skipped_duplicate"
                 P(f"\n  ⚠️ 准入守卫：{_skipped_reason} → 跳过本次 journal 写入")
             else:
-                jstat = _J.log_signal(
+                # ★ 2026-11-01 liusir：训练环境单策略 —— 1h 主信号不生成（只留超跌反弹）
+                if TRAINING_SINGLE_STRATEGY:
+                    _skipped_reason = "训练单策略模式（只生成 left_side_oversold_bounce）"
+                    jstat = "skipped_duplicate"
+                    P(f"\n  ⚠️ {_skipped_reason} → 跳过 1h 主信号 journal 写入")
+                else:
+                    jstat = _J.log_signal(
                     CONTRACT, last, main_side,
                     sc_b if main_side == "long" else sc_s,
                     core_b if main_side == "long" else core_s,

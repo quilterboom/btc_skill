@@ -155,7 +155,7 @@ def _process_one(sig: Dict, now: int, ticker_px: float) -> Optional[str]:
         sig["status"] = "cancelled"
         sig["outcome"] = "HAMMER_EXPIRED"
         sig["exit_ts"] = now
-        sig["note"] = (sig.get("note") or "") + f" | hammer watcher 2min 监测窗过期（最高 ticker 未达 +{TRIGGER_PCT*100:.2f}%）"
+        sig["note"] = (sig.get("note") or "") + f" | hammer watcher 监测窗过期（最高 ticker 未达 +{TRIGGER_PCT*100:.2f}%）"
         max_high = float(sig.get("_max_high_during_window", 0) or 0)
         _push_expired(sig, max_high)
         _append_event({
