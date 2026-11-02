@@ -1685,6 +1685,11 @@ def _mm_advice(ma_payload: dict, ns: str = "main") -> "str | None":
 
     输入：build_market_analysis() 的全部输出（trend / volatility / key_levels / funding + 4 维）
     输出：100-150 字中文判读，按「数据 → 分类 → 方向」三段式
+
+    ★ 2026-11-02 liusir：交易员判读也要参考清算数据。
+      清算簇（上方=空单清算簇/上行磁吸，下方=多单清算簇/下行瀑布）作为**参考输入**进 prompt，
+      簇价格同时进 allowed_levels 白名单 —— 否则 LLM 要么不敢提，要么自己编价格。
+      ⚠️ 只做参考，不做决策门（无回测数字不下结论）。
     """
     import time as _t
     now = _t.time()
@@ -1774,6 +1779,47 @@ def _mm_advice(ma_payload: dict, ns: str = "main") -> "str | None":
     struct_sep = "\n" if struct_block else ""
     voting_sep = "\n" if voting_line else ""
 
+    # ---------- 清算簇参考（2026-11-02 liusir：判读要参考清算数据）----------
+    #   只做参考输入，不做决策门（无回测数字不下结论）。
+    #   簇价格必须进 allowed_levels —— 否则 LLM 要么不敢提，要么自己编价格。
+    #   ⚠️ 只读本地快照（liq_map_board），绝不在这里向上游发请求（IP 配额限流）。
+    liq_block = ""
+    liq_sep = ""
+    try:
+        import liq_map_board as _lmb
+        _lq = _lmb.build_liq_map_board()
+    except Exception:
+        _lq = None
+    if _lq and _lq.get("available"):
+        _ls = _lq.get("suggestion") or {}
+
+        def _lq_line(side_key, label):
+            rows = _lq.get(side_key) or []
+            if not rows:
+                return f"    {label}：无显著簇"
+            bits = []
+            for c in rows[:3]:
+                bits.append(f"{c['price']:.0f}（强度{c['strength_pct']:.0f}%，距现价"
+                            f"{c['dist_pct']:+.1f}%）")
+            return f"    {label}：{' · '.join(bits)}"
+
+        liq_block = (
+            "清算簇参考（仅作参考，不是方向建议）：\n"
+            f"    上方=空单清算簇（涨上去空头爆仓→上行磁吸）：\n"
+            f"{_lq_line('above', '上方空单簇')}\n"
+            f"    下方=多单清算簇（跌下去多头爆仓→下行瀑布）：\n"
+            f"{_lq_line('below', '下方多单簇')}\n"
+            f"    多空倾向（强度对比，仅参考）：{_ls.get('label') or '中性'}"
+            f"（倾向分 {_ls.get('score') if _ls.get('score') is not None else '—'}）"
+        )
+        liq_sep = "\n"
+        # 簇价格进白名单 —— 不在白名单里的价格 LLM 不能提
+        for _side in ("above", "below"):
+            for _c in (_lq.get(_side) or []):
+                allowed_levels.append(
+                    f"清算簇{'上方空单' if _side == 'above' else '下方多单'} {_c['price']:.0f}")
+        levels_block = "、".join(allowed_levels) if allowed_levels else "（无）"
+
     user_msg = f"""以下是 BTC 当前行情数据（{ma_payload.get('ts_str')}）：
 
 {data_summary}
@@ -1784,7 +1830,7 @@ def _mm_advice(ma_payload: dict, ns: str = "main") -> "str | None":
 资金费率（8h）：{funding_pct:.4f}%（{fund_sign_zh}）
 关键位：距 24h 高 {k.get('dist_to_high_pct')}% / 距 24h 低 {k.get('dist_to_low_pct')}%
         近阻力: {k.get('near_resistance')} / 近支撑: {k.get('near_support')}
-
+{liq_block}{liq_sep}
 【硬性规则，违反即错】
 1. 只能引用下面这份清单里的价格：{levels_block}
    不得自行推算、四舍五入到整数、或补充任何未给出的目标位/支撑阻力位。
@@ -1793,9 +1839,15 @@ def _mm_advice(ma_payload: dict, ns: str = "main") -> "str | None":
    例如结构写着"上涨段"时，就不能把它描述成"下跌中继"。
    如果结构与均线方向矛盾，就如实说"结构与均线背离"，不要编一个自洽的故事。
 3. 上面的 up/down/flat 只是均线口径的方向标签，与「结构」是两件事，不要混用。
+4. 清算簇是「参考背景」，不是方向建议、不是目标位、不是止损依据。
+   它还没被回测验证过预测力。必须在「数据」段里用半句带一句簇的位置/密度
+   （例如"上方空单清算簇较近"或"下方多单簇堆积在 77500 一带"），
+   但不得据此下结论、不得把簇价格当目标位、不得把「多空倾向」直接当方向。
+   方向仍以结构为准。
 
-请按「数据 → 分类 → 方向」三段式给一段 100-150 字的中文交易员判读：
-1. **数据** 一句话说出当前最显眼的数据特征（位置 + 趋势方向 + 资金费率/波动是否异常）
+请按「数据 → 分类 → 方向」三段式给一段 100-160 字的中文交易员判读：
+1. **数据** 一句话说出当前最显眼的数据特征（位置 + 趋势方向 + 资金费率/波动是否异常），
+   并带半句清算簇背景（规则 4）
 2. **分类** 一句话定义当前是什么行情（趋势/区间/转折/突破前夜等），以结构字段为依据
 3. **方向** 1-2 句指出近期最可能走的方向 + 关键位（突破哪里看多，跌破哪里看空，没信号就老实说观望）
 
@@ -2044,6 +2096,26 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.startswith("/api/market_shock"):
             try:
                 payload = build_shock_state()
+                body = json.dumps(payload, ensure_ascii=False).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception as e:
+                self.send_error(500, str(e))
+            return
+        # ===== 清算簇（2026-11-02 liusir：清算数据在前端展示）=====
+        #   GET /api/liq_map
+        #   ⚠️ 只读**本地已落盘的快照序列**，绝不在这里向上游发请求 ——
+        #      上游是 IP 配额限流的，网页刷新频率远高于采集器（10min 一次），
+        #      在这里取数会把整个 /api/* 封掉（见 skill web-app-api-extraction
+        #      的 references/coinank-quota-block.md）。
+        if self.path.startswith("/api/liq_map"):
+            try:
+                import liq_map_board
+                payload = liq_map_board.build_liq_map_board()
                 body = json.dumps(payload, ensure_ascii=False).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json; charset=utf-8")

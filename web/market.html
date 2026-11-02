@@ -705,6 +705,59 @@
   margin-top: 6px;
 }
 .tc .tc-kpi .t-bar > i { display: block; height: 100%; border-radius: 2px; }
+
+/* ============ 清算簇卡片（2026-11-02）============
+   展示「簇的位置」而不是原始强度曲线：3000+ 档画出来是锯齿噪声，
+   真正有用的是局部极大去重后的几个簇 + 簇随时间在靠近还是远离现价。 */
+.tc .liq-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+@media (max-width: 860px) { .tc .liq-grid { grid-template-columns: 1fr; } }
+
+.tc .liq-side-hd {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+  font-size: 11.5px; color: var(--tc-text-sub2); margin-bottom: 7px;
+}
+/* 上方=空单清算簇（价格磁吸向上）→ 红系；下方=多单清算簇（瀑布风险）→ 绿系 */
+.tc .liq-side.above .liq-side-hd b { color: var(--tc-red); font-weight: 600; }
+.tc .liq-side.below .liq-side-hd b { color: var(--tc-green); font-weight: 600; }
+
+.tc .liq-tbl { width: 100%; border-collapse: collapse; font-size: 12px; }
+.tc .liq-tbl th {
+  text-align: left; font-weight: 500; font-size: 10.5px; color: var(--tc-text-sub2);
+  padding: 0 8px 5px 0; border-bottom: 1px solid var(--tc-border);
+}
+.tc .liq-tbl th.r, .tc .liq-tbl td.r { text-align: right; }
+.tc .liq-tbl td {
+  padding: 6px 8px 6px 0; border-bottom: 1px dashed var(--tc-border);
+  font-variant-numeric: tabular-nums;
+}
+.tc .liq-tbl tr:last-child td { border-bottom: 0; }
+/* 强度条：占全图最大桶的 %（相对强度，不是绝对张数） */
+.tc .liq-tbl .st { width: 92px; }
+.tc .liq-tbl .st-track { height: 5px; background: #eee; border-radius: 2px; overflow: hidden; }
+.tc .liq-tbl .st-track > i { display: block; height: 100%; border-radius: 2px; }
+.tc .liq-side.above .st-track > i { background: var(--tc-red); }
+.tc .liq-side.below .st-track > i { background: var(--tc-green); }
+.tc .liq-px { font-weight: 600; }
+.tc .liq-dist { color: var(--tc-text-sub); font-size: 11px; }
+.tc .liq-ex { color: var(--tc-text-sub2); font-size: 10.5px; }
+
+/* 建议徽章 */
+.tc .liq-badge {
+  display: inline-flex; align-items: baseline; gap: 6px;
+  padding: 3px 9px; border-radius: 4px; font-size: 12px; font-weight: 600;
+}
+.tc .liq-badge.long { background: #fef2f2; color: var(--tc-red); }
+.tc .liq-badge.short { background: #ecfdf5; color: var(--tc-green); }
+.tc .liq-badge.neutral { background: #f3f4f6; color: var(--tc-text-sub); }
+.tc .liq-badge .sc { font-size: 11px; font-weight: 500; opacity: .8; font-variant-numeric: tabular-nums; }
+
+/* 簇位置随时间的走势小图 */
+.tc .liq-spark { width: 100%; height: 92px; display: block; margin-top: 4px; }
+.tc .liq-foot {
+  font-size: 11px; color: var(--tc-text-sub2); margin-top: 10px; padding-top: 7px;
+  border-top: 1px dashed var(--tc-border);
+}
+.tc .liq-stale { color: var(--tc-orange); font-weight: 600; }
 /* 环境结论：腾讯云大数字 + 徽章 */
 .tc .hero { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; align-items: start; }
 .tc .hero .lbl { font-size: 11.5px; color: var(--tc-text-sub2); margin-bottom: 4px; }
@@ -748,6 +801,7 @@
         <a href="#sec-chart"><span class="nav-dot"></span>价格主图</a>
         <a href="#sec-tf"><span class="nav-dot"></span>多周期</a>
         <a href="#sec-levels"><span class="nav-dot"></span>关键位</a>
+        <a href="#sec-liq"><span class="nav-dot"></span>清算簇</a>
         <a href="#sec-advisory"><span class="nav-dot"></span>交易员判读</a>
       </nav>
       <div class="tc-foot">
@@ -877,6 +931,14 @@
             <span class="meta" id="lv-meta"></span>
           </div>
           <div id="levels-body"><div class="empty">加载中…</div></div>
+        </div>
+
+        <div class="card" id="sec-liq">
+          <div class="card-hd">
+            <h3>清算簇（价格磁吸）</h3>
+            <span class="meta" id="liq-meta"></span>
+          </div>
+          <div id="liq-body"><div class="empty">加载中…</div></div>
         </div>
 
         <div class="card" id="sec-advisory">
@@ -1225,6 +1287,150 @@ function renderAdvisory(d) {
   </div>
   <div class="foot-note">数据源：gate.io 实时行情 · 行情指标 30 秒刷新 · 判读由 ${adv.text_source === "mimo" ? "AI 模型生成" : "规则兜底"}（指标口径与 Telegram 判读同源，均走 trader_view 指标引擎；Telegram 版是规则模板逐项展开，本卡是 AI 综合叙述）· 判读文中的价格为生成时刻快照，最多滞后 15 分钟</div>`;
   document.getElementById("adv-meta").textContent = adv.verdict || "";
+}
+
+// ============================ 清算簇卡片 ============================
+// ⚠️ 只读 /api/liq_map（后端读本地快照），绝不在这直连 CoinAnk —— 上游 IP 限流。
+// 展示「簇的位置」而不是原始强度曲线：3000+ 档画出来是锯齿噪声，
+// 真有用的是局部极大去重后的几个簇 + 簇随时间在靠近还是远离现价。
+async function loadLiq() {
+  try {
+    const r = await fetch("/api/liq_map", { cache: "no-store" });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const d = await r.json();
+    renderLiq(d);
+  } catch (e) {
+    const el = document.getElementById("liq-body");
+    if (el) el.innerHTML = `<div class="empty">清算簇加载失败：${e.message}</div>`;
+  }
+}
+
+function _liqSideRows(clusters) {
+  if (!clusters || !clusters.length) {
+    return `<tr><td colspan="4" class="empty" style="padding:12px 0">无显著簇</td></tr>`;
+  }
+  return clusters.map(c => `<tr>
+    <td class="liq-px">${_fmtPx(c.price, 0)}</td>
+    <td class="st"><div class="st-track"><i style="width:${Math.max(2, Math.min(100, c.strength_pct))}%"></i></div>
+        <div class="liq-dist">${c.strength_pct.toFixed(0)}%</div></td>
+    <td class="r liq-dist">${c.dist_pct > 0 ? "+" : ""}${c.dist_pct.toFixed(2)}%</td>
+    <td class="r liq-ex">${c.exchanges ? c.exchanges + "/6 家" : "—"}</td>
+  </tr>`).join("");
+}
+
+// 簇位置随时间的小走势（用 canvas，跟主图同一套 dpr 处理）
+function _liqSpark(hist) {
+  const cv = document.getElementById("liq-spark");
+  if (!cv) return;
+  const dpr = window.devicePixelRatio || 1;
+  const cssW = cv.clientWidth || 560, cssH = cv.clientHeight || 92;
+  cv.width = Math.round(cssW * dpr); cv.height = Math.round(cssH * dpr);
+  const g = cv.getContext("2d");
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, cssW, cssH);
+  const pts = hist.filter(h => h.above_dist !== null && h.below_dist !== null);
+  if (pts.length < 2) {
+    g.fillStyle = "#94a3b8"; g.font = "11px -apple-system, sans-serif";
+    g.fillText("至少两条快照才画走势", 10, cssH / 2);
+    return;
+  }
+  // 上方簇距离（正）= 空单簇；下方簇距离（负）= 多单簇。画两条线看「在靠近还是远离」
+  const maxAbs = Math.max(...pts.map(p => Math.max(Math.abs(p.above_dist), Math.abs(p.below_dist)))) || 1;
+  const padL = 6, padR = 44, padT = 8, padB = 14;
+  const plotW = cssW - padL - padR, plotH = cssH - padT - padB;
+  const X = i => padL + (plotW * i) / (pts.length - 1);
+  const Y = v => padT + plotH * (1 - (v + maxAbs) / (2 * maxAbs));
+  // 零线 = 现价
+  g.strokeStyle = "#cbd5e1"; g.lineWidth = 1; g.setLineDash([3, 3]);
+  g.beginPath(); g.moveTo(padL, Y(0)); g.lineTo(padL + plotW, Y(0)); g.stroke();
+  g.setLineDash([]);
+  const draw = (key, color) => {
+    g.strokeStyle = color; g.lineWidth = 1.8;
+    g.beginPath();
+    pts.forEach((p, i) => { const y = Y(p[key]); i ? g.lineTo(X(i), y) : g.moveTo(X(i), y); });
+    g.stroke();
+  };
+  draw("above_dist", "#e34d59");   // 空单簇距离（上方）
+  draw("below_dist", "#00a400");   // 多单簇距离（下方）
+  // 图例
+  g.font = "10px -apple-system, sans-serif"; g.textAlign = "right";
+  g.fillStyle = "#e34d59"; g.fillText("空单簇距离", cssW - 4, padT + 9);
+  g.fillStyle = "#00a400"; g.fillText("多单簇距离", cssW - 4, padT + 22);
+}
+
+function renderLiq(d) {
+  const host = document.getElementById("liq-body");
+  const meta = document.getElementById("liq-meta");
+  if (!d || !d.available) {
+    host.innerHTML = `<div class="empty">${(d && d.reason) || "暂无清算簇数据"}</div>`;
+    if (meta) meta.textContent = "";
+    return;
+  }
+  const sug = d.suggestion || {};
+  const stale = d.stale
+    ? `<span class="liq-stale">（快照 ${Math.round((d.age_sec || 0) / 60)} 分钟前，未刷新）</span>` : "";
+  if (meta) {
+    meta.textContent = d.as_of ? `快照 ${d.as_of}${d.sample_count ? ` · ${d.sample_count} 条` : ""}` : "";
+  }
+
+  const badgeCls = sug.label === "偏多" ? "long" : sug.label === "偏空" ? "short" : "neutral";
+  const drift = d.cluster_drift || {};
+  const driftTxt = s => {
+    const x = drift[s];
+    if (!x || x.delta === undefined) return "";
+    return x.approaching ? `↗ 正在靠近（${x.delta > 0 ? "+" : ""}${x.delta.toFixed(2)}%）`
+                         : `↘ 正在远离（${x.delta > 0 ? "+" : ""}${x.delta.toFixed(2)}%）`;
+  };
+
+  host.innerHTML = `
+    <div class="liq-side-hd">
+      <div>现价 <b class="liq-px" style="color:var(--tc-text)">${_fmtPx(d.last_price, 0)}</b> ${stale}</div>
+      <div>
+        <span class="liq-badge ${badgeCls}">
+          ${sug.label || "中性"}<span class="sc">倾向分 ${sug.score !== undefined ? sug.score.toFixed(2) : "—"}</span>
+        </span>
+      </div>
+    </div>
+
+    <div class="liq-grid">
+      <div class="liq-side above">
+        <div class="liq-side-hd">
+          <b>上方 · 空单清算簇</b>
+          <span>${driftTxt("above")}</span>
+        </div>
+        <table class="liq-tbl">
+          <thead><tr><th>价格</th><th>强度</th><th class="r">距离</th><th class="r">共识</th></tr></thead>
+          <tbody>${_liqSideRows(d.above)}</tbody>
+        </table>
+        <div class="liq-dist" style="margin-top:5px">价格涨上去 → 空头被清算（上行磁吸）</div>
+      </div>
+
+      <div class="liq-side below">
+        <div class="liq-side-hd">
+          <b>下方 · 多单清算簇</b>
+          <span>${driftTxt("below")}</span>
+        </div>
+        <table class="liq-tbl">
+          <thead><tr><th>价格</th><th>强度</th><th class="r">距离</th><th class="r">共识</th></tr></thead>
+          <tbody>${_liqSideRows(d.below)}</tbody>
+        </table>
+        <div class="liq-dist" style="margin-top:5px">价格跌下去 → 多头被清算（下行瀑布）</div>
+      </div>
+    </div>
+
+    <div style="margin-top:12px">
+      <div class="liq-side-hd"><b>簇位置走势（近 ${(d.history || []).length} 条快照）</b><span>纵轴 = 距现价 %</span></div>
+      <canvas id="liq-spark" class="liq-spark"></canvas>
+    </div>
+
+    <div class="liq-foot">
+      强度是<b>相对值</b>（占全图最大桶的 %），不是精确待清算张数/金额 —— CoinAnk 官方口径。
+      多空建议：参考值 = 上下两侧强度的最大值，倾向分 = (上方-下方)/参考值 ∈ [-1,1]，死区 0.15。
+      ${d.coverage_pct ? `本图覆盖 ${d.coverage_pct[0]}%~${d.coverage_pct[1]}%（区间外的簇看不见）。` : ""}
+      簇是持仓结构的模型输出，不是真实待清算单；仅供参考，不做决策门。
+    </div>`;
+
+  try { _liqSpark(d.history || []); } catch (e) { /* 走势图失败不影响主内容 */ }
 }
 
 // ============================ 主图绘制 ============================
@@ -1675,6 +1881,9 @@ window.addEventListener("resize", () => drawChart());
 // ============================ 启动 ============================
 loadBoard(false);
 setInterval(() => loadBoard(false), 30000);
+// 清算簇：采集器 10 分钟一条 → 2 分钟刷一次够了（后端另有 30s 缓存）
+loadLiq();
+setInterval(() => loadLiq(), 120000);
 </script>
 </body>
 </html>
