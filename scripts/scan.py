@@ -1243,17 +1243,22 @@ def main():
     #     5. 拉最强反弹确认（点火后 20min ≥ 0.3%）
     #   输出：推 teacher TG 卡（不进 journal，teacher 手动下）
     # ============================================================
-    # ★ 2026-11-01 liusir：训练策略加清算地图参考（CoinAnk liq-map，Plan4 apikey）
+    # ★ 2026-11-01 liusir：训练策略加清算地图参考（CoinAnk liq-map）
     #   只做参考输入：挂进信号 meta.liq_ref 供回测归因 + 扫描日志展示；
     #   不做决策门（没回测数字不下结论）。拿不到数据如实显示不可用，不编造。
+    #   ★ 2026-11-02：数据源改为 CoinAnk 网页版接口（不需要 Plan4 apikey），
+    #     上方=空单清算簇 / 下方=多单清算簇（CoinAnk 官方读图口径）。
     _liq_ref = None
+    _liq_line = ""
     if TRAINING_SINGLE_STRATEGY:
         try:
             from liq_map import liq_reference, format_reference
             _liq_ref = liq_reference(last)
-            P(f"\n  🧲 {format_reference(_liq_ref)}")
+            _liq_line = f"\n  🧲 {format_reference(_liq_ref)}"
+            P(_liq_line)
         except Exception as _lqe:
-            P(f"\n  🧲 清算地图：加载异常（{_lqe}）")
+            _liq_line = f"\n  🧲 清算地图：加载异常（{_lqe}）"
+            P(_liq_line)
     _left_signal = None
     try:
         _left_signal = _detect_left_side_long(contract=CONTRACT)
@@ -1882,6 +1887,10 @@ def main():
         for nm, v in sup:
             P(f"      {v:>10,.1f}   {(v/last-1)*100:+.2f}%    {nm}")
         P(f"  {'─'*72}")
+        # ★ 2026-11-02：清算地图参考 + 多空建议（--brief 模式下 P() 被静默，
+        #   训练服务走的就是 --brief，所以必须在这里显式打一次，否则日志里永远看不到）
+        if _liq_line:
+            P(_liq_line)
         # ★ 只给「当前行情偏向的那一个方向」
         pl = plan_b if main_side == "long" else plan_s
         sc = sc_b if main_side == "long" else sc_s
