@@ -323,7 +323,13 @@ def _prune_raw(keep_days: int = RAW_KEEP_DAYS) -> int:
 
 
 def collect(force: bool = False) -> Optional[Dict]:
-    """采一次快照：写派生特征行 + 原始曲线。返回行（不可用时 None）。"""
+    """采一次快照：写派生特征行 + 原始曲线。返回行（不可用时 None）。
+
+    ★ 请求预算：一次采集**最多 1 个 HTTP 请求**。
+      liq_reference() 内部已取过 agg + single（走文件缓存），这里直接复用，
+      绝不再单独调 fetch_* —— 否则一轮就是 4~6 个请求，会把上游配额打爆
+      （2026-11-02 15:20 实测：整个 /api/* 被 IP 级封禁）。
+    """
     ref = liq_map.liq_reference(None)
     if not ref.get("available"):
         _log(f"⏭️  清算地图不可用：{ref.get('reason')}")
@@ -351,14 +357,9 @@ def collect(force: bool = False) -> Optional[Dict]:
         },
     }
 
-    # 原始曲线（尽力而为）
-    agg = liq_map.fetch_agg_liq_map()
-    single = liq_map.fetch_liq_map()
-    agg_payload = agg.get("payload") if isinstance(agg.get("payload"), dict) else agg
-    single_payload = single.get("payload") if isinstance(single.get("payload"), dict) else single
-    raw_file = _save_raw(ts,
-                         agg_payload if isinstance(agg_payload, dict) else {},
-                         single_payload if isinstance(single_payload, dict) else {})
+    # 原始曲线（尽力而为）—— 复用 liq_reference 已取到的 payload，不额外发请求
+    raws = ref.get("raw_payloads") or {}
+    raw_file = _save_raw(ts, raws.get("agg") or {}, raws.get("single") or {})
     if raw_file:
         row["raw_file"] = raw_file
 

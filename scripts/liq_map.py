@@ -123,6 +123,74 @@ def _valid_payload(data: Any) -> TypeGuard[Dict]:
     return True
 
 
+# 请求预算：单次采集最多发几个 HTTP 请求。
+# ★ 教训（2026-11-02 15:20）：上游按 IP 配额限流，测试时高频打了几十次 →
+#   整个 /api/* 命名空间被封（code=403 "please sub api to get data"），
+#   浏览器真实会话也一样挂（说明是 IP 级，不是鉴权问题）。
+#   采集器必须**每轮只发固定几个请求**（agg + single 各 1 个），失败时也不许重试放大。
+MAX_REQUESTS_PER_COLLECT = 2
+
+# 配额封禁识别：这两个 msg 与「鉴权失败」是**不同**的错误形状，必须分开。
+#   system error                        → 鉴权/常量过期 → 触发常量重发现
+#   please sub api to get data (403)   → 配额封禁 → 退避，绝不重试
+QUOTA_MSGS = ("please sub api to get data",)
+AUTH_MSGS = ("system error",)
+
+
+class QuotaBlocked(Exception):
+    """上游配额封禁（IP 级）。→ 退避，不要重试。"""
+
+
+# 配额封禁退避：封禁期间**一个 HTTP 请求都不发**。
+# 退避窗口随连续封禁次数指数增长（10min → 30min → 2h → 6h，上限 6h）。
+QUOTA_BACKOFF_BASE = 600
+QUOTA_BACKOFF_MAX = 6 * 3600
+QUOTA_STATE_PATH = Path(os.environ.get("BTC_DATA_DIR") or "/root/data") / "liq_map_quota_state.json"
+
+
+def _quota_state() -> Dict:
+    try:
+        if QUOTA_STATE_PATH.exists():
+            st = json.loads(QUOTA_STATE_PATH.read_text(encoding="utf-8"))
+            return st if isinstance(st, dict) else {}
+    except Exception:
+        pass
+    return {}
+
+
+def _quota_save(st: Dict) -> None:
+    try:
+        QUOTA_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = str(QUOTA_STATE_PATH) + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(st, f)
+        os.replace(tmp, QUOTA_STATE_PATH)
+    except Exception:
+        pass
+
+
+def quota_blocked_until() -> float:
+    """返回退避截止时间戳（0 = 未封禁）。"""
+    st = _quota_state()
+    until = float(st.get("until") or 0)
+    return until if until > _now() else 0.0
+
+
+def _quota_record_block() -> int:
+    """记录一次封禁，返回下次允许请求的时间戳。"""
+    st = _quota_state()
+    streak = int(st.get("streak") or 0) + 1
+    delay = min(QUOTA_BACKOFF_BASE * (3 ** (streak - 1)), QUOTA_BACKOFF_MAX)
+    until = _now() + delay
+    _quota_save({"streak": streak, "until": until, "last_block": _now()})
+    return until
+
+
+def _quota_clear() -> None:
+    if _quota_state():
+        _quota_save({})
+
+
 def _now() -> float:
     return time.time()
 
@@ -335,6 +403,8 @@ def _fetch_web(path: str, params: Dict, mat: Dict) -> Tuple[Dict, bool]:
     """web 源取数。返回 (data, 是否疑似鉴权失败)。
 
     鉴权失败表现为 success=false + msg='system error' → 触发重新发现常量。
+    ★ 配额封禁（msg='please sub api to get data', code=403）**不是**鉴权问题 →
+      抛 QuotaBlocked，调用方必须退避而不是重试（重试只会加深封禁）。
     """
     qs = "&".join(f"{k}={v}" for k, v in params.items())
     ok, body = _http_json(f"{WEB_API_BASE}{path}?{qs}", _web_headers(mat))
@@ -345,8 +415,11 @@ def _fetch_web(path: str, params: Dict, mat: Dict) -> Tuple[Dict, bool]:
         if _valid_payload(data):
             return dict(data), False
         return {}, False
-    msg = str(body.get("msg") or "")
-    return {}, ("system error" in msg or body.get("code") in ("403", 403))
+    msg = str(body.get("msg") or "").lower()
+    if any(q in msg for q in QUOTA_MSGS):
+        raise QuotaBlocked(f"上游配额封禁: {body.get('msg')}")
+    auth_fail = any(a in msg for a in AUTH_MSGS) or body.get("code") in ("403", 403)
+    return {}, auth_fail
 
 
 def fetch_liq_map(symbol: str = DEFAULT_SYMBOL, exchange: str = DEFAULT_EXCHANGE,
@@ -365,17 +438,33 @@ def fetch_liq_map(symbol: str = DEFAULT_SYMBOL, exchange: str = DEFAULT_EXCHANGE
     params = {"exchange": exchange, "symbol": symbol, "interval": interval}
     data: Dict = {}
     source = "coinank-web"
+    blocked_until = quota_blocked_until()
+    if blocked_until:
+        return _unavailable(f"上游配额封禁中，退避至 "
+                            f"{time.strftime('%H:%M:%S', time.localtime(blocked_until))}")
     if key:
         data = _fetch_open_api(SINGLE_PATH, params, key)
         if data:
             source = "coinank-openapi"
     if not data:
         mat = _auth_material()
-        data, auth_fail = _fetch_web(SINGLE_PATH, params, mat)
+        try:
+            data, auth_fail = _fetch_web(SINGLE_PATH, params, mat)
+        except QuotaBlocked:
+            until = _quota_record_block()
+            return _unavailable(f"上游配额封禁，退避至 "
+                                f"{time.strftime('%H:%M:%S', time.localtime(until))}")
         if auth_fail and not data:
             fresh = _discover_auth()
             if fresh:
-                data, _ = _fetch_web(SINGLE_PATH, params, fresh)
+                try:
+                    data, _ = _fetch_web(SINGLE_PATH, params, fresh)
+                except QuotaBlocked:
+                    until = _quota_record_block()
+                    return _unavailable(f"上游配额封禁，退避至 "
+                                        f"{time.strftime('%H:%M:%S', time.localtime(until))}")
+    if data:
+        _quota_clear()
     if not data or not _valid_payload(data):
         return _unavailable("上游无数据（CoinAnk 接口未返回清算地图）")
 
@@ -398,13 +487,29 @@ def fetch_agg_liq_map(base_coin: str = DEFAULT_BASE_COIN, interval: str = DEFAUL
         return out
 
     params = {"baseCoin": base_coin, "interval": interval}
+    blocked_until = quota_blocked_until()
+    if blocked_until:
+        return _unavailable(f"上游配额封禁中，退避至 "
+                            f"{time.strftime('%H:%M:%S', time.localtime(blocked_until))}")
     mat = _auth_material()
-    data, auth_fail = _fetch_web(AGG_PATH, params, mat)
+    try:
+        data, auth_fail = _fetch_web(AGG_PATH, params, mat)
+    except QuotaBlocked:
+        until = _quota_record_block()
+        return _unavailable(f"上游配额封禁，退避至 "
+                            f"{time.strftime('%H:%M:%S', time.localtime(until))}")
     source = "coinank-web"
     if auth_fail and not data:
         fresh = _discover_auth()
         if fresh:
-            data, _ = _fetch_web(AGG_PATH, params, fresh)
+            try:
+                data, _ = _fetch_web(AGG_PATH, params, fresh)
+            except QuotaBlocked:
+                until = _quota_record_block()
+                return _unavailable(f"上游配额封禁，退避至 "
+                                    f"{time.strftime('%H:%M:%S', time.localtime(until))}")
+    if data:
+        _quota_clear()
     if not data or not _valid_payload(data):
         return _unavailable("上游无数据（CoinAnk 聚合清算地图未返回）")
 
@@ -541,6 +646,15 @@ def liq_reference(last_price: Optional[float], symbol: str = DEFAULT_SYMBOL,
     """
     agg = fetch_agg_liq_map(base_coin=base_coin, interval=interval)
     single = fetch_liq_map(symbol=symbol, exchange=exchange, interval=interval)
+    # ★ 把已取到的原始 payload 带出来（供采集器存原始曲线）——
+    #   否则调用方为了拿 raw 又要重新 fetch 一遍，请求数翻倍。
+    #   配额是 IP 级限流的，请求数就是命脉。
+    raw_payloads = {
+        "agg": {k: v for k, v in agg.items()
+                if k not in ("available", "source", "cached")} if agg.get("available") else {},
+        "single": {k: v for k, v in single.items()
+                   if k not in ("available", "source", "cached")} if single.get("available") else {},
+    }
 
     # 优先用聚合图（6 家交易所共识，比单家稳）；拿不到就退回单交易所
     if agg.get("available") and agg.get("prices"):
@@ -614,6 +728,7 @@ def liq_reference(last_price: Optional[float], symbol: str = DEFAULT_SYMBOL,
         "clusters_below": below[:TOP_N],
         "coverage_pct": [round(cov_lo, 2), round(cov_hi, 2)],
         "suggestion": compute_suggestion(above[:TOP_N], below[:TOP_N]),
+        "raw_payloads": raw_payloads,
         "as_of": int(_now()),
     }
 

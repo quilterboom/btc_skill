@@ -115,6 +115,8 @@ class TestFetchValidation(unittest.TestCase):
         self._patchers = [
             mock.patch.object(liq_map, "CACHE_PATH", Path(os.path.join(self._tmp, "c.json"))),
             mock.patch.object(liq_map, "AUTH_CACHE_PATH", Path(os.path.join(self._tmp, "a.json"))),
+            # ★ 必须隔离配额状态（真实环境的退避状态会让测试假失败）
+            mock.patch.object(liq_map, "QUOTA_STATE_PATH", Path(os.path.join(self._tmp, "q.json"))),
         ]
         for p in self._patchers:
             p.start()
@@ -210,6 +212,9 @@ class TestReference(unittest.TestCase):
         self._patchers = [
             mock.patch.object(liq_map, "CACHE_PATH", Path(os.path.join(self._tmp, "c.json"))),
             mock.patch.object(liq_map, "AUTH_CACHE_PATH", Path(os.path.join(self._tmp, "a.json"))),
+            # ★ 必须隔离配额状态：真实环境的 liq_map_quota_state.json 会让
+            #   所有测试走「退避中」分支 → 拿不到数据 → 测试假失败
+            mock.patch.object(liq_map, "QUOTA_STATE_PATH", Path(os.path.join(self._tmp, "q.json"))),
         ]
         for p in self._patchers:
             p.start()
@@ -378,6 +383,8 @@ class TestSuggestionInReference(unittest.TestCase):
         self._patchers = [
             mock.patch.object(liq_map, "CACHE_PATH", Path(os.path.join(self._tmp, "c.json"))),
             mock.patch.object(liq_map, "AUTH_CACHE_PATH", Path(os.path.join(self._tmp, "a.json"))),
+            # ★ 必须隔离配额状态（真实环境的退避状态会让测试假失败）
+            mock.patch.object(liq_map, "QUOTA_STATE_PATH", Path(os.path.join(self._tmp, "q.json"))),
         ]
         for p in self._patchers:
             p.start()
@@ -412,6 +419,75 @@ class TestSuggestionInReference(unittest.TestCase):
     def test_format_suggestion_unavailable(self):
         t = liq_map.format_suggestion({"available": False, "reason": "无簇"})
         self.assertIn("不可用", t)
+
+
+class TestQuotaHandling(unittest.TestCase):
+    """★ 配额封禁（2026-11-02 15:20 实测事故）的处理。
+
+    上游按 IP 配额限流：测试时高频打了几十次 → 整个 /api/* 命名空间被封
+    （code=403 "please sub api to get data"），浏览器真实会话也一样挂。
+    → 封禁期间必须**一个请求都不发**，且不能当成鉴权失败去重发现常量。
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp()
+        self._p = [
+            mock.patch.object(liq_map, "QUOTA_STATE_PATH", Path(self._tmp) / "q.json"),
+            mock.patch.object(liq_map, "CACHE_PATH", Path(self._tmp) / "c.json"),
+            mock.patch.object(liq_map, "AUTH_CACHE_PATH", Path(self._tmp) / "a.json"),
+        ]
+        for p in self._p:
+            p.start()
+
+    def tearDown(self):
+        for p in self._p:
+            p.stop()
+
+    def test_quota_msg_raises_not_auth_failure(self):
+        """配额封禁 ≠ 鉴权失败 → 必须抛 QuotaBlocked，不能触发常量重发现。"""
+        body = {"success": False, "code": "403", "msg": "please sub api to get data"}
+        with mock.patch.object(liq_map, "_http_json", return_value=(True, body)):
+            with self.assertRaises(liq_map.QuotaBlocked):
+                liq_map._fetch_web("/api/liqMap/getLiqMap", {}, liq_map._auth_material())
+
+    def test_auth_msg_still_returns_auth_flag(self):
+        """鉴权失败（system error）→ 仍走常量重发现路径。"""
+        body = {"success": False, "code": "1", "msg": "system error"}
+        with mock.patch.object(liq_map, "_http_json", return_value=(True, body)):
+            data, auth_fail = liq_map._fetch_web("/api/liqMap/getLiqMap", {}, liq_map._auth_material())
+        self.assertEqual(data, {})
+        self.assertTrue(auth_fail)
+
+    def test_backoff_blocks_all_requests(self):
+        """退避期间 → 零 HTTP 请求。"""
+        liq_map._quota_record_block()
+        self.assertGreater(liq_map.quota_blocked_until(), 0)
+        with mock.patch.object(liq_map, "_http_json",
+                               side_effect=AssertionError("退避期不该发请求")) as m:
+            r = liq_map.fetch_liq_map(force=True)
+        self.assertFalse(r["available"])
+        self.assertIn("配额封禁", r["reason"])
+        self.assertEqual(m.call_count, 0)
+
+    def test_backoff_grows_exponentially(self):
+        """连续封禁 → 退避窗口指数增长（有上限）。"""
+        d1 = liq_map._quota_record_block() - liq_map._now()
+        d2 = liq_map._quota_record_block() - liq_map._now()
+        d3 = liq_map._quota_record_block() - liq_map._now()
+        self.assertLess(d1, d2)
+        self.assertLess(d2, d3)
+        self.assertLessEqual(d3, liq_map.QUOTA_BACKOFF_MAX + 1)
+
+    def test_backoff_cleared_on_success(self):
+        liq_map._quota_record_block()
+        self.assertGreater(liq_map.quota_blocked_until(), 0)
+        liq_map._quota_clear()
+        self.assertEqual(liq_map.quota_blocked_until(), 0)
+
+    def test_expired_backoff_allows_request(self):
+        """退避过期 → 恢复请求。"""
+        liq_map._quota_save({"streak": 1, "until": liq_map._now() - 1})
+        self.assertEqual(liq_map.quota_blocked_until(), 0)
 
 
 if __name__ == "__main__":
