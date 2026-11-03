@@ -171,21 +171,25 @@ def _apply_sl(rec: Dict, last: float, now_ts: int) -> Optional[Dict]:
     exit_px = round(last, 1)
     rec["exit_ts"] = now_ts
     rec["exit_px"] = exit_px
-    # ★ 2026-10-22 修复：SL 分支必须改 status，否则下一轮
-    #   `if r.get("status") != "pending": continue` 守卫永远放行，
-    #   每秒重复触发一次（实测单笔刷了 26267 次，journal 被反复写盘）。
-    #   同时补 outcome/pos_state，settler 才有据可依。
-    rec["status"] = "settled"
-    rec["outcome"] = rec.get("outcome") or (
-        "BE_STOPPED" if rec.get("tp1_hit") else "SL_STOPPED")
-    rec["pos_state"] = rec.get("pos_state") or rec["outcome"]
-    rec["risk_guard_exit_ts"] = now_ts
-    rec["risk_guard_exit_px"] = exit_px
+    # ★★ 2026-11-03 修复（线上 bug，顺序错了）：canonical 结算必须在 status="settled"
+    #   **之前**算完。原顺序是「先写 status="settled" → 再调 _canonical_close」，
+    #   而 11-01 给 position_tracker._close 加的幂等守卫会把 status=="settled"
+    #   的记录判成「二次结算」直接抛错 → 首次结算的 net_usd 永远写不进去
+    #   → 记录卡成 status=settled 但 net_usd=null（C 类卡死单，不进任何胜率/净利统计）。
+    #   实测命中 11-03 04:58 两笔：生产 BTC_USDT-1793649653-long / 训练 BTC_USDT-1793649652-long。
     try:
         res = _canonical_close(rec, exit_px, now_ts)
     except Exception as e:
         rec["settle_error"] = str(e)[:300]
         rec["settle_error_ts"] = now_ts
+        # 失败也标 settled（避免 risk_guard 每秒重复触发同一笔，见 10-22 修复），
+        # 但**不写 net** —— 宁可留空也不编造数字。
+        rec["status"] = "settled"
+        rec["outcome"] = rec.get("outcome") or (
+            "BE_STOPPED" if rec.get("tp1_hit") else "SL_STOPPED")
+        rec["pos_state"] = rec.get("pos_state") or rec["outcome"]
+        rec["risk_guard_exit_ts"] = now_ts
+        rec["risk_guard_exit_px"] = exit_px
         log(f"[risk_guard] {rec.get('id', '?')} canonical 结算失败，net 留空（不编造）: {e}")
         return None
     rec["net_usd"] = res["net_usd"]
@@ -199,6 +203,10 @@ def _apply_sl(rec: Dict, last: float, now_ts: int) -> Optional[Dict]:
     if res.get("outcome"):
         rec["outcome"] = res["outcome"]
         rec["pos_state"] = res.get("pos_state") or rec["outcome"]
+    # ★ 2026-11-03：status 最后写 —— canonical 算完、净值写进去了，才标 settled。
+    rec["status"] = "settled"
+    rec["risk_guard_exit_ts"] = now_ts
+    rec["risk_guard_exit_px"] = exit_px
     return {"id": rec.get("id"), "outcome": rec["outcome"],
             "net_usd": res["net_usd"], "category": res["category"],
             "exit_ts": now_ts, "ts": int(time.time())}
@@ -359,6 +367,11 @@ def risk_guard_loop():
     #   （guard 走 guard_partial_*、卡片按盈亏符号分流、category 由 net 符号定）
     log("[risk_guard] FEATURE guard-not-tp1-v1 enabled "
         "(adverse→guard_partial_*, card wording by pnl sign, category by net sign)")
+    # ★ 2026-11-03 特征串：证明「canonical 先算、status 后写」的顺序修复已加载。
+    #   旧顺序（先标 settled 再算 canonical）会被 _close 幂等守卫误判成二次结算
+    #   → net_usd 永远写不进去（C 类卡死单）。看到这行 = 新代码在跑。
+    log("[risk_guard] FEATURE settle-order-fix-v1 enabled "
+        "(canonical close BEFORE status=settled → net_usd always written)")
     try:
         contract = fetch_contract("BTC_USDT")
     except Exception as e:

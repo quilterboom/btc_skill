@@ -560,7 +560,15 @@ def _close(sig: Dict, outcome: str, exit_px: float, exit_ts: int,
     #   重复结算会伪造出场（实测 BTC_USDT-1792980010-long：10-26 真实结算 +3.14U，
     #   10-28 外部脚本绕过 settle_all 再次结算改写成 +24.88U，凭空多出 21.74U）。
     #   要修历史数据走 btc-position-ops 的回填流程，不允许结算路径自己改已结算记录。
-    if sig.get("status") == "settled":
+    # ★ 2026-11-03 收窄守卫（线上 bug 修复）：只有「已结算 **且净值已写**」的记录才拒。
+    #   原守卫写成 `status == "settled"` 就抛错，于是：
+    #     · risk_guard._apply_sl 先写 status="settled" 再调 canonical → 首次结算被
+    #       误判成「二次结算」→ 抛错 → net_usd 永远写不进去（C 类卡死单）
+    #       （实测 11-03 04:58：生产 BTC_USDT-1793649653-long / 训练 BTC_USDT-1793649652-long）
+    #     · 回填脚本对这类记录调 canonical 也会崩
+    #   收窄后：**净值已写的**二次结算仍然被拒（防伪造出场 / 改写净值，10-28 事故防线不变），
+    #   而 **status=settled 但 net_usd 仍为 null** 的卡死单允许重算 → 补得上净值。
+    if sig.get("status") == "settled" and sig.get("net_usd") is not None:
         raise ValueError(
             f"[position_tracker] _close 拒绝二次结算 id={sig.get('id', '?')} "
             f"（已结算 outcome={sig.get('outcome')} net={sig.get('net_usd')}）。"

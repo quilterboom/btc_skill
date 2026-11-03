@@ -25,3 +25,6 @@ config.yaml.*-bak-*
 
 # LLM 凭证（本地 EnvironmentFile，绝不入库）
 web/.mimo_key.env
+
+# 真实 API key，绝不入库（LLM 判读模型链的密钥）
+web/.llm_keys.env

@@ -44,11 +44,17 @@ TARGETS = {
         "BTC_USDT-1792699207-short",   # TP1 后被保本打掉
         "BTC_USDT-1792594815-long",    # 10-22 手动结算 —— 只补 event，net 不动
         "BTC_USDT-1792868423-short",   # 10-25 07:32 risk_guard 真实止损（handoff 后新增）
+        # ★ 2026-11-03 补：risk_guard 调用顺序 bug（先标 settled 再算 canonical）
+        #   → 11-03 04:58 这笔首次结算被幂等守卫误判成二次结算 → net_usd 永远写不进去。
+        #   出场价已用 1m K 验证（04:58 那根 low=76700 触及 exit_px 76708）。
+        "BTC_USDT-1793649653-long",
     ],
     "train": [
         "BTC_USDT-1792854928-short",   # 真实止损
         "BTC_USDT-1792702834-short",   # TP1 后被保本打掉
         "BTC_USDT-1792863032-short",   # 10-25 10:41 risk_guard 真实止损（handoff 后新增）
+        # ★ 2026-11-03 补：同上（训练环境同一时刻的孪生单）
+        "BTC_USDT-1793649652-long",
     ],
 }
 
@@ -185,14 +191,34 @@ def main() -> int:
                 res = _canonical_close(r, float(r.get("exit_px") or 0),
                                        int(r.get("exit_ts") or 0))
                 net, gross, cat = res["net_usd"], res["gross_usd"], res["category"]
+                # ★ 2026-11-03：net 缺失 = 这次结算**从未真正完成** →
+                #   journal 里的 outcome/pos_state 是 risk_guard 的粗略猜测
+                #   （tp1_hit 为 False 时一律写 SL_STOPPED），不是 canonical 判定。
+                #   canonical 算出什么就写什么，否则会出现
+                #   「outcome=SL_STOPPED 但 category=profit」的自相矛盾记录。
+                #   注意：只在 net 原本为 None 时改 —— 已经结算完的记录
+                #   不许改写结局（F 类「二次结算改写」纪律）。
+                net_missing = r.get("net_usd") is None
                 if not args.dry_run:
                     # 只补缺字段；已有的（如 net）保持原值不覆盖
-                    if r.get("net_usd") is None:
+                    if net_missing:
                         r["net_usd"] = net
                     if r.get("gross_usd") is None:
                         r["gross_usd"] = gross
                     if not r.get("category"):
                         r["category"] = cat
+                    if net_missing:
+                        r["outcome"] = res.get("outcome") or r.get("outcome")
+                        r["pos_state"] = res.get("pos_state") or r.get("pos_state")
+                        # 结算已完成 → 旧的 settle_error 是历史噪音，清掉（留痕在回填报告里）
+                        r.pop("settle_error", None)
+                        r.pop("settle_error_ts", None)
+                        r["net_backfilled"] = {
+                            "ts": int(time.time()),
+                            "why": ("risk_guard 调用顺序 bug：先标 status=settled 再算 "
+                                    "canonical，被 _close 幂等守卫误判成二次结算 → "
+                                    "net_usd 永远写不进去（2026-11-03 修）"),
+                        }
                     changed = True
                 print(f"[{'would-write' if args.dry_run else 'write'}] {rid} "
                       f"gate={r.get('risk_guard_exit_px')} gross={gross} net={net} cat={cat}")
