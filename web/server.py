@@ -15,7 +15,7 @@ BTC 策略运行状态面板（3003）
 """
 from __future__ import annotations
 import os, re, sys, json, time, glob, subprocess
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -1668,6 +1668,8 @@ def _advisory(ma_trend_15m, ma_trend_1h, ma_trend_4h, ma_convergence,
         # 2026-10-18 加：mimo 生成的交易员口吻判读（None 时前端 fallback 到 verdict）
         "text": mm_text,
         "text_source": "mimo" if mm_text else "fallback",
+        # ★ 判读用的模型（2026-11-02 模型链：主 minimax，备 mimo）
+        "text_provider": _MM_CACHES.get(mm_ns, {}).get("provider") or "",
     }
 
 
@@ -1676,7 +1678,8 @@ def _advisory(ma_trend_15m, ma_trend_1h, ma_trend_4h, ma_convergence,
 #   "board" = /api/market_board（行情大图）
 # 两个端点的 payload 略有差异（取价口径/EMA 深度不同），共用一个缓存会导致
 # 「图上写 80,145、AI 判读写 80,083」这种自相矛盾，所以分开存。
-_MM_CACHES: dict = {"main": {"ts": 0, "text": None}, "board": {"ts": 0, "text": None}}
+_MM_CACHES: dict = {"main": {"ts": 0, "text": None, "provider": ""},
+                    "board": {"ts": 0, "text": None, "provider": ""}}
 _MM_CACHE_TTL = 900  # mimo 生成的结果缓存 15min（跟前端 15min 自动刷新节奏一致；首请求慢由 nginx read_timeout 保障）
 
 
@@ -1693,7 +1696,7 @@ def _mm_advice(ma_payload: dict, ns: str = "main") -> "str | None":
     """
     import time as _t
     now = _t.time()
-    cache = _MM_CACHES.setdefault(ns, {"ts": 0, "text": None})
+    cache = _MM_CACHES.setdefault(ns, {"ts": 0, "text": None, "provider": ""})
     if cache["text"] and now - cache["ts"] < _MM_CACHE_TTL:
         return cache["text"]
 
@@ -1853,60 +1856,89 @@ def _mm_advice(ma_payload: dict, ns: str = "main") -> "str | None":
 
 口吻要求：像有 3-5 年经验的 BTC 交易员在群里发的简评，不绕弯不堆术语。少用 emoji。不用 markdown 加粗。用句号分句，不要换行。""".strip()
 
-    try:
-        import urllib.request
-        import urllib.error
-        mimo_url = "https://token-plan-cn.xiaomimimo.com/v1/chat/completions"
-        mimo_model = "mimo-v2.6-pro"
-        # ★ 凭证走环境变量（2026-11-01：明文进过 git 历史，已清洗）。
-        #   systemd 侧 EnvironmentFile=web/.mimo_key.env（chmod 600，gitignore）。
-        #   缺失时返回 None → 前端 fallback 规则 verdict，不静默用空串。
-        mimo_key = os.environ.get("MIMO_API_KEY", "").strip()
-        if not mimo_key:
-            print("[mimo] MIMO_API_KEY 未配置，判读回落规则模板", flush=True)
-            return None
-        body = json.dumps({
-            "model": mimo_model,
-            # ★ 2026-10-31：320 → 1200。
-            #   mimo-v2.6-pro 是**推理型**模型，max_tokens 同时给「思考」和「输出」用。
-            #   实测 finish_reason=length 时 completion_tokens=320 但 reasoning_tokens=320
-            #   → 320 根全被思考吃掉，正文输出 0 字 → 页面上判读只写半句就断了。
-            #   1200 实测：reasoning 82 + 正文 188 = 270 tokens，finish_reason=stop，
-            #   稳定输出完整「数据→分类→方向」三段。
-            "max_tokens": 1200,
-            "temperature": 0.5,
-            "messages": [
-                # ★ 2026-10-31：原文「习惯用一两句短话说清行情」跟 user prompt 的
-                #   「三段式 100-150 字」自相矛盾 —— 两个指令打架会让模型往短里写，
-                #   叠加 max_tokens 问题就是判读只写半句。现在改成跟 user prompt 同向。
-                {"role": "system", "content": "你是一个有 3-5 年经验的 BTC 合约交易员，用简评口吻把行情说清楚：先说数据特征，再说行情分类，最后给方向。不绕弯、不堆术语、不加 emoji、不用 markdown 加粗。"},
-                {"role": "user", "content": user_msg},
-            ],
-        }).encode("utf-8")
-        req = urllib.request.Request(
-            mimo_url, data=body,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {mimo_key}",
-            },
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read())
-        text = (data.get("choices") or [{}])[0].get("message", {}).get("content", "").strip()
-        if not text:
-            return None
-        # 兜底：去掉首尾空白
-        text = text.replace("\n", " ").strip()
-        # 单段式：去掉可能的多余空行
-        import re as _re
-        text = _re.sub(r"\s+", " ", text)
-        _MM_CACHES[ns]["text"] = text
-        _MM_CACHES[ns]["ts"] = now
-        return text
-    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, KeyError, TimeoutError, OSError):
-        # mimo 失败时返回 None，让调用方 fallback 到 advisory.verdict
-        return None
+    # ---------- 模型链：主 minimax，备 mimo（2026-11-02 liusir）----------
+    #   跟 Hermes 自己的 fallback_providers 同构：主模型报错 → 自动降级到备模型。
+    #   两个都是 MiniMax 系：
+    #     主 MiniMax-M3.1-Flash-Preview @ api.minimaxi.com（minimax-cn）
+    #     备 mimo-v2.6-pro           @ token-plan-cn.xiaomimimo.com
+    #   ★ 两个都是**推理型**模型：max_tokens 同时给「思考」和「输出」用。
+    #     实测 MiniMax-M3.1-Flash：1200/2000/4000 都 finish_reason=length 且正文 0 字
+    #     （reasoning 吃光预算）；3000 才 finish_reason=stop 出完整三段。
+    #     mimo-v2.6-pro：1200 够用（reasoning 82 + 正文 188）。
+    #   ★ 凭证都走环境变量（明文不进 git）：
+    #     MINIMAX_CN_API_KEY → /root/.hermes/.env（Hermes 自己的）
+    #     MIMO_API_KEY       → web/.mimo_key.env（systemd EnvironmentFile）
+    #   ★ 拿不到 key 或调用失败 → 返回 None → 前端 fallback 到规则 verdict，不静默用空串。
+    providers = [
+        ("minimax", "https://api.minimaxi.com/v1/chat/completions",
+         "MiniMax-M3.1-Flash-Preview", 3000, "MINIMAX_CN_API_KEY"),
+        ("mimo", "https://token-plan-cn.xiaomimimo.com/v1/chat/completions",
+         "mimo-v2.6-pro", 1200, "MIMO_API_KEY"),
+    ]
+    import urllib.request
+    import urllib.error
+
+    body = json.dumps({
+        "model": "",   # 下面按 provider 填
+        "max_tokens": 0,
+        "temperature": 0.5,
+        "messages": [
+            # ★ 2026-10-31：原文「习惯用一两句短话说清行情」跟 user prompt 的
+            #   「三段式 100-150 字」自相矛盾 —— 两个指令打架会让模型往短里写，
+            #   叠加 max_tokens 问题就是判读只写半句。现在改成跟 user prompt 同向。
+            {"role": "system", "content": "你是一个有 3-5 年经验的 BTC 合约交易员，用简评口吻把行情说清楚：先说数据特征，再说行情分类，最后给方向。不绕弯、不堆术语、不加 emoji、不用 markdown 加粗。"},
+            {"role": "user", "content": user_msg},
+        ],
+    }).encode("utf-8")
+
+    last_err = None
+    for pname, purl, pmodel, pmax, pkey_env in providers:
+        pkey = os.environ.get(pkey_env, "").strip()
+        if not pkey:
+            # 没配 key 就试下一个（可能只配了一个）
+            last_err = f"{pname}: {pkey_env} 未配置"
+            print(f"[{pname}] {pkey_env} 未配置，尝试下一个模型", flush=True)
+            continue
+        payload = json.loads(body.decode())
+        payload["model"] = pmodel
+        payload["max_tokens"] = pmax
+        try:
+            req = urllib.request.Request(
+                purl, data=json.dumps(payload).encode("utf-8"),
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {pkey}",
+                    "User-Agent": "Mozilla/5.0",
+                },
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=40) as resp:
+                data = json.loads(resp.read())
+            text = (data.get("choices") or [{}])[0].get("message", {}).get("content", "").strip()
+            if not text:
+                # ★ 推理型模型预算被思考吃光 → 正文空。
+                #   这时**不**降级到备模型（备模型可能也一样），
+                #   而是重试一次并加倍预算 —— 但这会拖慢，先记下错误继续下一个。
+                last_err = f"{pname}: 正文为空（max_tokens={pmax} 可能被思考吃光）"
+                print(f"[{pname}] {last_err}", flush=True)
+                continue
+            # 兜底：去掉首尾空白 / 多余空行
+            text = text.replace("\n", " ").strip()
+            import re as _re
+            text = _re.sub(r"\s+", " ", text)
+            _MM_CACHES[ns]["text"] = text
+            _MM_CACHES[ns]["ts"] = now
+            _MM_CACHES[ns]["provider"] = pname
+            return text
+        except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError,
+                KeyError, TimeoutError, OSError) as e:
+            last_err = f"{pname}: {type(e).__name__} {str(e)[:80]}"
+            print(f"[{pname}] 调用失败 → 降级到下一个模型：{last_err}", flush=True)
+            continue
+
+    # 所有模型都失败 → None，调用方 fallback 到 advisory.verdict
+    print(f"[mimo-chain] 全部模型失败：{last_err}", flush=True)
+    return None
 
 
 def _build_market_board_payload() -> dict:
@@ -2238,7 +2270,13 @@ def main(host: str = "0.0.0.0", port: int = 3003):
     print(f"[btc-status] 监听 http://{host}:{port}")
     print(f"[btc-status] DATA_DIR = {DATA_DIR}")
     print(f"[btc-status] PAGE = {PAGE_PATH}")
-    httpd = HTTPServer((host, port), Handler)
+    # ★ 2026-11-02：HTTPServer → ThreadingHTTPServer
+    #   单线程时，页面 1s 轮询 + 判读 LLM 调用（实测 3~22s）会**占住唯一线程**，
+    #   老师单录入的 POST 排在后面 → 前端点「提交」卡在「提交中…」。
+    #   （实测：POST 本身逻辑没问题、返回 200，但浏览器要等好几秒才拿到响应。）
+    #   线程化后慢请求不再阻塞其它端点。
+    httpd = ThreadingHTTPServer((host, port), Handler)
+    httpd.daemon_threads = True
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
