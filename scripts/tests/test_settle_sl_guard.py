@@ -46,6 +46,37 @@ def _sig(side, entry, sl, tp1, tp2=0, ts=1000, fill_ts=1005, fill_px=None,
     }
 
 
+# 2026-11-03: 真实 1m K 线快照（2026-10-24 07:04–07:30 CST，
+# 取自 /root/data/klines_snapshot_20261024.json）。
+# gate_fetch 滚动缓存只留 ~5 天，10-24 的 K 线早滚没了 ——
+# 测试必须自带数据，不能指望在线缓存。
+REAL_BARS_20261024 = [[1792796640, 80873.1, 80911.4, 80863.2, 80911.4],
+ [1792796700, 80911.3, 80911.7, 80831.7, 80831.8],
+ [1792796760, 80831.7, 80836.8, 80724.5, 80727.0],
+ [1792796820, 80727.1, 80779.8, 80727.1, 80759.0],
+ [1792796880, 80759.0, 80759.0, 80693.8, 80732.5],
+ [1792796940, 80732.4, 80732.4, 80680.1, 80684.8],
+ [1792797000, 80684.8, 80717.9, 80512.7, 80516.4],
+ [1792797060, 80516.3, 80567.5, 80470.0, 80541.6],
+ [1792797120, 80541.7, 80551.9, 80474.0, 80504.4],
+ [1792797180, 80504.4, 80586.1, 80492.3, 80586.0],
+ [1792797240, 80586.1, 80637.6, 80586.1, 80631.8],
+ [1792797300, 80631.9, 80666.6, 80589.7, 80666.5],
+ [1792797360, 80666.6, 80742.9, 80654.4, 80720.2],
+ [1792797420, 80720.2, 80787.8, 80696.6, 80787.8],
+ [1792797480, 80787.8, 80879.6, 80783.5, 80843.4],
+ [1792797540, 80843.3, 80889.0, 80830.0, 80889.0],
+ [1792797600, 80889.0, 80905.8, 80876.3, 80900.1],
+ [1792797660, 80900.2, 80922.4, 80900.0, 80914.0],
+ [1792797720, 80914.0, 80914.0, 80864.5, 80912.6],
+ [1792797780, 80912.6, 80940.9, 80912.5, 80927.4],
+ [1792797840, 80927.3, 80929.9, 80903.6, 80923.7],
+ [1792797900, 80923.7, 80982.0, 80921.7, 80948.9],
+ [1792797960, 80948.9, 80984.0, 80948.8, 80967.6],
+ [1792798020, 80967.5, 80967.5, 80947.4, 80966.5],
+ [1792798080, 80966.4, 80969.0, 80943.6, 80943.7],
+ [1792798140, 80943.6, 80962.3, 80912.1, 80915.6],
+ [1792798200, 80915.6, 80918.4, 80878.8, 80878.8]]
 class TestSlGuardNotCloseWhenUntouched(unittest.TestCase):
     """核心回归：价格没到 SL/TP 就**不许**平仓"""
 
@@ -151,12 +182,13 @@ class TestRealTrades20261024(unittest.TestCase):
         #   1792797127-short 后来在 10-24 真的打到 TP2(80067.6) 结算了，于是
         #   「应该仍持仓」这条断言必然 FAIL —— 是测试数据失效，不是守卫回退。
         #   截到测试写时的时点，让断言与 docstring 描述的窗口一致、且可重复。
-        _cutoff = 1792798200   # 2026-10-24 07:30 CST
-        self.bars = sorted(
-            [b for b in gate_fetch.fetch_ohlcv("BTC_USDT", "1m", 8000, cache=True,
-                                               refresh=False, verbose=False)
-             if b[0] <= _cutoff],
-            key=lambda b: b[0])
+        #
+        # ★ 2026-11-03 修：不依赖 gate_fetch 滚动缓存 —— 1m K 只保留 ~5 天，
+        #   10-24 的 K 线在 10-29 就滚出缓存了，fetch_ohlcv 返回 10-29 之后的
+        #   根 → 窗口过滤后是空列表 → _settle_one 永远返回 None（假绿/假红）。
+        #   改用内嵌真实 K 线快照（取自 /root/data/klines_snapshot_20261024.json
+        #   的 07:04–07:30 窗口），测试自包含、永久可重复。
+        self.bars = sorted(REAL_BARS_20261024, key=lambda b: b[0])
 
     def tearDown(self):
         for p in self.patchers:
@@ -416,10 +448,19 @@ class TestDashboardRejectsSyntheticIds(unittest.TestCase):
 
     def _write_events(self, events):
         import json as _json
+        # 2026-11-03：_winrate 走 strategy_truth（真相源 = journal.jsonl），
+        # _all_settled 仍读 position_events.jsonl —— 两个口径各写一份。
+        # journal 记录必须带 status=settled，否则 truth_records 第一层就丢掉。
         p = os.path.join(self.tmp, "position_events.jsonl")
         with open(p, "w", encoding="utf-8") as f:
             for e in events:
                 f.write(_json.dumps(e, ensure_ascii=False) + "\n")
+        pj = os.path.join(self.tmp, "journal.jsonl")
+        with open(pj, "w", encoding="utf-8") as f:
+            for e in events:
+                j = dict(e)
+                j.setdefault("status", "settled")
+                f.write(_json.dumps(j, ensure_ascii=False) + "\n")
         return p
 
     def test_synthetic_id_is_flagged(self):

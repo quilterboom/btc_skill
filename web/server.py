@@ -22,6 +22,10 @@ from typing import Optional, Tuple
 # 让 scripts/ 下的模块能 import
 SKILL_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SKILL_ROOT / "scripts"))
+# web/ 下的模块（strategy_truth.py 等）也要能 import：
+# 直接 `python3 server.py` 时 cwd 在 sys.path 里，但测试用 importlib
+# 加载本模块时不经过 cwd → 必须显式加自己所在目录。
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 DATA_DIR = Path("/root/data")           # gate_fetch 默认
 PAGE_PATH = Path(__file__).resolve().parent / "index.html"
 MARKET_PAGE_PATH = Path(__file__).resolve().parent / "market.html"
@@ -488,7 +492,7 @@ def _strategy_truth(env: str = "prod") -> dict:
     env="training" 读 /root/data/training/journal.jsonl
     """
     import strategy_truth as _st
-    path = _st.TRAIN_JOURNAL if env == "training" else (_st.DATA_DIR / "journal.jsonl")
+    path = _st.TRAIN_JOURNAL if env == "training" else (DATA_DIR / "journal.jsonl")
     return _st.strategy_truth(path)
 
 
