@@ -36,6 +36,16 @@ TF_LIST = [("1d", 300, "战略方向"), ("4h", 400, "战术方向"),
            ("1h", 500, "主信号"), ("15m", 400, "入场执行")]
 OK, NO, WARN = "✅", "❌", "⚠️"
 
+# ★ 2026-11-03：训练环境单策略开关提到**模块级**。
+#   原来定义在 main() 里（line 866），但 _15m_signal 的判断（line 1211）
+#   和 liq 快照读取（line 1256）都在 main() 内更靠前的位置曾引用它 ——
+#   11-01 那次编辑就踩成了 NameError: TRAINING_SINGLE_STRATEGY is not defined
+#   （见 /root/data/training/alerts/alert-20261101-231527.json + watch.log）。
+#   模块级常量在 import 时就绑定，任何位置引用都不会踩未定义。
+#   语义不变：TRAINING_MODE=1 → 只生成 left_side_oversold_bounce（超跌反弹），
+#   15m 形态 / 1h 主信号全部停用；生产不受影响（未设 TRAINING_MODE 时恒 False）。
+TRAINING_SINGLE_STRATEGY = os.environ.get("TRAINING_MODE") == "1"
+
 
 # ============================ 数据 ============================
 def build(tf, cnt, role, contract):
@@ -863,6 +873,12 @@ def main():
     #   依据（可信口径，两环境合计）：超跌反弹 16 笔 胜率 56.2% 净 +11.23U
     #   （唯一胜率过半、唯一正净利的信号源）；15m 形态 32 笔 46.9% 净 -157.79U。
     #   生产不受影响（TRAINING_MODE 未设时恒 False）。
+    #
+    # ★ 2026-11-03：常量已提到模块级（见文件头），这里用 global 重新求值 ——
+    #   scan.py 被直接 `--training` 调用时，环境变量是在 main() 里才设的，
+    #   模块 import 时求值拿到的是 False（watch/runner.py 走 subprocess 继承 env，
+    #   那条路径本来就对）。不重算就会让直接调用时训练模式静默失效。
+    global TRAINING_SINGLE_STRATEGY
     TRAINING_SINGLE_STRATEGY = os.environ.get("TRAINING_MODE") == "1"
     if TRAINING_SINGLE_STRATEGY:
         print("[training] 单策略模式：只生成 left_side_oversold_bounce（15m 形态 / 1h 主信号停用）")
