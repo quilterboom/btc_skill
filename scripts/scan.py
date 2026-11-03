@@ -1243,17 +1243,23 @@ def main():
     #     5. 拉最强反弹确认（点火后 20min ≥ 0.3%）
     #   输出：推 teacher TG 卡（不进 journal，teacher 手动下）
     # ============================================================
-    # ★ 2026-11-01 liusir：训练策略加清算地图参考（CoinAnk liq-map）
+    # ★ 2026-11-01 liusir：训练策略加清算地图参考
     #   只做参考输入：挂进信号 meta.liq_ref 供回测归因 + 扫描日志展示；
     #   不做决策门（没回测数字不下结论）。拿不到数据如实显示不可用，不编造。
-    #   ★ 2026-11-02：数据源改为 CoinAnk 网页版接口（不需要 Plan4 apikey），
-    #     上方=空单清算簇 / 下方=多单清算簇（CoinAnk 官方读图口径）。
+    #   ★ 2026-11-03：数据源换成 Hyperliquid 真实持仓（采集器每小时写一份本地快照），
+    #     **不再向上游发请求** —— scan 每 15 分钟跑一次，原来这里每轮都打 CoinAnk，
+    #     是把本机 IP 打进封禁名单的主犯。现在只读本地快照文件（liq_snapshot）。
+    #     上方=空单清算簇 / 下方=多单清算簇（CoinAnk 官方读图口径，HL 沿用）。
     _liq_ref = None
+    _liq_ref_compact = None
     _liq_line = ""
     if TRAINING_SINGLE_STRATEGY:
         try:
-            from liq_map import liq_reference, format_reference
-            _liq_ref = liq_reference(last)
+            from liq_snapshot import latest_row, row_to_reference, format_reference
+            _row = latest_row()          # 只读一次文件
+            _liq_ref = row_to_reference(_row)
+            if _liq_ref.get("available"):
+                _liq_ref_compact = row_to_reference(_row, compact=True)
             _liq_line = f"\n  🧲 {format_reference(_liq_ref)}"
             P(_liq_line)
         except Exception as _lqe:
@@ -1415,8 +1421,10 @@ def main():
                                  "hammer_C": _left_signal.get("hammer_C", 0),
                                  "hammer_v": _left_signal.get("hammer_v", 0),
                                  "trigger_pct": 0.003,  # 与 hammer_watcher.TRIGGER_PCT 对齐
-                                 # ★ 清算地图参考（2026-11-01，CoinAnk）：只做归因参考，不参与决策门
-                                 **({"liq_ref": _liq_ref} if _liq_ref and _liq_ref.get("available") else {}),
+                                 # ★ 清算地图参考（2026-11-03，Hyperliquid 真实持仓）：
+                                 #   只做归因参考，不参与决策门。compact=True →
+                                 #   去掉随时间变动的 age/stale，写进 meta 的就是那次扫描的事实。
+                                 **({"liq_ref": _liq_ref_compact} if _liq_ref_compact else {}),
                                 },
                                 preview_secs=_HAMMER_PREVIEW_SECS)
                             P(f"\n  ✅ 左侧超跌反弹已写入 journal: {_left_jstat}")

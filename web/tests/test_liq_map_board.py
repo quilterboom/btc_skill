@@ -79,11 +79,19 @@ class TestLiqMapBoard(unittest.TestCase):
         self.assertEqual(d["suggestion"]["label"], "偏空")
 
     def test_stale_flagged_when_old(self):
-        self._write([_row(int(time.time()) - 3600)])
+        # 过期阈值 2h（采集器每小时一次）→ 3 小时前的行才算过期
+        self._write([_row(int(time.time()) - 3 * 3600)])
         d = L.build_liq_map_board(force=True)
         self.assertTrue(d["available"])
         self.assertTrue(d["stale"])
         self.assertGreater(d["age_sec"], L.STALE_AFTER_SEC)
+
+    def test_fresh_within_2h_not_stale(self):
+        """每小时一次采集 → 1 小时前的行也算新（不能被误判过期）。"""
+        self._write([_row(int(time.time()) - 3600)])
+        d = L.build_liq_map_board(force=True)
+        self.assertTrue(d["available"])
+        self.assertFalse(d["stale"])
 
     def test_fresh_not_stale(self):
         self._write([_row(int(time.time()) - 60)])

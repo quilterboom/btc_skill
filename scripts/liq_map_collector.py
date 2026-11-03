@@ -4,37 +4,48 @@ r"""
 liq_map_collector.py — 清算簇时间序列采集器
 ================================================
 
-**目的**（liusir 2026-11-02）：把 CoinAnk 清算簇数据存下来，**以备后续回测使用**
+**目的**（liusir 2026-11-02）：把清算簇数据存下来，**以备后续回测使用**
 —— 回答「信号对清算簇位置的敏感性」：信号触发时，上方/下方清算簇有多近、多强、
 倾向分偏多还是偏空，对后续盈亏有没有区分度。
+
+**数据源：Hyperliquid 官方 API（2026-11-03 换）**
+──────────────────────────────────────────────────────────
+CoinAnk 网页版接口按 **IP 配额**限流，本机已被封（code=403 "please sub api to
+get data"）→ 再打多少都是 403。CoinAnk 的清算图本身也是「持仓结构的模型输出」。
+Hyperliquid 官方 API 公开、免鉴权、无限频，给的是**真实持仓的真实清算价**
+（`clearinghouseState.liquidationPx`）。→ `scripts/liq_map.py` 已删除，
+运行期**任何路径都不再向上游发请求**；采集器是唯一取数口。
+
+**频率：每小时一次（一天 24 次）** —— liusir 2026-11-03 定的上限。
+HL 无限频，但没必要更密：清算价分布变化慢，采集更密只是浪费。
 
 **两层存储，各有分工**
 ──────────────────────────────────────────────────────────
 | 层 | 位置 | 内容 | 为什么 |
 |---|---|---|---|
 | 回测主源 | 本地 `/root/data/liq_map_snapshots.jsonl` | 每次快照一行（派生特征） | 回测脚本要按 ts join 信号/账本，API 慢+限频，本地才是回测该读的 |
-| 原始曲线 | 本地 `/root/data/liq_map_raw/<ts>.json.gz` | 该次快照的完整强度曲线 | 簇参数（间隔/平滑窗/死区）还没被回测验证过 → 留原始数据，以后换参数重算，不用重新等历史 |
+| 原始明细 | 本地 `/root/data/liq_map_raw/<ts>.json.gz` | 该次快照的持仓清算价明细 | 簇参数（分箱宽度/死区）还没被回测验证过 → 留原始数据，以后换参数重算，不用重新等历史 |
 | 异地归档 | IMA 笔记（append） | 派生特征行（markdown 表） | 磁盘坏了数据还在；notes 支持追加，不像 KB 那样每次多一个永久条目 |
 
 **为什么 IMA 放笔记而不是 KB**（KB 是 add-only 推土机，不可删不可改）：
 - 清算簇是**持续增长的时间序列**。按 ima-skill 的决策矩阵：「持续追加的时间线 → notes 笔记」。
-- 若按快照上传 KB，一天 144 份 = 一年 5 万个永久条目 —— 正是 10-20 那次污染事故的形状。
+- 若按快照上传 KB，一天 24 份 = 一年 8760 个永久条目 —— 正是 10-20 那次污染事故的形状。
 - notes 追加到**同一篇**，条目数恒为 1；`append_doc` 到顶（100009）时自动滚到下一篇
   （标题带周期后缀），仍是 append-only 版本链。
 
 **用法**
 ```bash
-python3 liq_map_collector.py --collect      # 采一次快照 → 本地 jsonl + 原始曲线
+python3 liq_map_collector.py --collect      # 采一次快照 → 本地 jsonl + 原始明细
 python3 liq_map_collector.py --sync-ima     # 把本地未同步的行追加到 IMA 笔记
 python3 liq_map_collector.py --both         # 采集 + （若到点）同步
 python3 liq_map_collector.py --status       # 本地统计 + 待同步行数
 ```
 
 systemd：服务 `btc-liq-map-collector.service`，定时器 `btc-liq-map-collector.timer`
-（每 10 分钟采集，对齐清算图自身 10 分钟缓存 TTL —— 更密也只是拿同一份数据）。
+（每小时采集一次）。
 
-**口径沿用 `liq_map.py`**（簇检测 + 多空建议参考值=数值最大值），本文件不重算逻辑，
-只负责「取 → 存 → 同步」。
+**口径沿用 `hyperliquid_liqmap.py`**（分箱 + 多空建议参考值=数值最大值），
+本文件不重算逻辑，只负责「取 → 存 → 同步」。
 """
 from __future__ import annotations
 
@@ -54,7 +65,7 @@ CST = timezone(timedelta(hours=8))
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
-import liq_map  # noqa: E402
+import hyperliquid_liqmap as hl  # noqa: E402
 
 DATA_DIR = Path(os.environ.get("BTC_DATA_DIR") or "/root/data")
 STORE = DATA_DIR / "liq_map_snapshots.jsonl"       # 派生特征（回测主源）
@@ -63,10 +74,10 @@ SYNC_STATE = DATA_DIR / "liq_map_sync_state.json"  # IMA 同步游标
 LOG = DATA_DIR / "liq_map_collect.log"
 
 SKILL_DIR = os.path.expanduser("~/.hermes/skills/ima-skill")
-NOTE_TITLE_BASE = "BTC 清算簇时间序列（回测用）"
+NOTE_TITLE_BASE = "BTC 清算簇时间序列（回测用 · Hyperliquid 真实持仓）"
 NOTE_FOLDER_NAME = "AI"          # 与其它 BTC 笔记同笔记本
-IMA_SYNC_MIN_INTERVAL = 6 * 3600  # IMA 追加最小间隔（防限频；每 10min 采一次，攒够再推）
-RAW_KEEP_DAYS = 90              # 原始曲线保留天数（≈47KB/份 → 90 天约 600MB）
+IMA_SYNC_MIN_INTERVAL = 6 * 3600  # IMA 追加最小间隔（防限频；每小时采一次，攒够再推）
+RAW_KEEP_DAYS = 90              # 原始明细保留天数（每份很小，90 天也占不了多少）
 
 
 # ---------------------------------------------------------------- IMA 调用
@@ -137,12 +148,16 @@ def _note_header(title: str) -> str:
     return (
         f"# {title}\n\n"
         "**用途**：清算簇时间序列归档，供后续回测「信号对清算簇位置的敏感性」分析。\n\n"
-        "**数据源**：CoinAnk 网页版清算地图接口（`api.coinank.com`，6 交易所聚合），"
-        "每 10 分钟采一次快照。强度是相对值（占全图最大桶的 %），不是精确待清算张数。\n\n"
-        "**方向语义**（CoinAnk 官方读图口径）：现价**上方**=空单清算簇，"
-        "现价**下方**=多单清算簇。\n\n"
+        "**数据源**：Hyperliquid 官方 API（`api.hyperliquid.xyz/info`，免鉴权、无限频）——"
+        "取真实持仓的**真实清算价**（`clearinghouseState.liquidationPx`）。\n"
+        "每小时采一次快照（一天 24 次）。\n\n"
+        "**方向语义**：现价**上方**=空单清算簇（涨上去爆空 → 上行磁吸），"
+        "现价**下方**=多单清算簇（跌下去爆多 → 下行瀑布）。\n\n"
         "**多空建议口径**：参考值 = 上方/下方强度中的数值最大值；"
         "倾向分 = (上方-下方)/参考值 ∈ [-1,1]，死区 0.15。\n\n"
+        "**强度口径**：相对值（占全图最大桶的 %），不是精确待清算张数。\n\n"
+        "**抽样说明**：样本 = 最近成交里的活跃地址（跨轮累积 + 轮换），"
+        "**不是全网持仓**；样本量随列末记录。\n\n"
         "**列说明**：\n"
         "| 时间(CST) | 现价 | 上方空单簇(价/强度%/距离%) | 下方多单簇(价/强度%/距离%) | 倾向分 | 倾向 | 覆盖 | 数据源 |\n"
         "|---|---|---|---|---|---|---|---|\n"
@@ -285,12 +300,27 @@ def _log(msg: str) -> None:
 
 
 # ---------------------------------------------------------------- 采集
-def _save_raw(ts: int, agg: Dict, single: Dict) -> Optional[str]:
-    """原始强度曲线落盘（gz）。以后换簇参数可直接重算，不用重新等历史。"""
+def _save_raw(ts: int, ref: Dict) -> Optional[str]:
+    """原始明细落盘（gz）。以后换分箱宽度/簇参数可直接重算，不用重新等历史。
+
+    HL 侧存的是**样本内每个持仓的清算价明细**（而不是 CoinAnk 的强度曲线）——
+    这才是真值：从明细出发，任何分箱/聚类口径都能离线重算。
+    """
     try:
         RAW_DIR.mkdir(parents=True, exist_ok=True)
-        payload = {"ts": ts, "ts_iso": datetime.fromtimestamp(ts, CST).isoformat(),
-                   "agg": agg, "single": single}
+        payload = {
+            "ts": ts,
+            "ts_iso": datetime.fromtimestamp(ts, CST).isoformat(),
+            "source": ref.get("source"),
+            "px": ref.get("px"),
+            "sampled_addresses": ref.get("sampled_addresses"),
+            "pool_size": ref.get("pool_size"),
+            "sampled_positions": ref.get("sampled_positions"),
+            "skipped_null_liq_px": ref.get("skipped_null_liq_px"),
+            "bin_usd": ref.get("bin_usd"),
+            # 明细：每个持仓的方向 / 清算价 / 名义 / 杠杆
+            "positions": ref.get("positions") or [],
+        }
         fname = datetime.fromtimestamp(ts, CST).strftime("%Y%m%d_%H%M%S") + ".json.gz"
         path = RAW_DIR / fname
         tmp = str(path) + ".tmp"
@@ -299,7 +329,7 @@ def _save_raw(ts: int, agg: Dict, single: Dict) -> Optional[str]:
         os.replace(tmp, path)
         return fname
     except Exception as e:
-        _log(f"⚠️ 原始曲线落盘失败（不影响派生特征）: {e}")
+        _log(f"⚠️ 原始明细落盘失败（不影响派生特征）: {e}")
         return None
 
 
@@ -325,12 +355,17 @@ def _prune_raw(keep_days: int = RAW_KEEP_DAYS) -> int:
 def collect(force: bool = False) -> Optional[Dict]:
     """采一次快照：写派生特征行 + 原始曲线。返回行（不可用时 None）。
 
-    ★ 请求预算：一次采集**最多 1 个 HTTP 请求**。
-      liq_reference() 内部已取过 agg + single（走文件缓存），这里直接复用，
-      绝不再单独调 fetch_* —— 否则一轮就是 4~6 个请求，会把上游配额打爆
-      （2026-11-02 15:20 实测：整个 /api/* 被 IP 级封禁）。
+    ★ 2026-11-03 数据源换成 Hyperliquid 真实持仓（`hyperliquid_liqmap`）：
+      CoinAnk 网页版接口按 IP 配额限流，实测已被封（code=403），且它的清算图是
+      **持仓结构的模型输出**；Hyperliquid 官方 API 公开、免鉴权、无限频，
+      给的是**真实持仓的真实清算价**（clearinghouseState.liquidationPx）。
+      → 采集器不再碰 CoinAnk（IP 已封，打多少都是 403）。
+
+    ★ 请求预算：HL 侧每轮 = 1（allMids）+ 1（recentTrades）+ N（每地址 1 次
+      clearinghouseState）。N 由 `hyperliquid_liqmap.QUERY_MAX` 封顶（60），
+      地址池跨轮累积 + 轮换，样本量随时间增长但请求量有界。
     """
-    ref = liq_map.liq_reference(None)
+    ref = hl.build_liqmap()
     if not ref.get("available"):
         _log(f"⏭️  清算地图不可用：{ref.get('reason')}")
         return None
@@ -340,26 +375,32 @@ def collect(force: bool = False) -> Optional[Dict]:
     row = {
         "ts": ts,
         "ts_iso": datetime.fromtimestamp(ts, CST).strftime("%Y-%m-%d %H:%M:%S"),
-        "px": float(ref.get("last_price") or 0),
+        "px": float(ref.get("px") or 0),
         "source": ref.get("source"),
         "coverage_pct": ref.get("coverage_pct"),
         "above": [{"price": c["price"], "strength_pct": c["strength_pct"],
                    "dist_pct": c["dist_pct"], "exchanges": c.get("exchanges")}
-                  for c in (ref.get("clusters_above") or [])],
+                  for c in (ref.get("above") or [])],
         "below": [{"price": c["price"], "strength_pct": c["strength_pct"],
                    "dist_pct": c["dist_pct"], "exchanges": c.get("exchanges")}
-                  for c in (ref.get("clusters_below") or [])],
+                  for c in (ref.get("below") or [])],
         "suggestion": {
             "label": sug.get("suggestion"),
             "score": sug.get("score"),
             "reference_value": sug.get("reference_value"),
             "reference_side": sug.get("reference_side"),
         },
+        # 采样口径必须落盘：HL 是**抽样**（只查最近成交里的活跃地址），
+        # 不记样本量的话，下游无法判断这条快照的可信度。
+        "sampled_addresses": ref.get("sampled_addresses"),
+        "pool_size": ref.get("pool_size"),
+        "sampled_positions": ref.get("sampled_positions"),
+        "skipped_null_liq_px": ref.get("skipped_null_liq_px"),
     }
 
-    # 原始曲线（尽力而为）—— 复用 liq_reference 已取到的 payload，不额外发请求
-    raws = ref.get("raw_payloads") or {}
-    raw_file = _save_raw(ts, raws.get("agg") or {}, raws.get("single") or {})
+    # 原始数据落盘（gz）—— HL 侧存「样本内每个持仓的清算价明细」，
+    # 以后换分箱宽度/簇参数可直接重算，不用重新等历史。
+    raw_file = _save_raw(ts, ref)
     if raw_file:
         row["raw_file"] = raw_file
 
@@ -369,6 +410,8 @@ def collect(force: bool = False) -> Optional[Dict]:
     pruned = _prune_raw()
     _log(f"✅ 已采集 ts={ts} px={row['px']:.1f} "
          f"倾向={row['suggestion'].get('label')}({row['suggestion'].get('score')})"
+         f"｜样本 {ref.get('sampled_positions')} 持仓/{ref.get('sampled_addresses')} 地址"
+         f"（池 {ref.get('pool_size')}）"
          + (f" raw={raw_file}" if raw_file else "")
          + (f"｜清理过期 raw {pruned} 份" if pruned else ""))
     return row

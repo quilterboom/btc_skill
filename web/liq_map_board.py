@@ -51,8 +51,8 @@ from typing import Dict, List, Optional
 DATA_DIR = Path(os.environ.get("BTC_DATA_DIR") or "/root/data")
 STORE = DATA_DIR / "liq_map_snapshots.jsonl"
 
-# 快照多久算「过期」（采集器 10 分钟一次 → 20 分钟还没更新 = 异常）
-STALE_AFTER_SEC = 20 * 60
+# 快照多久算「过期」（采集器每小时一次 → 2 小时还没更新 = 异常）
+STALE_AFTER_SEC = 2 * 3600
 # 展示的历史条数（前端画「簇在动」的小趋势）
 HISTORY_LIMIT = 48
 
