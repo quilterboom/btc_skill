@@ -1763,6 +1763,11 @@
       <h3>错误归因 <small>亏损原因 · 优化策略的输入</small></h3>
       <div id="train-mistakes">加载中…</div>
     </div>
+    <!-- 2026-11-03 liusir：训练策略调整的输入还要包括生产环境亏损策略的原因 -->
+    <div class="data-card" style="grid-column:1/-1">
+      <h3>生产亏损原因 <small>策略调整输入 · 生产账本只读</small></h3>
+      <div id="train-prod-loss-causes">加载中…</div>
+    </div>
     <div class="data-card">
       <h3>最近 10 笔 <small>训练明细</small></h3>
       <div id="train-recent-trades">加载中…</div>
@@ -2203,6 +2208,8 @@ function renderTraining(d) {
   if (d.strategy_matrix) renderStrategyMatrix(d.strategy_matrix, "train-strategy-matrix");
   if (d.recent_training_trades) renderRecentTrades(d.recent_training_trades, "train-recent-trades");
   if (d.mistakes) renderLossCauses(d.mistakes, "train-mistakes");
+  // 2026-11-03：生产亏损原因 = 训练策略调整的输入（生产账本只读）
+  if (d.loss_causes_input) renderProdLossCauses(d.loss_causes_input, "train-prod-loss-causes");
 
   // ── 辅助区：艾略特波浪分析（1d / 4h / 1h）──
   const waves = d.waves || {};
@@ -2618,6 +2625,59 @@ function renderLossCauses(ms, elId = "train-mistakes") {
       }).join("")}
       <div class="ms-foot">亏损 <b>${ms.n_losses ?? 0}</b> / ${ms.trade_count ?? 0} 笔已结算 · 判定依据：${ms.source_note || "账本事实"}${ms.excluded ? ` · ${ms.excluded} 笔数据存疑已剔除` : ""}</div>
     </div>`;
+}
+
+// 生产亏损原因卡（2026-11-03 liusir：训练策略调整的输入还要包括生产环境亏损原因）
+// 两块：① 生产亏损主因分布（错因 × 信号源） ② 优化杠杆优先级
+function renderProdLossCauses(d, elId = "train-prod-loss-causes") {
+  const el = document.getElementById(elId);
+  if (!el) return;
+  if (!d || d.error || !d.prod_by_cause) {
+    el.innerHTML = `<div class="empty">${d && d.error ? d.error : "暂无生产亏损记录"}</div>`;
+    return;
+  }
+  const netTxt = (v) => (v > 0 ? "+" : "") + Number(v || 0).toFixed(1) + "U";
+  const list = [...d.prod_by_cause].sort((a, b) => (b.count || 0) - (a.count || 0));
+  const maxCount = list[0]?.count || 1;
+  const cross = {};
+  (d.prod_by_cause_source || []).forEach(r => {
+    cross[r.type] = cross[r.type] || [];
+    cross[r.type].push(`${r.source} ${r.count} 笔`);
+  });
+
+  const levers = (d.levers || []).map(l => `
+    <tr>
+      <td>${l.label}</td>
+      <td class="num">${l.count}</td>
+      <td class="num">${l.pct}%</td>
+      <td class="num neg">${netTxt(l.net_usd)}</td>
+      <td>${l.lever}</td>
+      <td class="meta">${l.entry_filter || "出场侧问题"}</td>
+    </tr>`).join("");
+
+  el.innerHTML = `
+    <div class="ms-board">
+      <div class="ms-row" style="margin-bottom:4px">
+        <span class="meta" style="font-size:11px">生产亏损主因</span>
+        <span></span>
+        <span class="meta" style="text-align:right;font-size:11px">笔 / 占比 · 净值 · 分布</span>
+      </div>
+      ${list.map(m => {
+        const pct = Math.max(4, (m.count / maxCount * 100));
+        return `
+      <div class="ms-row">
+        <span class="lbl">${m.label}</span>
+        <span class="bar"><i style="width:${pct.toFixed(1)}%;background:var(--red, #ef4444)"></i></span>
+        <span class="n">${m.count}<span class="meta"> · ${m.pct}%</span><span class="meta neg"> · ${netTxt(m.net_usd)}</span><span class="meta"> · ${(cross[m.type] || []).join(" / ")}</span></span>
+      </div>`;
+      }).join("")}
+      <div class="ms-foot">生产亏损 <b>${d.prod_n_losses}</b> / ${d.prod_trade_count} 笔已结算可信 ｜ 训练同源样本 <b>${d.train_n_losses}</b> / ${d.train_trade_count} 笔 · ${d.note || ""}</div>
+    </div>
+    <table class="recent-table" style="margin-top:10px;table-layout:auto">
+      <thead><tr><th>亏损主因</th><th class="num">笔</th><th class="num">占比</th><th class="num">净值</th><th style="text-align:left">优化杠杆</th><th style="text-align:left">入场侧过滤</th></tr></thead>
+      <tbody>${levers}</tbody>
+    </table>
+    <div class="ms-foot" style="margin-top:6px">⚠ ${d.sample_warning || ""}</div>`;
 }
 
 // ─────────────────────────────────────────────────────────────

@@ -881,7 +881,39 @@ def build_status_training() -> dict:
         "recent_training_trades": _recent_training_trades(),
         # 2026-11-01 liusir：错误归因卡（数据=亏损原因分析=优化输入）
         "mistakes": _mistakes_summary_training(),
+        # 2026-11-03 liusir：「训练环境的策略调整输入还要包括生产环境亏损策略的原因」
+        #   → 训练页的「优化策略的输入」不能只有训练账本（单策略化后只剩 9 笔，
+        #     4 笔亏损，推不出规则），必须带上生产的亏损原因分布（27 笔亏损）。
+        "loss_causes_input": _loss_causes_input_payload(),
     }
+
+
+def _loss_causes_input_payload() -> dict:
+    """训练策略调整的输入 = 生产亏损原因分布 + 训练同源样本。
+
+    ★ 2026-11-03 liusir 指令。生产账本**只读**。
+    生产侧走 strategy_truth 严格口径（与胜率卡同源），归因走 mistakes 事实判据。
+    """
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+        from loss_causes_input import combined_input
+        data = combined_input()
+        prod = data.get("prod", {})
+        return {
+            "prod_by_cause": prod.get("by_cause", []),
+            "prod_by_cause_source": prod.get("by_cause_source", []),
+            "prod_source_breakdown": prod.get("source_breakdown", {}),
+            "levers": data.get("priority_levers", []),
+            "prod_n_losses": prod.get("n_losses", 0),
+            "prod_trade_count": prod.get("trade_count", 0),
+            "train_n_losses": data.get("train", {}).get("n_losses", 0),
+            "train_trade_count": data.get("train", {}).get("trade_count", 0),
+            "sample_warning": data.get("sample_warning", ""),
+            "note": "生产账本只读；亏损原因分布作为训练策略调整的输入，"
+                    "不进训练账本的胜率/净利统计",
+        }
+    except Exception as e:
+        return {"error": str(e)}
 
 
 def _strategy_matrix_training() -> list:
