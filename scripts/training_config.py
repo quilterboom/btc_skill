@@ -43,6 +43,12 @@ V5_DEV_CONFIG = {
         'w3_time_of_day': 0.3,
         'w4_vol_regime': 0.2,
         'w5_fib_resonance': 0.3,
+        # ★ 2026-11-03 liusir：「在训练环境加上 macd 的权重」
+        #   口径 = 柱体动能（实心/空心）× 方向：
+        #     实心 = |hist| 比前一根放大 = 动能增强
+        #     空心 = |hist| 比前一根缩小 = 动能衰竭
+        #   权重 0.4 与 fib 共振同档（高于时段/量能，低于 1h score/形态）
+        'w6_macd': 0.4,
         'threshold': 2.0,  # 综合评分阈值
     },
     

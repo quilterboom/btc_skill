@@ -265,6 +265,37 @@ def build_rows(recs: list, r7f, v5f, bars) -> list:
     return rows
 
 
+def attach_teacher_entry_features(rows: list, bars) -> int:
+    """给行挂老师进场画像同款特征（range_pos / dd_from_high / vol_x）。
+
+    2026-11-03 liusir：「老师的单的进场点位的分析，也是可以当做训练环境
+    策略优化的输入」。老师 T1/T2/T3 候选要判「区间位置 / 回撤 / 量能」，
+    这三个特征得先挂到训练行上 —— 复用 teacher_analysis._entry_context
+    的同口径（24h = 96 根 15m），保证老师画像和训练样本量的是同一把尺。
+
+    返回挂上的行数（0 表示特征算不出来，候选会自动跳过）。
+    """
+    import teacher_analysis as ta
+
+    bars15 = bars or []
+    n = 0
+    for r in rows:
+        ts = r.get("ts")
+        entry = (r.get("t") or {}).get("entry")
+        if not ts or not bars15:
+            continue
+        try:
+            ctx = ta._entry_context(int(ts), float(entry) if entry else None,
+                                    bars15, [])
+        except Exception:
+            continue
+        r["range_pos"] = ctx.get("range_pos_pct")
+        r["dd_from_high"] = ctx.get("dd_from_high_pct")
+        r["vol_x"] = ctx.get("vol_x")
+        n += 1
+    return n
+
+
 def derive_cause_candidates(prod_rows: list) -> list:
     """从**生产亏损原因**派生候选规则（2026-11-03 liusir 指令）。
 
@@ -470,10 +501,14 @@ def main():
 
     # ---- 训练同源样本（候选规则验证环境）----
     rows = build_rows(clean["rows"], r7f, v5f, bars)
+    # ★ 2026-11-03 liusir：老师单进场点位分析也是训练优化输入 →
+    #   给训练行挂老师画像同款特征，T 类候选才能判。
+    n_tfeat = attach_teacher_entry_features(rows, bars)
 
     # ---- 生产样本（亏损原因 = 优化输入；生产账本只读）----
     prod_rows = build_rows(prod_clean["rows"], r7f, v5f, bars)
     attach_prod_causes(prod_rows, bars)
+    attach_teacher_entry_features(prod_rows, bars)
 
     cands = [
         ("A 只做多（long_only）",
@@ -488,6 +523,15 @@ def main():
     # ★ 2026-11-03：E/F/G/H 由**生产亏损原因**派生（liusir 指令：
     #   「训练环境的策略调整输入还要包括生产环境亏损策略的原因」）
     for nm, desc, pd, cause in derive_cause_candidates(prod_rows):
+        cands.append((nm + "｜" + desc, pd, cause))
+
+    # ★ 2026-11-03：T 类由**老师单进场点位画像**派生（liusir 指令：
+    #   「老师的单的进场点位的分析，也是可以当做训练环境策略优化的输入」）
+    #   老师 17 笔 14 胜（87.5%）> 训练超跌反弹 4/9（44%）—— 老师进场
+    #   的几何特征（区间下沿 / 回调进场 / 放量 / 顺势）值得当正面清单。
+    from teacher_entry_input import derive_entry_candidates
+    _tcands = derive_entry_candidates(rows)
+    for nm, desc, pd, cause in _tcands:
         cands.append((nm + "｜" + desc, pd, cause))
 
     results = []
@@ -563,6 +607,9 @@ def main():
     print("生产亏损原因 · 策略调整输入（生产账本只读）")
     print("=" * 96)
     print(_loss_cause_block(prod_rows, bars))
+    print()
+    # ★ 2026-11-03：老师单进场画像 = 正面清单输入（与生产亏损原因的负面清单互补）
+    print(_teacher_entry_block())
     print()
     print("=" * 96)
     print("候选规则 · 5 道验证（%s）" % out["sample_note"])
@@ -652,6 +699,46 @@ def _prod_truth_records() -> list:
         return recs
     except Exception:
         return read_journal(PROD_JOURNAL)
+
+
+def _teacher_entry_block() -> str:
+    """老师单进场点位画像摘要（正面清单输入）。"""
+    from teacher_entry_input import teacher_entry_profile, derive_entry_candidates
+
+    prof = teacher_entry_profile()
+    if prof.get("error"):
+        return "老师单进场画像：（%s）" % prof["error"]
+    d = prof.get("dist", {})
+    a = prof.get("alignment", {})
+    lines = [
+        "=" * 96,
+        "老师单进场点位画像 · 策略调整输入（正面清单，与生产亏损的负面清单互补）",
+        "=" * 96,
+        f"  样本 {prof['settled']} 笔已结算｜{prof['wins']} 胜 {prof['losses']} 负"
+        f"｜胜率 {prof['win_rate_pct']}%",
+    ]
+
+    def _f(name, key):
+        v = d.get(key) or {}
+        w, l = v.get("win") or {}, v.get("loss") or {}
+        return (f"  {name:<12} 胜者中位 {w.get('median')} ｜ 负者中位 {l.get('median')}"
+                f" ｜ 全体 {v.get('all', {}).get('median')}")
+
+    lines.append(_f("区间位置%", "range_pos_pct"))
+    lines.append(_f("距高点回撤%", "dd_from_high_pct"))
+    lines.append(_f("入场前4h%", "pre4h_pct"))
+    lines.append(_f("量能倍数", "vol_x"))
+    lines.append(
+        f"  顺势/逆势   顺势 {a.get('aligned_n')} 笔胜率 {a.get('aligned_win_rate')}%"
+        f" ｜ 逆势 {a.get('counter_n')} 笔胜率 {a.get('counter_win_rate')}%")
+    lines.append("")
+    lines.append("  派生的入场过滤候选（仅候选，须过 5 道关卡）：")
+    for nm, desc, _pd, _src in derive_entry_candidates([]):
+        lines.append(f"    {nm}")
+        lines.append(f"        {desc}")
+    lines.append("")
+    lines.append(f"  ⚠ {prof.get('sample_warning','')}")
+    return "\n".join(lines)
 
 
 def _fmt(s: dict) -> str:

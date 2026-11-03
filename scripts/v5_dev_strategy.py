@@ -32,7 +32,7 @@ from __future__ import annotations
 import os
 import sys
 from datetime import datetime
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 # 训练环境配置
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -53,6 +53,8 @@ def calculate_signal_strength(
     fib_resonance: bool = False,
     side: str = None,           # v5 改动 6: 用于查老师偏置
     date_str: str = None,       # v5 改动 6: 'YYYY-MM-DD'
+    macd_hist: Optional[float] = None,       # ★ 2026-11-03: MACD 柱体值
+    macd_prev_hist: Optional[float] = None,  # ★ 前一根柱体（判实心/空心=放大/缩小）
 ) -> float:
     """
     计算综合评分（多因子加权 + 老师偏置）
@@ -93,8 +95,24 @@ def calculate_signal_strength(
     # fib 共振加权（0/1）
     w5_fib = config['w5_fib_resonance'] * (1 if fib_resonance else 0)
 
+    # ★ 2026-11-03 liusir：MACD 柱体动能加权（实心/空心 × 方向）
+    w6_macd = config.get('w6_macd', 0.0) * get_macd_weight(
+        macd_hist, macd_prev_hist, side)
+
     # 综合评分
-    total_score = w1_score + w2_pattern + w3_time + w4_vol + w5_fib
+    total_score = w1_score + w2_pattern + w3_time + w4_vol + w5_fib + w6_macd
+
+    # ★ breakdown 总是记（2026-11-03 前只有 teacher_bias 开启时才记，
+    #   → 加了 MACD 权重却看不到它生效，调试时无从校验）。
+    _bd = {
+        'w1_score': w1_score,
+        'w2_pattern': w2_pattern,
+        'w3_time': w3_time,
+        'w4_vol': w4_vol,
+        'w5_fib': w5_fib,
+        'w6_macd': w6_macd,
+        'total': round(total_score, 3),
+    }
 
     # ===== v5 改动 6: 老师单偏置 =====
     tb_cfg = V5_DEV_CONFIG.get('teacher_bias', {})
@@ -114,21 +132,14 @@ def calculate_signal_strength(
         label, tb_score = get_teacher_bias(side=side, hour=time_hour, date_str=date_str)
         weighted = tb_score * tb_cfg.get('weight', 1.0)
         total_score += weighted
-        # 把细节贴到函数属性上（调试用，调用方读 score_breakdown 即可）
-        if not hasattr(calculate_signal_strength, '_last_breakdown'):
-            calculate_signal_strength._last_breakdown = {}
-        calculate_signal_strength._last_breakdown = {
-            'w1_score': w1_score,
-            'w2_pattern': w2_pattern,
-            'w3_time': w3_time,
-            'w4_vol': w4_vol,
-            'w5_fib': w5_fib,
+        _bd.update({
             'teacher_label': label,
             'teacher_score': tb_score,
             'teacher_weighted': round(weighted, 3),
             'total': round(total_score, 3),
-        }
+        })
 
+    calculate_signal_strength._last_breakdown = _bd
     return round(total_score, 2)
 
 
@@ -190,6 +201,57 @@ def get_time_of_day_weight(hour: int) -> float:
         return -0.5  # 亏钱时段
     
     return 0.0
+
+
+def get_macd_weight(hist: Optional[float], prev_hist: Optional[float],
+                    side: Optional[str] = None) -> float:
+    """MACD 柱体动能权重（-1.5 to +1.5）—— 2026-11-03 liusir「训练环境加 macd 权重」。
+
+    口径 = **柱体长度变化**（实心/空心）× 方向：
+      实心 = |hist| 比前一根放大 = 动能增强
+      空心 = |hist| 比前一根缩小 = 动能衰竭
+
+    ★ 两个独立维度（别混）：
+      - 红/绿（hist 正负）= 涨跌方向
+      - 实心/空心（|hist| 放大/缩小）= 力度
+
+    映射（side 用于把「动能是否顺着开仓方向」折算成分数）：
+      hist 与 side 同向 + 实心（动能增强）→ +1.2
+      hist 与 side 同向 + 空心（动能衰竭）→ +0.3   ← 力度在弱化
+      hist 与 side 反向 + 空心（反向动能衰竭）→ +0.6  ← 对手盘力竭，利好
+      hist 与 side 反向 + 实心（反向动能增强）→ -1.2  ← 逆势加仓 = 危险
+      无法判断（hist 缺失/持平）→ 0
+
+    2026-11-03 讨论过的 MACD 教义落进权重：
+      「实心转空心 → 动能开始衰竭，趋势可能减速甚至反转」
+      「金叉但红柱空心缩小 → 上涨乏力，可能是假突破」
+    """
+    if hist is None or prev_hist is None:
+        return 0.0
+    try:
+        hist = float(hist)
+        prev_hist = float(prev_hist)
+    except (TypeError, ValueError):
+        return 0.0
+
+    # 实心 = 放大（|hist| 比前一根大），空心 = 缩小
+    expanding = abs(hist) > abs(prev_hist)
+    if abs(hist) == abs(prev_hist):
+        return 0.0  # 持平，无信息
+
+    # hist 正 = 多头动能，hist 负 = 空头动能
+    hist_dir = 1 if hist > 0 else -1
+
+    if side in ("long", "short"):
+        side_dir = 1 if side == "long" else -1
+        if hist_dir == side_dir:
+            # 动能顺开仓方向
+            return 1.2 if expanding else 0.3
+        # 动能逆开仓方向
+        return 0.6 if not expanding else -1.2
+
+    # 无 side：只看动能绝对强度（给中性评分用）
+    return (1.0 if expanding else -1.0) * (1 if hist > 0 else -1)
 
 
 def get_vol_regime_weight(vol: str) -> float:
