@@ -450,6 +450,17 @@ def fire_rsi(rw: RsiWatcher, a: Dict) -> None:
     # 2026-10-06 恢复（liusir 要求）：RSI 越界是趋势真变的信号，调 JumpTracker 跑 60s 跳空监测
     # - 量能触发仍不调（频率太高），周期检查也不调（每 15 分钟骚扰）
     # - RSI 触发是最合适的入口：信号明确 + 频次可控 + 是真正的"环境变了"
+    #
+    # ★ 2026-11-03 liusir：「训练环境的策略只要一个」——
+    #   JumpTracker 是**第二个策略源**：它直接写 journal（绕开 scan.py 的
+    #   TRAINING_SINGLE_STRATEGY 闸门），写出来的记录没有 signal_source
+    #   → 训练页策略矩阵里显示成「uncategorized」，等于训练环境有第二个策略。
+    #   实测训练账本里就有一条 BTC_USDT-1792802290-long-JUMP-REVERSE。
+    #   → 训练模式完全不调度 JumpTracker（生产不受影响）。
+    if os.environ.get("TRAINING_MODE") == "1":
+        log("   [jump] 训练单策略模式：跳过 JumpTracker 调度"
+            "（训练环境只保留超跌反弹一个策略）")
+        return
     try:
         from .jump import JumpTracker
         _tok = _load_tg_token()

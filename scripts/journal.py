@@ -158,6 +158,20 @@ def log_signal(contract: str, last: float, side: str, score: int, core_ok: bool,
     """
     if os.environ.get("BTC_NO_JOURNAL") == "1":
         return "off"
+    # ★ 2026-11-03 liusir：「训练环境的策略只要一个」——
+    #   训练模式只允许 left_side_oversold_bounce（超跌反弹）进 journal。
+    #   JumpTracker 是第二个策略源（它不走 log_signal，自己拼记录直接写盘，
+    #   所以这里拦不住 —— 已在 watch/runner.py 训练模式不调度它）。
+    #   这个守卫拦的是**其他路径**误调 log_signal 写进训练账本。
+    #   读 plan（log_signal 落盘时 signal_source 也从 plan 取）+ meta 兜底
+    #   （scan.py 的 15m/主信号路径把它放在 meta 里）。
+    if os.environ.get("TRAINING_MODE") == "1":
+        _src = (plan.get("signal_source")
+                or (meta or {}).get("signal_source"))
+        if _src != "left_side_oversold_bounce":
+            print(f"[journal] 训练单策略守卫：signal_source={_src!r} "
+                  f"不是 left_side_oversold_bounce，拒绝写入训练账本")
+            return "off"
     # 2026-10-11 账户级安全阀（v5 风控机制, 非参数调优）
     if _ACCOUNT_LOCK_ENABLED:
         allowed, cum, msg = _account_safety_check()
