@@ -31,6 +31,15 @@ sys.path.insert(0, str(SCRIPTS))
 #   安全前提：urlopen 全程被替换成 fake，绝不碰真网络。
 os.environ["BTCTG_DRYRUN"] = "0"
 
+# ★ 本文件会走真实发送路径（urlopen 被 mock）→ 审计日志必须隔离。
+#   直接以脚本方式跑（python3 tests/test_telegram.py）时 tests/__init__.py
+#   不会执行 → 必须自己设，否则假推送会写进生产 /root/data/tg_audit.log。
+if not os.environ.get("BTCTG_AUDIT"):
+    # 用 TMPDIR/fallback 而不 import tempfile —— tempfile.gettempdir() 会做
+    # 可写性探测，解释器退出时可能留下 _TemporaryFileCloser 的 GC 噪音。
+    os.environ["BTCTG_AUDIT"] = os.path.join(
+        os.environ.get("TMPDIR") or "/tmp", "btc_test_tg_audit.log")
+
 import telegram as T  # noqa: E402
 
 FAILS = []
