@@ -388,6 +388,31 @@ def simulate_teacher_TP(journal_entries: list, rows_15m: list, start_ts: int, en
 
 
 # ---------- 主报告 ----------
+def journal_entry_view(s: dict) -> dict:
+    """journal 明细条目 → 展示视图（含三段式净值字段）。
+
+    ★ 2026-11-05：净值三段式——账面 / 可信(fill_basis 优先) / 差额。
+    `net_usd` 保留账面原值（审计线索），展示层取 `net_usd_effective`。
+    """
+    return {
+        'id': s.get('id'),
+        'ts': s.get('ts'),
+        'time_cst': datetime.fromtimestamp(s.get('ts', 0), CST).strftime('%H:%M'),
+        'signal_source': s.get('signal_source'),
+        'tp_mode': s.get('tp_mode'),
+        'side': s.get('side'),
+        'entry': s.get('entry'),
+        'status': s.get('status'),
+        'outcome': s.get('outcome'),
+        'net_usd': s.get('net_usd'),
+        'net_usd_book': _cbv.book_net(s) if s.get('net_usd') is not None else None,
+        'net_usd_effective': _cbv.effective_net(s),
+        'net_usd_fill_basis': s.get('net_usd_fill_basis'),
+        'basis_diff': _cbv.basis_diff(s),
+        'basis_stale': _cbv.is_stale(s),
+    }
+
+
 def build_report(date_str: str) -> dict:
     rows_15m, rows_30m, start, end = fetch_window(date_str)
     win_15m = filter_window(rows_15m, start, end)
@@ -456,18 +481,7 @@ def build_report(date_str: str) -> dict:
         'journal_window': {
             'total_entries': len(journal_window),
             '15m_pattern_entries': len(journal_15m),
-            'entries': [{
-                'id': s.get('id'),
-                'ts': s.get('ts'),
-                'time_cst': datetime.fromtimestamp(s.get('ts', 0), CST).strftime('%H:%M'),
-                'signal_source': s.get('signal_source'),
-                'tp_mode': s.get('tp_mode'),
-                'side': s.get('side'),
-                'entry': s.get('entry'),
-                'status': s.get('status'),
-                'outcome': s.get('outcome'),
-                'net_usd': s.get('net_usd'),
-            } for s in journal_window],
+            'entries': [journal_entry_view(s) for s in journal_window],
         },
         'real_time_note': '当前 1h score 看 scan 输出; 昨天的历史 score 当前无法回放',
         'teacher_TP_comparison': simulate_teacher_TP(journal_window, rows_15m, start, end),
@@ -510,11 +524,18 @@ def render_md(report: dict) -> str:
         # ★ 2026-10-25 修：原来只取前 5 条，10-24 的 23:15 那笔 -15.12U 正好被截掉，
         #   卡片上看不见亏捧行。改为窗口内全列（上限 10 条），并标注 net 缺失的单。
         for e in j['entries'][:10]:
-            net = e.get('net_usd')
+            # ★ 2026-11-05 修：这里原来直接读账面 net_usd，和同卡「老师 TP 对照」
+            # 的 fill_basis 口径（_cbv.net_of）不一致 → 同一张卡上同一笔单
+            # 显示两个净值（09:00 那笔：账面 -14.80U vs 可信 -39.04U）。
+            # 统一走 cost_basis_view.effective_net（fill_basis 优先，账面兜底）。
+            net = _cbv.effective_net(e)
             if net is None:
                 net_s = '⚠️ net 缺失' if e.get('status') == 'settled' else '持仓中'
             else:
                 net_s = f"{net:+.2f}U"
+                # 口径陈旧的单（hammer 追价成交）→ 账面/可信差额单列，不藏
+                if e.get('basis_stale'):
+                    net_s += f" (账面 {e.get('net_usd_book'):+.2f}U)"
             lines.append(f"    · {e['time_cst']} {e.get('side', '?'):4} {e.get('id', '?')[-15:]} → {e.get('outcome', '?')} ({net_s})")
         if len(j['entries']) > 10:
             lines.append(f"    … 共 {len(j['entries'])} 条，仅列前 10")
