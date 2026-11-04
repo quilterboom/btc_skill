@@ -331,10 +331,11 @@ def _eff_net(r: dict):
     hammer 市价追价成交的记录，账面 net_usd 按计划 entry 记（口径陈旧）；
     回填脚本把真实成交价口径写进 net_usd_fill_basis（net_usd 不改写）。
     展示/统计一律用真值，账面值单独露出供「账面/可信/差额」对照。
+    ★ 实现委托给 scripts/cost_basis_view.py（单一口径源）。
     """
     try:
-        import strategy_truth as _st
-        return _st.effective_net(r)
+        import cost_basis_view as _cbv
+        return _cbv.effective_net(r)
     except Exception:
         return r.get("net_usd")
 
@@ -875,7 +876,9 @@ def build_status_training() -> dict:
     pending_count = sum(1 for r in recs if r.get("status") != "settled")
     settled_count = sum(1 for r in recs if r.get("status") == "settled")
     # 2026-10-12 加：累计净利（settled 单 net_usd 之和，None 视为 0）
-    net_usd = sum((r.get("net_usd") or 0) for r in recs if r.get("status") == "settled")
+    # ★ 2026-11-04：净值取真实成本基准（fill_basis 优先，账面兜底）——
+    #   hammer 市价追价成交的记录账面 net_usd 按计划 entry 记（口径陈旧）。
+    net_usd = sum(_eff_net(r) or 0 for r in recs if r.get("status") == "settled")
     return {
         "ts": int(time.time()),
         "ts_str": time.strftime("%Y-%m-%d %H:%M:%S"),

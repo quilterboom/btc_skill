@@ -16,6 +16,14 @@ from typing import List, Dict, Optional
 from datetime import datetime, timedelta
 from collections import defaultdict
 import json
+import os
+import sys
+
+# 允许直接以脚本方式运行（把 scripts/ 加进 sys.path）
+_SD = os.path.dirname(os.path.abspath(__file__))
+if _SD not in sys.path:
+    sys.path.insert(0, _SD)
+import cost_basis_view as _cbv  # noqa: E402
 
 
 # ★ 2026-10-24：从未成交的 outcome（这些单不是交易，净利必须是 0）
@@ -142,7 +150,8 @@ def compute_pnl_calendar(trades: List[Dict], days: int = 90) -> Dict:
     by_day = defaultdict(lambda: {"pnl": 0.0, "n_trades": 0, "wins": 0, "losses": 0, "breakeven": 0})
     n_suspect = 0
     for t in trades:
-        net = t.get("net_usd")
+        # ★ 2026-11-04：净值取真实成本基准（fill_basis 优先，账面兜底）
+        net = _cbv.effective_net(t)
         ts = t.get("ts", 0)
         if net is None or not ts:
             continue

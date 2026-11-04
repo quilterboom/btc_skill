@@ -21,6 +21,14 @@ from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass, asdict
 from datetime import datetime
 import json
+import os
+import sys
+
+# 允许直接以脚本方式运行（把 scripts/ 加进 sys.path）
+_SD = os.path.dirname(os.path.abspath(__file__))
+if _SD not in sys.path:
+    sys.path.insert(0, _SD)
+import cost_basis_view as _cbv  # noqa: E402
 
 # 公式版本号（v2 = gross P&L 求和包含 breakeven 容差为 0 时的 BE）
 EDGE_SCORE_VERSION = 2
@@ -111,14 +119,15 @@ def _extract_trades(trades: List[Dict]) -> List[Dict]:
     out = []
     for t in trades:
         # 1. journal 风格（直接有 net_usd）
-        net = t.get("net_usd")
+        # ★ 2026-11-04：净值取真实成本基准（fill_basis 优先，账面兜底）
+        net = _cbv.effective_net(t)
         ts = t.get("ts", 0)
         outcome = t.get("outcome", "")
 
         # 2. teacher 风格（result 嵌套）
         if net is None and "result" in t and isinstance(t.get("result"), dict):
             r = t["result"]
-            net = r.get("net_usd")
+            net = _cbv.effective_net(r)
             # date 字符串 "2026-10-07 21:50" 转 ts
             if not ts:
                 date_str = t.get("date", "")

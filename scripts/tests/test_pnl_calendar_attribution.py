@@ -27,6 +27,7 @@ from pnl_calendar import (  # noqa: E402
     exit_ts_is_suspect,
     _is_filled_trade,
 )
+import cost_basis_view as _cbv  # noqa: E402
 
 FAILS = []
 
@@ -112,7 +113,10 @@ JOURNAL = Path("/root/data/journal.jsonl")
 if JOURNAL.exists():
     recs = [json.loads(l) for l in JOURNAL.read_text(encoding="utf-8").splitlines() if l.strip()]
     filled = [r for r in recs if _is_filled_trade(r) and r.get("net_usd") is not None]
-    raw_total = sum(float(r["net_usd"]) for r in filled)
+    # ★ 2026-11-04：日历与账本都用**可信净值**（fill_basis 优先，账面兜底）。
+    #   hammer 市价追价成交的记录账面 net_usd 按计划 entry 记（口径陈旧），
+    #   日历已改用真实成交价口径 → 守恒断言两边必须同口径。
+    raw_total = sum(_cbv.net_of(r) for r in filled)
     cal5 = compute_pnl_calendar(recs, days=3650)
     check(abs(cal5["total_pnl"] - raw_total) < 0.01,
           "总盈亏与账本一致", f"日历 {cal5['total_pnl']} vs 账本 {raw_total:.2f}")
@@ -120,7 +124,7 @@ if JOURNAL.exists():
     per_day = {}
     for r in filled:
         et, _ = resolve_exit_ts(r)
-        per_day[et] = per_day.get(et, 0) + float(r["net_usd"])
+        per_day[et] = per_day.get(et, 0) + _cbv.net_of(r)
     n_days_expected = len({__import__("datetime").datetime.fromtimestamp(k).strftime("%Y-%m-%d")
                             for k in per_day})
     check(len(cal5["days"]) == n_days_expected,

@@ -20,6 +20,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from gate_fetch import fetch_ohlcv  # noqa: E402
+import cost_basis_view as _cbv  # noqa: E402
 from scan import (  # noqa: E402
     _detect_15m_pattern, _30m_trend_at,
     _is_shooting_star_15m, _is_hammer_15m,
@@ -298,7 +299,9 @@ def simulate_teacher_TP(journal_entries: list, rows_15m: list, start_ts: int, en
             continue
         entry = e.get('entry')
         if not entry: continue
-        v42_net = e.get('net_usd', 0) or 0
+        # ★ 2026-11-04：净值取真实成本基准（fill_basis 优先，账面兜底）。
+        #   hammer 市价追价成交的记录账面 net_usd 按计划 entry 记（口径陈旧）。
+        v42_net = _cbv.net_of(e)
         # ★ 2026-10-25 修：已结算但 net_usd 为 null 不许默默当 0 计入合计。
         #   老写法 `e.get('net_usd', 0) or 0` 会把 null 记成 0，v4.2 净利虚高、
         #   卡片上也看不到这笔（实测 10-24 23:15 那笔 -15.12U 就这样消失）。

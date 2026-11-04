@@ -47,8 +47,15 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from pathlib import Path
 from typing import Iterable, Optional
+
+# ★ 2026-11-04：净值展示口径统一走公共模块（scripts/cost_basis_view.py）
+_SD = Path(__file__).resolve().parent.parent / "scripts"
+if str(_SD) not in sys.path:
+    sys.path.insert(0, str(_SD))
+import cost_basis_view as _cbv  # noqa: E402
 
 DATA_DIR = Path("/root/data")
 
@@ -264,6 +271,9 @@ def truth_records(journal_path: Path = DATA_DIR / "journal.jsonl") -> tuple:
 def effective_net(rec: dict):
     """★ 展示口径优先取真实成本基准净值（2026-11-04）。
 
+    ★ 实现已收敛到 scripts/cost_basis_view.py（零依赖公共模块），
+      避免 web/ 与 scripts/ 各写一份口径。
+
     hammer 秒级市价成交的记录，账面 net_usd 是按**计划 entry** 记的（口径陈旧，
     实测训练 5 笔账面 +26.22U 真实 -46.29U、生产 8 笔账面 +100.87U 真实
     -33.47U）。回填脚本 backfill_hammer_cost_basis.py 按真实成交价 canonical
@@ -271,11 +281,11 @@ def effective_net(rec: dict):
 
     展示/统计一律用 fill_basis 优先，账面值通过 `net_usd_book` 露出，
     供「账面 / 可信 / 差额」三段式对照。
+
+    ★ 实现委托给 scripts/cost_basis_view.py（零依赖公共模块）——
+      web/ 与 scripts/ 共用同一份口径，避免两处实现漂移。
     """
-    v = rec.get("net_usd_fill_basis")
-    if v is None:
-        return rec.get("net_usd")
-    return v
+    return _cbv.effective_net(rec)
 
 
 def summary(records: list) -> dict:
