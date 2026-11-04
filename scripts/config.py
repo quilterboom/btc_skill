@@ -65,6 +65,18 @@ PARTIAL_CLOSE_RATIO = 0.5            # 减仓比例（剩下一半继续观望�
 
 
 # ============================ 准入守卫 ============================
+def _cooldown_counts_closed_fills() -> bool:
+    """同向冷却是否按「最近一次同方向 fill（不论是否已平仓）」计。
+
+    ★ 2026-11-04：训练环境先开（liusir 拍板 1→2→3 落地顺序，第 3 项会改进场
+      频率，先只改训练环境观察约 1 周再同步生产）。
+      生产保持旧口径：只有还挂着的单（status=pending）参与冷却。
+    """
+    if os.environ.get("BTC_COOLDOWN_INCLUDE_CLOSED", "") == "1":
+        return True
+    return os.environ.get("TRAINING_MODE") == "1"
+
+
 def should_skip_new_signal(contract: str, side: str, new_entry: float,
                            min_dist_pts: float = ENTRY_MIN_DIST_PTS,
                            journal_path: Optional[str] = None,
@@ -128,6 +140,39 @@ def should_skip_new_signal(contract: str, side: str, new_entry: float,
             if _now - ts <= MAX_PEND_SEC:
                 sim.append(r)
             # else: 过期 pending，不计入
+    # ★ 2026-11-04（训练先行）：同向冷却改「最近一次同方向 fill」口径
+    #   —— 不论那笔单是否已平仓。
+    #   原实现只把 status=pending 的活跃单算进冷却：已平仓单的 fill 不计入，
+    #   于是「前单平掉后 30 分钟内再开同方向」畅通无阻。
+    #   实测 2026-11-04 训练：11:45:15 成交的单 11:51 已平仓，
+    #   12:15:32 的新 hammer（间隔 29m32s < 30m）本应被冷却拦下，
+    #   却因前单已结算而放行 → 同一低位区域连续进场。
+    #   ★ 只在训练环境生效，生产保持旧口径，观察约 1 周再同步（liusir 拍板 1→2→3）。
+    if _cooldown_counts_closed_fills():
+        _last_fill = 0
+        _last_id = ""
+        for r in recs:
+            if r.get("contract") != contract or r.get("side") != side:
+                continue
+            ft = r.get("fill_ts")
+            if not ft:
+                continue
+            try:
+                fti = int(ft)
+            except (TypeError, ValueError):
+                continue
+            if fti > _last_fill:
+                _last_fill = fti
+                _last_id = r.get("id") or "?"
+        if _last_fill:
+            _age = _now - _last_fill
+            if 0 <= _age <= same_side_block_sec:
+                _mins = _age // 60
+                _reason = (f"{_mins} 分钟内已有同方向 fill 单（id={_last_id[:25]}），"
+                           f"冷却 {same_side_block_sec // 60} 分钟内禁止再开同方向 → "
+                           f"避免同一信号连续开仓（已平仓的同向单也算）")
+                return (True, _reason)
+
     if not sim:
         return (False, "")
 

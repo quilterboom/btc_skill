@@ -189,6 +189,34 @@ def _pnl_usd(side: str, entry: float, exit_px: float, contracts: int) -> float:
     return sign * (exit_px - entry) * contracts * QUANT_MULT
 
 
+# ★ 2026-11-04 新增：真实成本基准（PnL / 保本 / 卡片口径统一用它）
+def _cost_basis(sig: Dict, entry: Optional[float] = None) -> float:
+    """这笔单**真实付出**的成本价。
+
+    - 限价成交：position_tracker 成交时写 fill_px = entry，两者相同 → 行为不变
+    - 市价成交（hammer watcher 秒级市价，_fill_method=market_on_watcher）：
+      fill_px 才是真实成交价。计划 entry 只是「打算在哪进」，
+      拿它算收益 = 用没成交的价格记账 → 账面虚高。
+      实测 2026-11-04：训练 hammer 5 笔账面 +26.22U，按成交价重算 -46.29U；
+      生产 8 笔账面 +100.87U，按成交价重算 -33.47U。
+    - 未成交（pending 等挂单）：还没有 fill_px → 用 entry
+    """
+    fp = sig.get("fill_px")
+    if fp is not None:
+        try:
+            v = float(fp)
+        except (TypeError, ValueError):
+            v = 0.0
+        if v > 0:
+            return v
+    if entry is not None:
+        return float(entry)
+    try:
+        return float(sig.get("entry") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _settle_one(sig: Dict, bars: List[List]) -> Optional[Dict]:
     """
     回放一根信号。bars 是 entry_ts 之后的 1m K 线。
@@ -200,7 +228,11 @@ def _settle_one(sig: Dict, bars: List[List]) -> Optional[Dict]:
     sl = float(sig["sl"])
     tp1 = float(sig["tp1"])
     tp2 = float(sig.get("tp2") or 0)
-    contracts = _contracts(entry)
+    # ★ 2026-11-04：张数按**成本基准**（真实成交价）定，不是计划 entry。
+    #   市价追价成交时两者差 0.5%；按真实成交价算 = 5000U 名义的真实订单量，
+    #   且与 hammer_watcher 成交时写的张数同口径（display-integrity 硬规则）。
+    #   限价成交 fill_px == entry → 行为不变。
+    contracts = _contracts(_cost_basis(sig, entry))
 
     # 检查是否记录了当前状态（如有 TP1 已触发，BE 已移）
     #
@@ -429,7 +461,7 @@ def _settle_one(sig: Dict, bars: List[List]) -> Optional[Dict]:
                          or bool(sig.get("ema_warning_done"))
                          or bool(sig.get("partial_close_done"))
                          or bool(sig.get("guard_partial_done")))
-            _be_at_entry = abs(float(cur_sl) - float(entry)) < 1.0
+            _be_at_entry = abs(float(cur_sl) - _cost_basis(sig, entry)) < 1.0
             _is_be = _be_moved and _be_at_entry
             return _close(sig, "BE_STOPPED" if _is_be else "SL_STOPPED",
                           cur_sl, ts, contracts, side, entry,
@@ -464,7 +496,9 @@ def _settle_one(sig: Dict, bars: List[List]) -> Optional[Dict]:
             sig["tp1_hit"] = True
             sig["tp1_hit_ts"] = ts
             sig["tp1_hit_px"] = tp1
-            sig["active_sl"] = entry            # 移到 BE
+            # ★ 2026-11-04：BE = 真实成本（市价成交时计划 entry 低于实际成本，
+            #   拿计划价当保本线 = 名义「保本」实际在亏钱）
+            sig["active_sl"] = _cost_basis(sig, entry)   # 移到 BE
             sig["pos_state"] = "TP1_PARTIAL"
             sig["partial_exit_count"] = sig.get("partial_exit_count", 0) + 1
             sig["last_check_ts"] = ts
@@ -484,7 +518,7 @@ def _settle_one(sig: Dict, bars: List[List]) -> Optional[Dict]:
             except Exception as _e:
                 pass
             cur_tp1_hit = True
-            cur_sl = entry
+            cur_sl = _cost_basis(sig, entry)
             continue
         # 2026-10-06 加：TP1 未触发 + 持仓 > 1h + 当前浮亏 → 主动减仓 50%
         # 触发条件（同时满足）：
@@ -498,8 +532,10 @@ def _settle_one(sig: Dict, bars: List[List]) -> Optional[Dict]:
         if (sig.get("filled") and sig.get("fill_ts") and not cur_tp1_hit
                 and not sig.get("partial_close_done")
                 and (ts - int(sig["fill_ts"])) > PARTIAL_CLOSE_AFTER_SEC):
-            _in_loss = ((side == "long" and c < entry)
-                        or (side == "short" and c > entry))
+            # ★ 2026-11-04：浮亏按真实成本算（不是计划价）
+            _cost_now = _cost_basis(sig, entry)
+            _in_loss = ((side == "long" and c < _cost_now)
+                        or (side == "short" and c > _cost_now))
             if _in_loss:
                 _cur_contracts = int(sig.get("contracts") or 0)
                 # 减仓 50%（最少减 1 张，避免 0）
@@ -514,7 +550,7 @@ def _settle_one(sig: Dict, bars: List[List]) -> Optional[Dict]:
                 sig["partial_close_ts"] = ts
                 sig["partial_close_px"] = c
                 # SL 移到 BE（保本退出规则：剩下 50% 不再亏）
-                sig["active_sl"] = entry
+                sig["active_sl"] = _cost_basis(sig, entry)
                 sig["pos_state"] = "PARTIAL_CLOSED"
                 sig["partial_exit_count"] = sig.get("partial_exit_count", 0) + 1
                 # 推送部分止盈（复用 _notify_partial，文案同 TP1 partial）
@@ -634,7 +670,9 @@ def _close(sig: Dict, outcome: str, exit_px: float, exit_ts: int,
     if remain > 0:
         pnl_parts.append((remain, exit_px))
 
-    gross = sum(_pnl_usd(side, entry, px, q) for q, px in pnl_parts)
+    # ★ 2026-11-04：成本基准用**真实成交价**（市价成交时 fill_px ≠ 计划 entry）
+    _cost = _cost_basis(sig, entry)
+    gross = sum(_pnl_usd(side, _cost, px, q) for q, px in pnl_parts)
     net = gross - FEE_USD
 
     # ★ 2026-10-30 修复（严重）：category 原来由调用方按 outcome 类型给，
@@ -712,7 +750,8 @@ def _notify_partial(sig: Dict, label: str, px: float, contracts: int, ts: int,
         base = int(sig.get("_orig_contracts") or contracts)
         qty = max(1, base // PARTS)
     partial_qty = int(qty)
-    entry = float(sig["entry"])
+    # ★ 2026-11-04：卡片上的「入场价」= 真实成本（市价成交 ≠ 计划 entry）
+    entry = _cost_basis(sig)
     side_cn = "做多" if sig["side"] == "long" else "做空"
     sign = 1 if sig["side"] == "long" else -1
     pnl = sign * (px - entry) * partial_qty * QUANT_MULT
@@ -747,7 +786,8 @@ def _notify_partial(sig: Dict, label: str, px: float, contracts: int, ts: int,
 
 def _notify_close(sig: Dict, res: Dict) -> None:
     """平仓推送"""
-    entry = float(sig["entry"])
+    # ★ 2026-11-04：出场卡上的「入场价」= 真实成本基准
+    entry = _cost_basis(sig)
     side_cn = "做多" if sig["side"] == "long" else "做空"
     cat = res["category"]
     net = res["net_usd"]
@@ -976,7 +1016,9 @@ def _check_ema_break_warning(sig: Dict, ts: int, side: str, entry: float,
         return False
 
     # 部分平仓的 PnL（同模块函数，直接用）
-    partial_pnl_gross = _pnl_usd(side, entry, cur_px, partial)
+    # ★ 2026-11-04：部分平仓盈亏按真实成本基准
+    _cost = _cost_basis(sig, entry)
+    partial_pnl_gross = _pnl_usd(side, _cost, cur_px, partial)
     # 单笔成本 FEE_USD 全额（与 _close 一致：4.85U 整笔摊到本次部分平仓）
     # 但其实更合理是按比例分摊——这里保守按整笔扣一次（与 _close 一致）
     # 简化：整笔 FEE_USD 直接扣掉——多次部分平仓也只扣一次完整手续费
@@ -985,7 +1027,7 @@ def _check_ema_break_warning(sig: Dict, ts: int, side: str, entry: float,
 
     # 更新 sig：减少剩余张数 + 移 SL 到 BE + 部分平仓计数
     sig["contracts"] = contracts_total - partial
-    sig["active_sl"] = entry    # BE = 开仓价
+    sig["active_sl"] = _cost_basis(sig, entry)    # ★ 2026-11-04：BE = 真实成本价
     sig["partial_exit_count"] = sig.get("partial_exit_count", 0) + 1
     sig["partial_exits"] = sig.get("partial_exits", 0) + 1
     sig["partial_net_usd"] = round(partial_net, 2)

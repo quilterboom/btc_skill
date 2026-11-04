@@ -261,15 +261,41 @@ def truth_records(journal_path: Path = DATA_DIR / "journal.jsonl") -> tuple:
     return final, pending, excluded
 
 
-def summary(records: list) -> dict:
-    """汇总口径：赢 = net_usd > 0；分母 = 已结算可信笔数。
+def effective_net(rec: dict):
+    """★ 展示口径优先取真实成本基准净值（2026-11-04）。
 
-    返回 {total, settled, pending, net_usd, wins, losses, win_rate}
+    hammer 秒级市价成交的记录，账面 net_usd 是按**计划 entry** 记的（口径陈旧，
+    实测训练 5 笔账面 +26.22U 真实 -46.29U、生产 8 笔账面 +100.87U 真实
+    -33.47U）。回填脚本 backfill_hammer_cost_basis.py 按真实成交价 canonical
+    重算后写进 `net_usd_fill_basis`（net_usd 不改写，保留审计线索）。
+
+    展示/统计一律用 fill_basis 优先，账面值通过 `net_usd_book` 露出，
+    供「账面 / 可信 / 差额」三段式对照。
+    """
+    v = rec.get("net_usd_fill_basis")
+    if v is None:
+        return rec.get("net_usd")
+    return v
+
+
+def summary(records: list) -> dict:
+    """汇总口径：赢 = 净值 > 0；分母 = 已结算可信笔数。
+
+    净值取 effective_net()（fill_basis 优先，账面兜底）。
+    返回 {total, settled, pending, net_usd, wins, losses, win_rate,
+          net_usd_book, net_usd_true, basis_diff, stale_n}
     win_rate 用 "wins/settled" 分数形式（跟老师单面板一致，不是百分比）。
     """
-    net = round(sum(float(r.get("net_usd") or 0) for r in records), 2)
-    wins = sum(1 for r in records if float(r.get("net_usd") or 0) > 0)
-    losses = sum(1 for r in records if float(r.get("net_usd") or 0) < 0)
+    def _n(r):
+        v = effective_net(r)
+        return float(v or 0)
+
+    net = round(sum(_n(r) for r in records), 2)
+    wins = sum(1 for r in records if _n(r) > 0)
+    losses = sum(1 for r in records if _n(r) < 0)
+    # 三段式：账面（net_usd 原值）/ 可信（fill_basis 优先）/ 差额
+    net_book = round(sum(float(r.get("net_usd") or 0) for r in records), 2)
+    stale_n = sum(1 for r in records if r.get("net_usd_fill_basis") is not None)
     return {
         "total": len(records),
         "settled": len(records),
@@ -278,7 +304,11 @@ def summary(records: list) -> dict:
         "net_usd": net,
         "win_rate": f"{wins}/{len(records)}" if records else "0/0",
         "winrate_pct": round(wins / len(records) * 100, 1) if records else None,
-        "basis": "net_usd>0",
+        "basis": "net_usd>0（fill_basis 优先）",
+        "net_usd_book": net_book,
+        "net_usd_true": net,
+        "basis_diff": round(net - net_book, 2),
+        "stale_n": stale_n,
     }
 
 
@@ -313,5 +343,7 @@ if __name__ == "__main__":
         print(f"=== {label} ===")
         print(f"  已结算可信 {s['settled']} 笔 ｜ 持仓中 {s['pending']} ｜ 总单数 {s['total']}")
         print(f"  累计净利 {s['net_usd']}U ｜ 胜率 {s['win_rate']} ({s['winrate_pct']}%)")
+        print(f"  成本基准三段式：账面 {s['net_usd_book']}U ｜ 可信 {s['net_usd_true']}U"
+              f" ｜ 差额 {s['basis_diff']:+}U（陈旧 {s['stale_n']} 笔）")
         print(f"  剔除 {len(t['excluded'])} 笔: "
               + ", ".join(f"{e['id']}({e['reason']})" for e in t["excluded"]))

@@ -320,11 +320,19 @@ class TestRiskGuardSlWritesCanonicalNet(unittest.TestCase):
         self.assertEqual(ev["category"], res["category"])
 
     def test_tp1_then_be_is_profit(self):
-        """TP1 锁利后被保本打掉 → category 必须是 profit（不是 loss）"""
+        """TP1 锁利后被保本打掉 → category 必须是 profit（不是 loss）
+
+        ★ 2026-11-04 修夹具：原来覆盖 entry=81631.1 却没同步 fill_px（还是夹具
+        默认的 80012.6）—— 限价单 fill_px == entry，夹具自相矛盾。成本基准改成
+        用 fill_px 后，这条矛盾记录会被判成 1618 点浮亏 → BE 不成立 → loss。
+        补 fill_px=81631.1 让夹具自洽（限价成交二者相等），测试语义不变：
+        TP1 已锁利 + 保本被打 → category 必须是 profit。
+        """
         from watch import risk_guard as rg
         rec = self._rec(id="BTC_USDT-1001-short", contracts=409,
                         tp1_hit=True, tp1_hit_ts=1792720800, tp1_hit_px=81239.2,
-                        entry=81631.1, active_sl=81631.1, _orig_contracts=613,
+                        entry=81631.1, fill_px=81631.1, active_sl=81631.1,
+                        _orig_contracts=613,
                         fill_ts=1792720020)
         ev = rg._apply_sl(rec, last=81643.4, now_ts=1792722618)
         self.assertEqual(rec["category"], "profit")

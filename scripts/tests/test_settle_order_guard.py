@@ -144,21 +144,53 @@ class TestApplySlOrder(unittest.TestCase):
                          "canonical 必须在 status=settled 之前算完（本次线上 bug 的根因）")
 
     def test_real_record_shape_gets_net(self):
-        """真实 04:58 记录形状 → net=+14.00U / gross=18.85 / category=profit / BE_STOPPED。
+        """真实 04:58 记录形状 → 成本基准用**真实成交价**（不是计划 entry）。
 
-        手算复核：EMA 腿 456 张 @77122.9 = +18.87U，剩余 196 张 @76708.0 = -0.02U，
-        扣 fee 4.85 → net +14.00U。出场价已用 1m K 验证（04:58 那根 low=76700 触及 76708）。
+        ★ 2026-11-04 修：旧断言是 +14.00U（profit），那是按计划入场价 76709 算的 ——
+        而这单是 market_on_watcher 市价成交，**真实成交价 77083.2**（追价 374.2 点）。
+        拿没成交过的计划价记账 = 账面虚高，实测训练 hammer 5 笔账面 +26.22U
+        真实 -46.29U、生产 8 笔账面 +100.87U 真实 -33.47U。
+
+        新口径手算复核（成本 77083.2）：
+          EMA 腿 456 张 @77122.9 = +1.81U，剩余 196 张 @76708.0 = -7.35U，
+          gross -5.54U，扣 fee 4.85 → net -10.39U（loss）。
+        出场价已用 1m K 验证（04:58 那根 low=76700 触及 76708）。
         """
         from watch import risk_guard as rg
         rec = self._real_04_58_rec()
         ev = rg._apply_sl(rec, last=76708.0, now_ts=1793653091)
         self.assertIsNotNone(ev, "canonical 成功必须返回 outcome event")
-        self.assertAlmostEqual(rec["net_usd"], 14.00, places=2)
-        self.assertAlmostEqual(rec["gross_usd"], 18.85, places=2)
-        self.assertEqual(rec["category"], "profit")
-        self.assertEqual(rec["outcome"], "BE_STOPPED")
+        self.assertAlmostEqual(rec["net_usd"], -10.39, places=2)
+        self.assertAlmostEqual(rec["gross_usd"], -5.54, places=2)
+        self.assertEqual(rec["category"], "loss")
+        # ★ outcome 也从 BE_STOPPED 修正为 SL_STOPPED：
+        #   该记录 active_sl 推在**计划入场价** 76709，而真实成本 77083.2 ——
+        #   止损价在成本下方 374 点，根本不是「保本」，是实打实的亏损止损。
+        #   旧代码拿计划 entry 当 BE 参照 → 把亏损单标成 BE_STOPPED/profit。
+        #   按成本基准判：abs(76709 - 77083.2) = 374.2 > 1.0 → 不成立 → SL_STOPPED。
+        self.assertEqual(rec["outcome"], "SL_STOPPED")
         self.assertEqual(rec["status"], "settled")
         self.assertNotIn("settle_error", rec, "这次不能留下 settle_error")
+
+    def test_market_fill_be_at_cost_basis(self):
+        """市价成交（hammer）后保本必须推在**真实成交价**上，不是计划入场价。
+
+        追价成交时计划 entry 低于实际成本：若 BE 推在计划价，价格回到成本价
+        之上根本不会触发，追价的部分全亏；推在成本价才是真「保本」。
+
+        本例 outcome=BE_STOPPED（保本成立），但 EMA 腿 +1.81U 不够覆盖 4.85U
+        手续费 → net=-3.04U，按既定口径「类目由净值符号定」→ loss。
+        （跟 test_tp1_then_be_is_profit 对照：那笔 TP1 锁利足够 → profit）
+        """
+        from watch import risk_guard as rg
+        rec = self._real_04_58_rec()
+        # 真·保本：active_sl 推到真实成交价 77083.2（新口径下 EMA 预警就这么推）
+        rec["active_sl"] = 77083.2
+        ev = rg._apply_sl(rec, last=77083.2, now_ts=1793653091)
+        self.assertIsNotNone(ev)
+        self.assertEqual(rec["outcome"], "BE_STOPPED")
+        self.assertAlmostEqual(rec["net_usd"], -3.04, places=2)   # 1.81 - 4.85
+        self.assertEqual(rec["category"], "loss")                 # 类目由净值符号定
 
     def test_failure_still_marks_settled_without_net(self):
         """canonical 算不出来（无 entry）→ 仍标 settled（防 risk_guard 每秒重复触发），

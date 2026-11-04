@@ -109,7 +109,9 @@ def _canonical_close(sig: Dict, exit_px: float, exit_ts: int) -> Dict:
                 or bool(sig.get("ema_warning_done"))
                 or bool(sig.get("partial_close_done"))
                 or bool(sig.get("guard_partial_done")))
-    is_be = be_moved and abs(cur_sl - entry) < 1.0
+    # ★ 2026-11-04：BE 判定按真实成本基准（active_sl 现在推在成本价上）
+    from position_tracker import _cost_basis as _pt_cost_basis
+    is_be = be_moved and abs(cur_sl - _pt_cost_basis(sig, entry)) < 1.0
     outcome = "BE_STOPPED" if is_be else "SL_STOPPED"
     category = "profit" if is_be else "loss"
     return _pt_close(sig, outcome, exit_px, exit_ts, contracts, side, entry, category)
@@ -275,7 +277,9 @@ def _try_partial_close(sig: Dict, last: float, qty_pct: int, reason: str,
         sig["guard_partial_px"] = round(last, 1)
         sig["guard_partial_qty"] = qty
         sig["pos_state"] = "GUARD_PARTIAL"
-    sig["active_sl"] = entry    # 推保本
+    # ★ 2026-11-04：BE = 真实成本（市价成交时计划 entry 低于实际成本）
+    from position_tracker import _cost_basis as _pt_cost_basis
+    sig["active_sl"] = _pt_cost_basis(sig, entry)    # 推保本
     sig["partial_exits"] = sig.get("partial_exits", 0) + 1
     sig["partial_exit_count"] = sig.get("partial_exit_count", 0) + 1
     sig["note"] = (sig.get("note", "") or "") + f" | [risk_guard] {reason} @ {last:.1f}"
@@ -344,11 +348,14 @@ def _check_one(sig: Dict, last: float, now_ts: int):
     minutes_since_fill = (now_ts - fill_ts) / 60
     if minutes_since_fill <= ACTIVE_GUARD_MINUTES and not cur_tp1_hit \
             and not sig.get("guard_partial_done"):
-        if side == "long" and last < entry * (1 - ADVERSE_MOVE_PCT):
-            _try_partial_close(sig, last, 50, f"adverse_long {minutes_since_fill:.1f}min {last:.1f}<entry-{ADVERSE_MOVE_PCT*100:.1f}%", kind="guard")
+        # ★ 2026-11-04：反向防御按真实成本算（不是计划价）
+        from position_tracker import _cost_basis as _pt_cost_basis
+        _cost = _pt_cost_basis(sig, entry)
+        if side == "long" and last < _cost * (1 - ADVERSE_MOVE_PCT):
+            _try_partial_close(sig, last, 50, f"adverse_long {minutes_since_fill:.1f}min {last:.1f}<cost-{ADVERSE_MOVE_PCT*100:.1f}%", kind="guard")
             return "GUARD"
-        if side == "short" and last > entry * (1 + ADVERSE_MOVE_PCT):
-            _try_partial_close(sig, last, 50, f"adverse_short {minutes_since_fill:.1f}min {last:.1f}>entry+{ADVERSE_MOVE_PCT*100:.1f}%", kind="guard")
+        if side == "short" and last > _cost * (1 + ADVERSE_MOVE_PCT):
+            _try_partial_close(sig, last, 50, f"adverse_short {minutes_since_fill:.1f}min {last:.1f}>cost+{ADVERSE_MOVE_PCT*100:.1f}%", kind="guard")
             return "GUARD"
 
     return "hold"

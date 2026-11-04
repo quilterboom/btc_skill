@@ -325,6 +325,20 @@ def _journal_state_training() -> dict:
     }
 
 
+def _eff_net(r: dict):
+    """★ 净值取真实成本基准（fill_basis 优先，账面兜底）。
+
+    hammer 市价追价成交的记录，账面 net_usd 按计划 entry 记（口径陈旧）；
+    回填脚本把真实成交价口径写进 net_usd_fill_basis（net_usd 不改写）。
+    展示/统计一律用真值，账面值单独露出供「账面/可信/差额」对照。
+    """
+    try:
+        import strategy_truth as _st
+        return _st.effective_net(r)
+    except Exception:
+        return r.get("net_usd")
+
+
 def _winrate() -> dict:
     """胜率：**journal 真相口径**（strategy_truth.py），列表与汇总同源。
 
@@ -341,18 +355,22 @@ def _winrate() -> dict:
     """
     truth = _strategy_truth()
     counted = truth["records"]          # 已结算可信记录（净值有值）
+    # ★ 2026-11-04：净值取真实成本基准（fill_basis 优先），
+    #   hammer 市价追价成交的记录账面 net_usd 是按计划 entry 记的（口径陈旧）。
+    import strategy_truth as _st
+    _net = _st.effective_net
 
     def _is_win(r: dict) -> bool:
-        n = r.get("net_usd")
+        n = _net(r)
         return n is not None and n > 0
 
     def _is_loss(r: dict) -> bool:
-        n = r.get("net_usd")
+        n = _net(r)
         return n is not None and n < 0
 
     wins = [r for r in counted if _is_win(r)]
     losses = [r for r in counted if _is_loss(r)]
-    breakeven = [r for r in counted if r.get("net_usd") == 0]
+    breakeven = [r for r in counted if _net(r) == 0]
     total = len(counted)
     win_n = len(wins)
 
@@ -366,7 +384,7 @@ def _winrate() -> dict:
     week_win = sum(1 for r in week if _is_win(r))
 
     # 累计净盈亏
-    total_pnl = sum(r.get("net_usd", 0) for r in counted)
+    total_pnl = sum(_net(r) or 0 for r in counted)
 
     return {
         "total": total,
@@ -386,8 +404,10 @@ def _winrate() -> dict:
         "win_rate": f"{win_n}/{total}" if total else "0/0",
         "suspect_n": len(truth["excluded"]),
         "latest_5": [
-            {"id": r.get("id", "")[:35], "outcome": r.get("outcome", "?"),
-             "category": r.get("category", "?"), "net_usd": round(r.get("net_usd", 0), 2),
+            {**{k: r.get(k) for k in ("id", "outcome", "category")},
+             "id": (r.get("id") or "")[:35],
+             "net_usd": round(_net(r) or 0, 2),
+             "net_usd_book": r.get("net_usd"),
              "ts": r.get("ts")}
             for r in sorted(counted, key=lambda r: r.get("ts", 0), reverse=True)[:5]
         ],

@@ -95,7 +95,18 @@ def _append_event(ev: Dict):
 #      跟 risk_guard.py / scan.py 的现有模式一致）
 
 def _push_fill(sig: Dict, fill_px: float, elapsed_sec: float):
-    """hammer 直接进成交推送"""
+    """hammer 直接进成交推送（★ 2026-11-04：卡片真值）
+
+    修的问题：原来这张卡有三个谎 ——
+      ① 「做多 0 张」：成交时根本没写 contracts（watcher 不写 → 卡片读缺省 0）
+      ② 只显示 TP1/TP2/SL 三个计划价位，不显示**实际成交价**与**实际风险**
+         （追价 404 点时，真实风险从 192.8 点涨到 596.8 点、盈亏比从 5.15 掉到 0.99，
+          卡上完全看不出来）
+      ③ 「监测耗时 1.0s」永远是 1 秒：hammer_ts 存在 meta 里，代码读的是顶层
+         → 拿 ts 减 now。真实情况是 hammer 出现后 22 分钟才成交。
+    现在：计划入场价 + 实际成交价 + 追价幅度 + 实际风险/盈亏比 + 真实等待时长，
+    全部同屏可见。
+    """
     try:
         # ★ 2026-10-27：push_once（幂等 key = 持仓id:hammer_fill）——
         #   watcher 每秒巡检，同一笔单的成交提醒只能推一次，不能刷屏。
@@ -105,10 +116,37 @@ def _push_fill(sig: Dict, fill_px: float, elapsed_sec: float):
         tp2 = float(sig.get("tp2", 0))
         sl = float(sig.get("sl", 0))
         contracts = int(sig.get("contracts", 0))
+        plan_entry = float(sig.get("plan_entry") or sig.get("entry") or 0)
+        # 真实等待时长：自 hammer 出现（meta.hammer_ts）到成交
+        meta = sig.get("meta", {}) or {}
+        hammer_ts = int(meta.get("hammer_ts") or sig.get("ts") or 0)
+        fill_ts = int(sig.get("fill_ts") or 0)
+        age_sec = max(0, fill_ts - hammer_ts) if (fill_ts and hammer_ts) else 0
+        age_txt = (f"{age_sec/60:.1f} 分钟" if age_sec >= 60 else f"{age_sec:.0f} 秒")
+        # 追价幅度：实际成交价 vs 计划入场价
+        chase_pts = fill_px - plan_entry if plan_entry else 0.0
+        chase_pct = (chase_pts / plan_entry * 100.0) if plan_entry else 0.0
+        chase_txt = ""
+        if plan_entry and abs(chase_pts) >= 1:
+            chase_txt = (f"｜追价 {chase_pts:+,.1f} 点 / {chase_pct:+.2f}%"
+                         if chase_pts > 0 else
+                         f"｜低于计划 {abs(chase_pts):,.1f} 点 / {chase_pct:+.2f}%")
+        # 实际风险（按成交价算）+ 实际盈亏比
+        risk_txt = ""
+        rr_txt = ""
+        if sl and fill_px:
+            risk_pts = abs(fill_px - sl)
+            risk_pct = risk_pts / fill_px * 100.0
+            risk_txt = f"实际风险 {risk_pts:,.1f} 点（{risk_pct:.2f}%）"
+            if tp1 and risk_pts > 0:
+                rr = abs(tp1 - fill_px) / risk_pts
+                rr_txt = f"实际盈亏比 {rr:.2f} : 1"
         card = (
             f"🟢 <b>BTC hammer 直接进</b> 反弹确认\n"
-            f"{side_cn} {contracts} 张 @ <b>{fill_px:,.1f}</b>（秒级市价）\n"
-            f"监测耗时 {elapsed_sec:.1f}s ｜ TP1 <b>{tp1:,.1f}</b> ｜ TP2 <b>{tp2:,.1f}</b> ｜ SL <b>{sl:,.1f}</b>\n"
+            f"{side_cn} {contracts} 张 @ <b>{fill_px:,.1f}</b>（秒级市价）"
+            f"｜计划入场 {plan_entry:,.1f}{chase_txt}\n"
+            f"止盈1 <b>{tp1:,.1f}</b> ｜ 止盈2 <b>{tp2:,.1f}</b> ｜ 止损 <b>{sl:,.1f}</b>\n"
+            f"{risk_txt}｜{rr_txt}｜hammer 已出现 {age_txt}\n"
             f"入场理由：hammer 触底后 {TRIGGER_PCT*100:.2f}% 反弹已确认"
         )
         _tg_push(f"{sig.get('id')}:hammer_fill", card)
@@ -175,15 +213,43 @@ def _process_one(sig: Dict, now: int, ticker_px: float) -> Optional[str]:
     target = hammer_L * (1 + TRIGGER_PCT)
     if ticker_px >= target:
         # 市价进！
+        _fill_px = round(ticker_px, 1)
         sig["status"] = "pending"   # 改为 pending 让 settler 接管 TP/SL
         sig["filled"] = True
-        sig["fill_px"] = round(ticker_px, 1)
+        sig["fill_px"] = _fill_px
         sig["fill_ts"] = now
         sig["_fill_method"] = "market_on_watcher"  # 标记: 监测窗秒级市价进
-        # 改 entry 为真实成交价（TP1/TP2 在 _lplan 时已按原 entry 算过,
-        # 用 _orig_contracts 的 1/3 做 TP1, 但这里我们复用现有 entry_limit/tp1/tp2)
+        # ★ 2026-11-04 卡片/账本真值（此前这里什么账都没记）：
+        #   ① 写实际下单张数 —— 原来没写 → 卡片「做多 0 张」、TP1 分段张数也没底
+        #   ② TP1/TP2 按**成交价**重算（策略规则：止盈 = 入场价 ×(1+幅度)）
+        #      SL 不动：hammer 的 SL 是结构位（hammer L - 0.1%），不随入场价漂移
+        #   ③ 计划价留档（plan_entry/plan_tp1/plan_tp2），供卡片与审计对照
+        _plan_entry = float(sig.get("entry") or 0)
+        sig["plan_entry"] = _plan_entry
+        sig["plan_tp1"] = float(sig.get("tp1") or 0)
+        sig["plan_tp2"] = float(sig.get("tp2") or 0)
+        try:
+            from position_tracker import _contracts as _pt_contracts
+            # ★ 张数按**真实成交价**定（5000U 名义 / 成交价）= 真实订单量，
+            #   与 _settle_one 的 _contracts(_cost_basis()) 同口径 → 卡片与账本一致。
+            _qty = int(_pt_contracts(_fill_px)) if _fill_px > 0 else 0
+            sig["contracts"] = _qty
+            sig["_orig_contracts"] = _qty   # 部分止盈分段的基准量
+        except Exception as e:
+            log(f"[hammer_watcher] 取张数口径失败（记 0）: {e}")
+            sig["contracts"] = 0
+        _tp1_pct = float(sig.get("tp1_pct") or 0) / 100.0
+        _tp2_pct = float(sig.get("tp2_pct") or 0) / 100.0
+        if _tp1_pct > 0:
+            sig["tp1"] = round(_fill_px * (1 + _tp1_pct), 1)
+        if _tp2_pct > 0:
+            sig["tp2"] = round(_fill_px * (1 + _tp2_pct), 1)
+        _sl = float(sig.get("sl") or 0)
+        if _sl > 0 and _fill_px > 0:
+            # 风险占比按真实成交价算（原来按计划 entry 算，追价时低估 3 倍）
+            sig["sl_pct"] = round((_fill_px - _sl) / _fill_px * 100, 4)
         elapsed = now - int(sig.get("hammer_ts") or sig.get("ts", now))
-        _push_fill(sig, ticker_px, elapsed)
+        _push_fill(sig, _fill_px, elapsed)
         _append_event({
             "id": sig_id,
             "kind": "hammer_watcher_filled",
