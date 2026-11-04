@@ -40,6 +40,11 @@ sys.path.insert(0, str(SCRIPTS.parent))
 #   /root/data/tg_audit.log，污染事后溯源（10-29 实测污染 6 行）。
 os.environ["BTCTG_AUDIT"] = str(Path(tempfile.gettempdir()) / "btc_tg_audit_test.log")
 
+# ★ 2026-11-04：本测试**专门测 push_once 的发送内容**（mock urlopen 后断言
+#   发出去的文本），必须让发送路径真的走下去 → 显式关掉 dry-run 闸门。
+#   安全前提：urlopen 已被替换成 _fake_urlopen，绝不碰真网络。
+os.environ["BTCTG_DRYRUN"] = "0"
+
 FAILS = []
 
 

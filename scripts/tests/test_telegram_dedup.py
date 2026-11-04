@@ -19,11 +19,17 @@ Telegram 推送幂等 + 限流 回归测试
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SCRIPTS))
+
+# ★ 2026-11-04：本文件**专门测 push_once 的幂等/限流逻辑**（mock urlopen 后
+#   断言实际发出的条数），必须让发送真的走下去 → 关掉 dry-run 闸门。
+#   安全前提：urlopen 全程被替换成 fake，绝不碰真网络。
+os.environ["BTCTG_DRYRUN"] = "0"
 
 import telegram as T  # noqa: E402
 

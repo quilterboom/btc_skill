@@ -128,6 +128,27 @@ DEFAULT_CHAT_ID = "7097652385"
 # 字段：ts, caller, char_len, first_line, ok
 TG_AUDIT_PATH = Path(os.environ.get("BTCTG_AUDIT", "/root/data/tg_audit.log"))
 
+# ★ 2026-11-04 新增：全局 dry-run 闸门（测试绝不许真发 Telegram）
+#   背景：单元测试走真实 push_once 路径时，会把**测试夹具数据**当成真持仓推
+#   到生产群。实测污染 302 条（10-07 起）：测试 id="test-1000" 的假单
+#   触发 EMA 预警 → 推「做多 @ 100.0 / 已平 3500 张」到生产 chat。
+#   ★ 旧办法（skill 里那节）只隔离了**审计日志**路径（BTCTG_AUDIT），
+#     挡不住**真实发送** —— 审计干净了，群里照样被刷。
+#   现在：BTCTG_DRYRUN=1 → 发送前直接 return False，不发网络请求。
+#   与 BTCTG_AUDIT 正交：审计可以照写（便于断言），但绝不真发。
+#
+# ★ 做成函数而不是模块级常量（2026-11-04）：
+#   有些测试**专门测发送逻辑**（mock urlopen 后断言 body 内容），
+#   它们需要在测试内临时开窗。用模块级常量的话，只能靠改模块属性，
+#   而 push/push_once 读的是 import 时的快照 → 开关不生效。
+#   函数每次调用现读 env → 测试里 patch.dict(os.environ) 即可精确控制。
+TG_DRYRUN_ENV = "BTCTG_DRYRUN"
+
+
+def tg_dryrun() -> bool:
+    """当前是否处于 dry-run（不真发 Telegram）。每次调用现读 env。"""
+    return os.environ.get(TG_DRYRUN_ENV, "") == "1"
+
 
 def _audit(card: str, ok: bool, chat_id: str = "", reason: str = "") -> None:
     """推送留痕：谁 + 何时 + 多长 + 第一行内容 + 是否成功
@@ -252,6 +273,14 @@ def push(card: str, token: Optional[str] = None, chat_id: Optional[str] = None) 
     # 2026-10-29：统一走 _apply_env_tag（push/push_once 共用），别再各写一份。
     card = _apply_env_tag(card)
 
+    # ★ 2026-11-04：dry-run 闸门 —— 测试环境绝不许真发到生产群
+    if tg_dryrun():
+        try:
+            _audit(card, False, chat_id=chat_id, reason="dryrun")
+        except Exception:
+            pass
+        return False
+
     # ★ 2026-10-27：限流（只作用在非幂等的普通推送）
     #   关键卡片请用 push_once(key, card) —— 幂等去重 + 不受限流。
     _allow, _why = _rate_limit_check(time.time())
@@ -321,6 +350,16 @@ def push_once(key: str, card: str, token: Optional[str] = None,
     if not allow:
         try:
             _audit(card, False, chat_id=chat_id, reason=why)
+        except Exception:
+            pass
+        return False
+
+    # ★ 2026-11-04：dry-run 闸门 —— 测试环境绝不许真发到生产群
+    #   放在幂等检查**之后**：这样幂等状态照常推进（测试能断言去重逻辑），
+    #   但绝不碰网络。放在之前会让测试里的幂等断言全部失效。
+    if tg_dryrun():
+        try:
+            _audit(card, False, chat_id=chat_id, reason="dryrun")
         except Exception:
             pass
         return False

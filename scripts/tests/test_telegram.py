@@ -11,6 +11,11 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# ★ 2026-11-04：本文件**专门测 push() 的发送路径**（mock urlopen 后断言 body
+#   内容、断言返回 True），必须让发送真的走下去 → 关掉 dry-run 闸门。
+#   安全前提：urlopen 全程被 mock，绝不碰真网络。
+os.environ["BTCTG_DRYRUN"] = "0"
+
 from telegram import _escape_html, push, load_token, load_chat
 
 
