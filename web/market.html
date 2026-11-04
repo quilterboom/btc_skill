@@ -797,12 +797,12 @@
     <aside class="tc-sidebar">
       <div class="tc-group">行情环境</div>
       <nav class="tc-nav">
-        <a href="#sec-verdict" class="active"><span class="nav-dot"></span>环境结论</a>
+        <a href="#sec-advisory" class="active"><span class="nav-dot"></span>交易员判读</a>
+        <a href="#sec-verdict"><span class="nav-dot"></span>环境结论</a>
         <a href="#sec-chart"><span class="nav-dot"></span>价格主图</a>
         <a href="#sec-tf"><span class="nav-dot"></span>多周期</a>
         <a href="#sec-levels"><span class="nav-dot"></span>关键位</a>
         <a href="#sec-liq"><span class="nav-dot"></span>清算簇</a>
-        <a href="#sec-advisory"><span class="nav-dot"></span>交易员判读</a>
       </nav>
       <div class="tc-foot">
         行情刷新 30s · AI 判读 15min<br>
@@ -829,6 +829,16 @@
       </div>
 
       <div class="tc-content">
+
+      <!-- 0. 交易员判读（置顶，2026-11-04 liusir：行情环境大图的交易员研判应该放在最上面）
+           判读是决策输入不是附注 —— 用户进页面第一眼要先看「现在该多该空」 -->
+      <div class="card" id="sec-advisory">
+        <div class="card-hd">
+          <h3>交易员判读</h3>
+          <span class="meta" id="adv-meta"></span>
+        </div>
+        <div id="advisory-body"><div class="empty">加载中…</div></div>
+      </div>
 
       <!-- 1. 环境结论 -->
       <div class="card" id="sec-verdict">
@@ -923,7 +933,7 @@
         </div>
       </div>
 
-      <!-- 3. 关键位 + AI 判读 -->
+      <!-- 3. 关键位 + 清算簇 -->
       <div class="split">
         <div class="card" id="sec-levels">
           <div class="card-hd">
@@ -941,13 +951,7 @@
           <div id="liq-body"><div class="empty">加载中…</div></div>
         </div>
 
-        <div class="card" id="sec-advisory">
-          <div class="card-hd">
-            <h3>交易员判读</h3>
-            <span class="meta" id="adv-meta"></span>
-          </div>
-          <div id="advisory-body"><div class="empty">加载中…</div></div>
-        </div>
+
       </div>
 
       </div><!-- /tc-content -->

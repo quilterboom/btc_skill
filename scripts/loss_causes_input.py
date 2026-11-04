@@ -270,7 +270,7 @@ def combined_input(bars: Optional[list] = None) -> Dict:
         f"｜训练亏损样本 {train_n} 笔（候选规则验证来源）"
     )
     if train_n < 10:
-        warn += " —— ★ 训练亏损样本 < 10 笔，候选规则在训练环境**只能做方向性验证**，"
+        warn += " —— ★ 训练亏损样本 < 10 笔，候选规则在训练环境只能做方向性验证，"
         warn += "上线前必须在生产侧做影子回放"
     return {
         "prod": prod,

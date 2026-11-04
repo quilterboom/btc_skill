@@ -798,6 +798,53 @@
     .ms-row .n .meta { font-weight: 400; color: var(--muted); font-size: 11px; margin-left: 2px; }
     .ms-foot { font-size: 11px; color: var(--muted); margin-top: auto; padding-top: 8px; border-top: 1px dashed var(--border); }
 
+    /* ═══ 生产亏损原因卡（2026-11-04 重设计）═══
+       旧版把同一份数据（笔数/占比/净值）在「条形区右侧」和「下方表格」显示两遍，
+       且 .ms-row 的 90px 标签列导致中文断词、56px 数字列挤成碎块。
+       新版：合并成一张表，条形内嵌进「笔数」列，主因/优化杠杆一行自解释。 */
+    .lcc-wrap { display: flex; flex-direction: column; gap: 14px; }
+    .lcc-table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 12.5px; }
+    .lcc-table th, .lcc-table td { padding: 7px 8px; text-align: left; vertical-align: middle; }
+    .lcc-table thead th {
+      font-size: 10.5px; font-weight: 600; color: var(--muted);
+      border-bottom: 1px solid var(--border); white-space: nowrap;
+    }
+    .lcc-table tbody tr { border-bottom: 1px solid #f1f5f9; }
+    .lcc-table tbody tr:hover { background: #f8fafc; }
+    .lcc-table tbody tr:last-child { border-bottom: none; }
+    .lcc-cause { font-weight: 500; color: var(--text); line-height: 1.35; }
+    .lcc-cause .lcc-sub { display: block; font-size: 10.5px; color: var(--muted); font-weight: 400; margin-top: 1px; }
+    /* 笔数列：数字 + 内嵌条形（横向，不再单独占一行） */
+    .lcc-n { display: flex; align-items: center; gap: 6px; }
+    .lcc-n b { font-variant-numeric: tabular-nums; font-size: 13px; min-width: 22px; text-align: right; }
+    .lcc-n .lcc-bar { flex: 1; height: 6px; background: #f1f5f9; border-radius: 3px; overflow: hidden; min-width: 0; }
+    .lcc-n .lcc-bar > i { display: block; height: 100%; background: var(--red, #ef4444); border-radius: 3px; }
+    .lcc-pct, .lcc-net { font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .lcc-pct { color: var(--muted); }
+    .lcc-net.neg { color: var(--red); font-weight: 600; }
+    .lcc-lever { color: var(--text); line-height: 1.35; }
+    .lcc-entry { font-size: 11px; }
+    .lcc-entry.yes { color: #b45309; background: #fef3c7; border-radius: 2px; padding: 1px 5px; white-space: nowrap; }
+    .lcc-entry.no { color: var(--muted); white-space: nowrap; }
+    /* 按信号源看净利（正交视角，独立第二块） */
+    .lcc-src-hd {
+      font-size: 11px; color: var(--muted); margin: 0 0 5px;
+      display: flex; align-items: baseline; gap: 8px;
+    }
+    .lcc-src-hd b { color: var(--text); font-size: 12px; font-weight: 600; }
+    .lcc-src-table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 12px; }
+    .lcc-src-table th, .lcc-src-table td { padding: 5px 8px; text-align: right; border-bottom: 1px solid #f1f5f9; }
+    .lcc-src-table th { font-size: 10.5px; color: var(--muted); font-weight: 600; border-bottom: 1px solid var(--border); }
+    .lcc-src-table th:first-child, .lcc-src-table td:first-child { text-align: left; }
+    .lcc-src-table tbody tr:last-child td { border-bottom: none; }
+    .lcc-src-table .num { font-variant-numeric: tabular-nums; }
+    .lcc-src-table .pos { color: var(--green); }
+    .lcc-src-table .neg { color: var(--red); }
+    .lcc-src-name { color: var(--text); }
+    .lcc-foot { font-size: 11px; color: var(--muted); line-height: 1.5; padding-top: 8px; border-top: 1px dashed var(--border); }
+    .lcc-foot b { color: var(--text-sub, var(--text)); }
+    .lcc-warn { margin-top: 6px; color: #b45309; }
+
     /* 行情分析卡（BTC 现价右侧） */
     #market-analysis-card h3 { display: flex; align-items: center; gap: 6px; }
     .ma-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 12px; margin-top: 4px; }
@@ -1765,7 +1812,7 @@
     </div>
     <!-- 2026-11-03 liusir：训练策略调整的输入还要包括生产环境亏损策略的原因 -->
     <div class="data-card" style="grid-column:1/-1">
-      <h3>生产亏损原因 <small>策略调整输入 · 生产账本只读</small></h3>
+      <h3>生产亏损原因 <small>策略调整输入 · 主因 → 优化杠杆 · 生产账本只读</small></h3>
       <div id="train-prod-loss-causes">加载中…</div>
     </div>
     <div class="data-card">
@@ -2637,47 +2684,94 @@ function renderProdLossCauses(d, elId = "train-prod-loss-causes") {
     return;
   }
   const netTxt = (v) => (v > 0 ? "+" : "") + Number(v || 0).toFixed(1) + "U";
-  const list = [...d.prod_by_cause].sort((a, b) => (b.count || 0) - (a.count || 0));
-  const maxCount = list[0]?.count || 1;
+  const numTxt = (v) => Number(v || 0).toFixed(1);
+
+  // 主因：按笔数降序
+  const causes = [...d.prod_by_cause].sort((a, b) => (b.count || 0) - (a.count || 0));
+  const maxCount = causes[0]?.count || 1;
+  // 优化杠杆按 cause 对齐
+  const leverMap = {};
+  (d.levers || []).forEach(l => { leverMap[l.cause] = l; });
+
+  // 每个主因的信号源分布（英文 source → 中文）
+  const SRC_CN = {
+    "15m_pattern": "15m 形态",
+    "left_side_oversold_bounce": "左侧超跌反弹",
+    "1h_main": "1h 主信号",
+    "(无来源)": "无来源",
+  };
+  const srcCn = (s) => SRC_CN[s] || s;
   const cross = {};
   (d.prod_by_cause_source || []).forEach(r => {
     cross[r.type] = cross[r.type] || [];
-    cross[r.type].push(`${r.source} ${r.count} 笔`);
+    cross[r.type].push({ src: srcCn(r.source), count: r.count, net: r.net_usd });
   });
 
-  const levers = (d.levers || []).map(l => `
-    <tr>
-      <td>${l.label}</td>
-      <td class="num">${l.count}</td>
-      <td class="num">${l.pct}%</td>
-      <td class="num neg">${netTxt(l.net_usd)}</td>
-      <td>${l.lever}</td>
-      <td class="meta">${l.entry_filter || "出场侧问题"}</td>
-    </tr>`).join("");
+  const rows = causes.map(m => {
+    const pct = Math.max(4, (m.count / maxCount) * 100);
+    const lv = leverMap[m.type] || {};
+    const cs = (cross[m.type] || []).map(x => `${x.src} ${x.count} 笔`).join(" · ");
+    const sub = cs ? `<span class="lcc-sub">${cs}</span>` : "";
+    // 末列只放**入场侧可执行**的过滤规则；出场侧问题已在「优化杠杆」列写明
+    // ★ 入场侧过滤名是内部英文 key → 用户可见必须中文（保留 key 做 title 悬浮）
+    const ENTRY_CN = {
+      "counter_trend": "逆势不入场",
+      "chase": "追高不入场",
+      "plan_drift": "盈亏比达标才进",
+    };
+    const entry = lv.entry_filter
+      ? `<span class="lcc-entry yes" title="${lv.entry_filter}">${ENTRY_CN[lv.entry_filter] || lv.entry_filter}</span>`
+      : `<span class="lcc-entry no">—</span>`;
+    return `
+      <tr>
+        <td class="lcc-cause">${m.label}${sub}</td>
+        <td><div class="lcc-n"><b>${m.count}</b><span class="lcc-bar"><i style="width:${pct.toFixed(1)}%"></i></span></div></td>
+        <td class="lcc-pct">${numTxt(m.pct)}%</td>
+        <td class="lcc-net neg">${netTxt(m.net_usd)}</td>
+        <td class="lcc-lever">${lv.lever || "—"}</td>
+        <td>${entry}</td>
+      </tr>`;
+  }).join("");
+
+  // 按信号源看净利（正交视角：哪个策略源在亏）
+  const srcs = Object.entries(d.prod_source_breakdown || {})
+    .map(([k, v]) => ({ name: srcCn(k), ...v }))
+    .sort((a, b) => (a.net_usd || 0) - (b.net_usd || 0));
+  const srcRows = srcs.map(s => `
+      <tr>
+        <td class="lcc-src-name">${s.name}</td>
+        <td class="num">${s.n}</td>
+        <td class="num">${s.losses}</td>
+        <td class="num ${s.net_usd > 0 ? "pos" : (s.net_usd < 0 ? "neg" : "")}">${netTxt(s.net_usd)}</td>
+      </tr>`).join("");
 
   el.innerHTML = `
-    <div class="ms-board">
-      <div class="ms-row" style="margin-bottom:4px">
-        <span class="meta" style="font-size:11px">生产亏损主因</span>
-        <span></span>
-        <span class="meta" style="text-align:right;font-size:11px">笔 / 占比 · 净值 · 分布</span>
+    <div class="lcc-wrap">
+      <table class="lcc-table">
+        <thead><tr>
+          <th style="width:23%">亏损主因</th>
+          <th style="width:16%">亏损笔数</th>
+          <th style="width:9%">占亏损比</th>
+          <th style="width:9%">净值</th>
+          <th style="width:26%">优化杠杆</th>
+          <th style="width:17%">入场侧过滤</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      ${srcs.length ? `
+      <div>
+        <div class="lcc-src-hd"><b>按信号源看净利</b><span>哪个策略源在亏 · 含全部已结算单（不止亏损单）· 生产账本只读</span></div>
+        <table class="lcc-src-table">
+          <thead><tr><th>信号源</th><th>总笔数</th><th>亏损笔数</th><th>净值</th></tr></thead>
+          <tbody>${srcRows}</tbody>
+        </table>
+      </div>` : ""}
+      <div class="lcc-foot">
+        主因表只统计 <b>${d.prod_n_losses}</b> 笔亏损单（净值合计即亏损总额）；下方信号源表统计全部 <b>${d.prod_trade_count}</b> 笔已结算单（含盈利单）—— 两处口径不同，数字本就不该相等。
+        <br>训练同源样本 <b>${d.train_n_losses}</b> / ${d.train_trade_count} 笔 ｜ ${d.note || ""}
+        ${d.sample_warning ? `<div class="lcc-warn">⚠ ${d.sample_warning}</div>` : ""}
       </div>
-      ${list.map(m => {
-        const pct = Math.max(4, (m.count / maxCount * 100));
-        return `
-      <div class="ms-row">
-        <span class="lbl">${m.label}</span>
-        <span class="bar"><i style="width:${pct.toFixed(1)}%;background:var(--red, #ef4444)"></i></span>
-        <span class="n">${m.count}<span class="meta"> · ${m.pct}%</span><span class="meta neg"> · ${netTxt(m.net_usd)}</span><span class="meta"> · ${(cross[m.type] || []).join(" / ")}</span></span>
-      </div>`;
-      }).join("")}
-      <div class="ms-foot">生产亏损 <b>${d.prod_n_losses}</b> / ${d.prod_trade_count} 笔已结算可信 ｜ 训练同源样本 <b>${d.train_n_losses}</b> / ${d.train_trade_count} 笔 · ${d.note || ""}</div>
-    </div>
-    <table class="recent-table" style="margin-top:10px;table-layout:auto">
-      <thead><tr><th>亏损主因</th><th class="num">笔</th><th class="num">占比</th><th class="num">净值</th><th style="text-align:left">优化杠杆</th><th style="text-align:left">入场侧过滤</th></tr></thead>
-      <tbody>${levers}</tbody>
-    </table>
-    <div class="ms-foot" style="margin-top:6px">⚠ ${d.sample_warning || ""}</div>`;
+    </div>`;
 }
 
 // ─────────────────────────────────────────────────────────────
