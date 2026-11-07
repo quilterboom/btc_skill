@@ -238,11 +238,41 @@ def next_version(kb_id: str) -> int:
 
 
 def save_analysis(payload: dict, kb_id: Optional[str] = None,
-                   folder_id: Optional[str] = None) -> dict:
-    """把分析结果写进 IMA KB。返回 {version, title, media_id}。"""
+                   folder_id: Optional[str] = None,
+                   require_confirm: int = 0) -> dict:
+    """把分析结果写进 IMA KB。返回 {version, title, media_id}。
+
+    ⚠️ KB 推土机不可逆（见 KB_UPLOAD_PITFALLS.md）：
+    API 层无法 delete/update，写进去就永久留下（10-20 那 6 份污染至今无法清）。
+    因此这里加**双闸门**：
+      require_confirm > 0 → 先打印将要写入的内容摘要 + 文件名，等用户显式确认
+      require_confirm >= 2 → 还要求 payload 非空且 summary 有实际笔数（防空写）
+    """
     kb_id = kb_id or resolve_kb_id()
     version = next_version(kb_id)
     fname, md = build_doc_markdown(payload, version)
+
+    # 闸门 1：内容非空
+    s = (payload or {}).get("summary") or {}
+    if require_confirm >= 2 and not s.get("total"):
+        raise RuntimeError("payload 的 summary.total 为空 → 拒绝写入（防空写）")
+
+    # 闸门 2：显式确认
+    if require_confirm > 0:
+        print("=" * 78)
+        print(f"[dry-run] 即将写入 KB「{KB_NAME}」({kb_id})")
+        print(f"  文件名 : {fname}")
+        print(f"  体积   : {len(md.encode('utf-8'))} bytes")
+        print(f"  笔数   : {s.get('total')}（已结算 {s.get('settled')} / 胜率 {s.get('win_rate_pct')}% / "
+              f"净 {s.get('net_usd')}U）")
+        print(f"  入场画像: {json.dumps((payload or {}).get('profile') or {}, ensure_ascii=False)}")
+        print("  ⚠️ add_knowledge 不可逆（API 层无法 delete/update）")
+        print("=" * 78)
+        if require_confirm == 1:
+            ans = input("  确认写入？输入 yes 继续: ").strip().lower()
+            if ans not in ("yes", "y"):
+                raise RuntimeError("用户未确认，已取消写入")
+
     media_id = upload_markdown(fname, md, kb_id, folder_id)
     return {"version": version, "title": fname, "media_id": media_id, "kb_id": kb_id}
 
@@ -268,7 +298,10 @@ if __name__ == "__main__":
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         from teacher_analysis import build_teacher_analysis
         payload = build_teacher_analysis()
-        res = save_analysis(payload)
+        # ⚠️ 不可逆：默认要 --yes 才真写；不带 --yes 只打印将要写的内容
+        req = 0 if "--yes" in sys.argv else 1
+        res = save_analysis(payload, require_confirm=req)
         print(json.dumps(res, ensure_ascii=False))
     else:
-        print("usage: teacher_kb_store.py [status|read|write]")
+        print("usage: teacher_kb_store.py [status|read|write]   "
+              "（write 需 --yes 才真写，否则只预览）")
