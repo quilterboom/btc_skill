@@ -289,16 +289,40 @@ def simulate_teacher_TP(journal_entries: list, rows_15m: list, start_ts: int, en
     rows = [r for r in rows_15m if start_ts <= r[0] < end_ts]
     if not rows:
         return {'note': '无 K 线数据, 跳过对照'}
-    NOTIONAL = 5000; LEV = 100; FEE = 4.85
+    # ★ 2026-11-07：仓位张数不再在这里手算——改走 _cbv.canonical_contracts(cost_px)。
+    #   名义 = 5000U（含杠杆），**不要**再除一次 LEV（老代码就是这么错的：
+    #   仓位小 100 倍 → 老师 TP 盈亏被压扁 → 卡片结论方向反掉）。
+    FEE = 4.85
     teacher_total = 0.0; v42_total = 0.0
     breakdown = []
     null_net = []        # ★ 2026-10-25: 已结算但 net_usd 缺失的单，单独暴露不静默计 0
+    ghost_skipped = []   # ★ 2026-11-06: 幽灵成交（从未发生），不参与对照
     for e in journal_entries:
         if e.get('status') != 'settled' or e.get('outcome') in (None, ''):
             # pending 跳, 等下期再比
             continue
+        # ★ 2026-11-06：幽灵成交（从未真正发生过的 hammer 交易）不参与对照。
+        #   它没有真实成交价，teacher TP 体系无从复算；算进去等于给一笔
+        #   不存在的交易编一个「老师 TP 表现」。
+        if _cbv.is_ghost_fill(e):
+            ghost_skipped.append({
+                'journal_id': e.get('id'),
+                'time_cst': datetime.fromtimestamp(e.get('ts') or 0, CST).strftime('%m-%d %H:%M'),
+                'side': e.get('side'),
+                'outcome': e.get('outcome'),
+                'net_usd': e.get('net_usd'),
+            })
+            continue
         entry = e.get('entry')
         if not entry: continue
+        # ★ 2026-11-07 成本基准：老师 TP 复算必须用**真实成交价**（fill_px 优先）。
+        #   这笔是 hammer 秒级市价（计划 entry 75885.7 → 实际成交 76023.0，追价 +137.3 点）。
+        #   用计划 entry 复算 = 假设老师以没成交的价格进场 = 两边口径不一致
+        #   （v4.2 侧走 _cbv.net_of(e) 已是 fill 口径，老师侧却是 entry 口径）。
+        cost_px = _cbv.cost_basis_of(e)
+        if not cost_px:
+            cost_px = float(entry)
+        cost_px = float(cost_px)
         # ★ 2026-11-04：净值取真实成本基准（fill_basis 优先，账面兜底）。
         #   hammer 市价追价成交的记录账面 net_usd 按计划 entry 记（口径陈旧）。
         v42_net = _cbv.net_of(e)
@@ -317,38 +341,72 @@ def simulate_teacher_TP(journal_entries: list, rows_15m: list, start_ts: int, en
             continue          # 不计入 v4_2_total / teacher_total，单独列出
         v42_total += v42_net
         # 老师 TP: 找 entry 后最近一根 >= entry*1.006 的 15m (TP1)
-        tp1_target = entry * 1.006
-        sl = entry
+        # ★ 2026-11-07：TP1 目标价与保本止损都必须挂在**真实成本基准** cost_px 上，
+        #   不是计划 entry——老师 TP 体系是「进场后 +0.6% 减半、剩余推保本」，
+        #   进场价就是实际成交价。挂错基准 = 整条 TP 路径偏移。
+        # ★ 2026-11-07 修 **空单 TP1 目标价方向反了**：
+        #   原来不管多空都写 `cost_px * 1.006`（在成本价**上方**）。
+        #   空单要跌 0.6% 才到 TP1 = `cost_px * 0.994`。
+        #   写成 1.006 时空单的 TP1 永远不可能被触及（价格要涨 0.6% 才对空单有利）。
+        _side = e.get('side') or 'long'
+        _is_long = (_side == 'long')
+        tp1_target = cost_px * (1.006 if _is_long else 0.994)
+        sl = cost_px
         # SL 段: 找 entry 后最低 <= entry 的 15m
-        half_contracts = (NOTIONAL / LEV) / (entry * 0.0001) / 2
+        # ★ 2026-11-07 修 **仓位张数 100 倍错误**：
+        #   老写法 `(NOTIONAL / LEV) / (entry * 0.0001) / 2` 把名义又除了一次杠杆。
+        #   杠杆只决定保证金（50U），名义已经是 5000U——再除一次 = 仓位小 100 倍。
+        #   实测：75885.7 入场 → 老写法只算出 3.29 张（半仓），真实是 329.44 张。
+        #   后果：老师 TP 的毛利被压缩 100 倍 → 卡片「老师 TP vs v4.2」差异方向都反了
+        #   （昨天那笔显示老师 TP 差 1.40U，实际老师 TP 明显更好）。
+        #   交叉验证：teacher_trades.jsonl 里老师真实单 size_contracts 与本口径一致
+        #   （#18: 78000 → 641 张）。
+        half_contracts = _cbv.canonical_contracts(cost_px) / 2
         tp1_hit = False; tp1_px = None; sl_hit = False; sl_px = None
         tp1_reached_idx = None
+        # ★ 2026-11-07 修 **空单方向反了**（本函数此前只按多头写）：
+        #   原来对 short 也用 `r[2] >= tp1_target`（high 触达）判 TP1 命中、
+        #   用 `r[3] <= cost_px`（low 触达）判保本止损 —— **两个方向都反了**。
+        #   空单要跌才赚：TP1 应该是 low 触达，保本止损应该是 high 触达。
+        #   后果不是数字偏一点，是**结论方向反掉**：
+        #     实测 BTC_USDT-1792798212-short（v4.2 +37.13U 的赢家）：
+        #       持仓期 0 根 bar 出现 high>=cost*1.006（老代码永远判它 TP1 未中）
+        #       持仓期 20 根 bar 出现 low <=cost*0.994（真正的 TP1，老代码漏判）
+        #     → 这类单在日报「老师TP对照」里显示成「老师 TP 没优势」，
+        #       实际是方向 bug 制造的假象。
+        #   影响面：可信单里 32% 是空单（实测 15/47）——这部分对照结论全是错的。
+        _tp1_touch = (lambda r: r[2] >= tp1_target) if _is_long else (lambda r: r[3] <= tp1_target)
+        _be_touch = (lambda r: r[3] <= cost_px) if _is_long else (lambda r: r[2] >= cost_px)
+        _tp1_px_of = (lambda r: r[2]) if _is_long else (lambda r: r[3])
+        _pnl_sign = 1.0 if _is_long else -1.0
         for i, r in enumerate(rows):
             if r[0] < (e.get('ts') or 0): continue
             if r[0] > end_ts: break
-            if not tp1_hit and r[2] >= tp1_target:
-                tp1_hit = True; tp1_px = r[2]
+            if not tp1_hit and _tp1_touch(r):
+                tp1_hit = True; tp1_px = _tp1_px_of(r)
                 tp1_reached_idx = i
-                # 立即推保本 (SL -> entry)
+                # 立即推保本 (SL -> cost_px)
                 break
-            if r[3] <= entry:
-                sl_hit = True; sl_px = r[3]
+            if _be_touch(r):
+                sl_hit = True; sl_px = (r[3] if _is_long else r[2])
                 break
         # TP1 段 PnL
         if tp1_hit:
-            tp1_pnl = half_contracts * 0.0001 * (tp1_px - entry)
-            # 剩余段: 从 tp1_reached_idx 往后, 看是否回 entry (打保本)
+            # tp1_px 在 tp1_hit 为真时必有值；显式取局部变量让类型收敛
+            _tp1_px = tp1_px if tp1_px is not None else cost_px
+            tp1_pnl = half_contracts * 0.0001 * (_tp1_px - cost_px) * _pnl_sign
+            # 剩余段: 从 tp1_reached_idx 往后, 看是否回成本价 (打保本走)
             remain_pnl = 0
             for j in range(tp1_reached_idx + 1, len(rows)):
                 r = rows[j]
                 if r[0] > end_ts: break
-                if r[3] <= entry:
+                if _be_touch(r):
                     # 剩余打保本
                     remain_pnl = 0
                     break
                 # 8h 内没回 = 仍持仓 (标记为'open')
                 if j == len(rows) - 1:
-                    remain_pnl = half_contracts * 0.0001 * (r[4] - entry)
+                    remain_pnl = half_contracts * 0.0001 * (r[4] - cost_px) * _pnl_sign
                     break
             gross = tp1_pnl + remain_pnl
             teacher_net = gross - FEE
@@ -356,6 +414,7 @@ def simulate_teacher_TP(journal_entries: list, rows_15m: list, start_ts: int, en
             breakdown.append({
                 'journal_id': e.get('id'),
                 'entry': entry,
+                'cost_basis': round(cost_px, 1),
                 'v4_2_net': v42_net,
                 'teacher_net': round(teacher_net, 2),
                 'tp1_hit': tp1_hit,
@@ -384,6 +443,9 @@ def simulate_teacher_TP(journal_entries: list, rows_15m: list, start_ts: int, en
         # ★ 2026-10-25: 显式暴露「已结算但 net 缺失」的单，不静默计 0
         'null_net_settlements': null_net,
         'null_net_count': len(null_net),
+        # ★ 2026-11-06: 显式暴露「幽灵成交」（从未发生，不计入对照）
+        'ghost_skipped': ghost_skipped,
+        'ghost_skipped_count': len(ghost_skipped),
     }
 
 
@@ -393,6 +455,9 @@ def journal_entry_view(s: dict) -> dict:
 
     ★ 2026-11-05：净值三段式——账面 / 可信(fill_basis 优先) / 差额。
     `net_usd` 保留账面原值（审计线索），展示层取 `net_usd_effective`。
+
+    ★ 2026-11-06：加 `ghost_fill` 标记 —— 该笔是「从未真正发生过的 hammer
+    交易」（幽灵成交），**不计入统计**。账本 net_usd 保留（审计线索）。
     """
     return {
         'id': s.get('id'),
@@ -410,6 +475,8 @@ def journal_entry_view(s: dict) -> dict:
         'net_usd_fill_basis': s.get('net_usd_fill_basis'),
         'basis_diff': _cbv.basis_diff(s),
         'basis_stale': _cbv.is_stale(s),
+        # ★ 2026-11-06：幽灵成交标记（从未发生 → 不计入统计）
+        'ghost_fill': _cbv.is_ghost_fill(s),
     }
 
 
@@ -530,12 +597,25 @@ def render_md(report: dict) -> str:
             # 统一走 cost_basis_view.effective_net（fill_basis 优先，账面兜底）。
             net = _cbv.effective_net(e)
             if net is None:
-                net_s = '⚠️ net 缺失' if e.get('status') == 'settled' else '持仓中'
+                # ★ 2026-11-06 修：`cancelled` 的单（如 HAMMER_EXPIRED 监测窗过期）
+                #   不是「持仓中」——它从未进场。分三档说清楚，别让用户以为还挂着单。
+                st = e.get('status')
+                if st == 'settled':
+                    net_s = '⚠️ net 缺失'
+                elif st == 'cancelled':
+                    net_s = '已作废（未进场）'
+                elif st == 'pending':
+                    net_s = '持仓中'
+                else:
+                    net_s = st or '未知'
             else:
                 net_s = f"{net:+.2f}U"
                 # 口径陈旧的单（hammer 追价成交）→ 账面/可信差额单列，不藏
                 if e.get('basis_stale'):
                     net_s += f" (账面 {e.get('net_usd_book'):+.2f}U)"
+            # ★ 2026-11-06：幽灵成交（从未真正发生过的 hammer 交易）→ 标注且不计入统计
+            if e.get('ghost_fill'):
+                net_s = f"⚠️ 幽灵成交（从未发生，未计入统计）账面 {net_s}"
             lines.append(f"    · {e['time_cst']} {e.get('side', '?'):4} {e.get('id', '?')[-15:]} → {e.get('outcome', '?')} ({net_s})")
         if len(j['entries']) > 10:
             lines.append(f"    … 共 {len(j['entries'])} 条，仅列前 10")
@@ -548,6 +628,14 @@ def render_md(report: dict) -> str:
         followups.append('⚠️ 行情有波动但形态信号 0 触发 → 验证形态定义是否过严')
     if j['total_entries'] > 0 and j['15m_pattern_entries'] == 0:
         followups.append('ℹ️ 主信号触发但 15m 形态未触发 → 两源独立性 OK')
+    # ★ 2026-11-06：幽灵成交预警（从未真正发生过的 hammer 交易）
+    n_ghost = sum(1 for e in j['entries'] if e.get('ghost_fill'))
+    if n_ghost:
+        gnet = sum(float(e.get('net_usd') or 0) for e in j['entries'] if e.get('ghost_fill'))
+        followups.append(
+            f'⚠️ {n_ghost} 笔幽灵成交（hammer 信号被 promoter 抢跑，从未进场）'
+            f'账面 {gnet:+.2f}U 已从统计剔除 —— 昨天实盘实际没有这些单'
+        )
     # 2026-10-11 加: 7 种形态家族的赢家/输家提示
     pd = report.get('pattern_distribution', {})
     if pd and pd.get('by_kind'):
@@ -638,6 +726,13 @@ def render_md(report: dict) -> str:
                              f"{x.get('side')} → {x.get('outcome')} exit={x.get('exit_px')}")
         else:
             lines.append(f"  ✅ 已结算单 net_usd 全部齐全（0 笔缺失）")
+        # ★ 2026-11-06：幽灵成交（从未发生）必须显式列出——它不是「缺 net」
+        gs = ttp.get('ghost_skipped') or []
+        if gs:
+            lines.append(f"  ⚠️ <b>{len(gs)} 笔幽灵成交未参与对照</b>（从未真正进场，不计入 v4.2 合计）:")
+            for x in gs:
+                lines.append(f"    · {(x.get('journal_id') or '?')[-15:]} {x.get('time_cst')} "
+                             f"{x.get('side')} → {x.get('outcome')} 账面 {x.get('net_usd')}")
         lines.append(f"  <i>{ttp['note']}</i>")
     
     lines.append(f'<i>数据时间: {report["generated_at_cst"]} CST</i>')
