@@ -29,9 +29,16 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, "/root/skills/btc-gate-intraday-strategy/web")
 
 import teacher_analysis as ta
-from teacher_replica import FEE, NOTIONAL, SigGen, load_bars
+from ref_trader_tools import (CST, BarSeries, fidelity_gate)
+
+FEE = 4.85
+NOTIONAL = 5000.0
 
 CST = timezone(timedelta(hours=8))
+
+
+def load_bars(tf):
+    return json.load(open("/root/data/BTC_USDT_klines.json"))["BTC_USDT"][tf]["bars"]
 
 
 def num(v):
@@ -204,8 +211,8 @@ def main():
     print("=" * 110)
     print("保真度门：复刻引擎能否复现老师自己的净值")
     print("=" * 110)
-    r1 = replay_teacher(SigGen(load_bars("1h"), 60), 60)
-    r2 = replay_teacher(SigGen(load_bars("15m"), 15), 15, use_bars15=True)
+    r1 = replay_teacher(BarSeries(load_bars("1h"), 60), 60)
+    r2 = replay_teacher(BarSeries(load_bars("15m"), 15), 15, use_bars15=True)
     print("\n  判据（btc-strategy-dev 步骤 3）：复现率 ≥ 90% → 可用于参数扫描")
     print(f"    1h 周期复现率 {r1*100:.1f}%   15m 周期复现率 {r2*100:.1f}%")
     if max(r1, r2) < 0.9:
