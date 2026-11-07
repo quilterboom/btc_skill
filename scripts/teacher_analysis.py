@@ -176,6 +176,19 @@ def _resolve_entry_ts(trade: dict, bars15: list) -> dict:
 def _entry_context(ts: Optional[int], px: Optional[float], bars15: list, bars1h: list) -> dict:
     """
     入场时刻的市场结构画像。ts 为 None 时全部返回 None（不臆造）。
+
+    ★ 2026-11-07 修 **前视偏差锚点**（skill btc-strategy-analysis §1.5）：
+      原实现取 `idx = 第一根 bar_ts >= ts 的 bar` —— 那是**包含 ts 的那根**，
+      在 ts 时刻它还没收盘，用它的 close / volume / high / low 全是**未来信息**。
+      正确锚点 = ts 之前**最后一根已收** bar（idx-1）。
+
+      实测这不是精度问题，是**结论方向反掉**：
+        同一批 47 笔生产单，仅改锚点：
+          锚点含 ts 那根：vol_x ≥3 桶 = -8.90U（2 笔）  ← 旧
+          锚点取已收 bar：vol_x 1.0~2.0 桶 = +35.30U（18 笔）← 新
+        且 journal 自带 `tags.vol` 对账一致率：off=0 只有 34.0%，
+        off=-1 升到 46.8%（tags.vol 是 1m 量能口径，定义不同不能到 100%，
+        但方向上 off=-1 明显更接近 → 佐证旧锚点错）。
     """
     ctx = {
         "dd_from_high_pct": None,      # 距入场前 24h 最高点的回撤 %
@@ -195,6 +208,8 @@ def _entry_context(ts: Optional[int], px: Optional[float], bars15: list, bars1h:
             break
     if idx is None:
         idx = len(bars15) - 1
+    # ★ 锚点：ts 之前最后一根【已收】bar（不含包含 ts 的那根）
+    idx = max(0, idx - 1)
     if idx < 5:
         return ctx
 
