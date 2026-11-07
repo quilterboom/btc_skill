@@ -154,8 +154,12 @@ def gate5(rows, keep_fn, name, thresholds=None):
             kn = sum(r["net"] for r in k) if k else 0.0
             dn = sum(r["net"] for r in d)
             base = sum(r["net"] for r in seg)
+            improved = kn > base
             print(f"    {tag} ({mid} 分界): 保留{kn:+7.2f}U(n={len(k)}) 被过滤{dn:+7.2f}U(n={len(d)}) "
-                  f"全段{base:+7.2f}U → 过滤后{'改善' if kn>base else '恶化'}")
+                  f"全段{base:+7.2f}U → 过滤后{'改善' if improved else '恶化'}")
+            # ★ 打印「恶化」必须同时记 fails —— 只打印不记，结论仍会打「✓ 成立」
+            if not improved:
+                fails.append(f"关2 {tag}未改善")
 
     # 关 3：方向分开
     print("\n  关3 方向分开：")
@@ -170,8 +174,11 @@ def gate5(rows, keep_fn, name, thresholds=None):
             continue
         kn = sum(r["net"] for r in k)
         base = sum(r["net"] for r in seg)
+        improved = kn > base
         print(f"    {side:<6} 保留{kn:+7.2f}U(n={len(k)}) 被过滤{sum(r['net'] for r in d):+7.2f}U(n={len(d)}) "
-              f"全段{base:+7.2f}U → {'改善' if kn>base else '恶化'}")
+              f"全段{base:+7.2f}U → {'改善' if improved else '恶化'}")
+        if not improved:
+            fails.append(f"关3 {side}未改善")
 
     # 关 4：被过滤的是什么
     print("\n  关4 被过滤组特征分布：")
