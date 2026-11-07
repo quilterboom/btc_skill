@@ -711,7 +711,13 @@ def render_md(report: dict) -> str:
         lines.append(f"  v4.2 净: {ttp['v4_2_net_usd']:+.2f}U")
         lines.append(f"  老师 TP 重算: {ttp['teacher_TP_net_usd']:+.2f}U")
         diff = ttp['diff_usd']
-        diff_arrow = '✓' if diff > 0 else '✗'
+        # ★ 2026-11-08 修：对照笔数 0 时 diff 恒为 0，原来的 `diff > 0 else '✗'`
+        #   会打出「差异: ✗ +0.00U」——看着像「对照失败」，实际是**没东西可比**。
+        #   0 笔对照时标「—（无对照样本）」，差异符号只在真有样本时给。
+        if ttp['entries_compared'] == 0:
+            diff_arrow = '—（无对照样本）'
+        else:
+            diff_arrow = '✓' if diff > 0 else ('✗' if diff < 0 else '=')
         lines.append(f"  差异: {diff_arrow} {diff:+.2f}U")
         if ttp.get('breakdown'):
             for b in ttp['breakdown'][:3]:
