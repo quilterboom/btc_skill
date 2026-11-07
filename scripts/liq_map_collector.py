@@ -174,18 +174,29 @@ def _format_rows(rows: List[Dict]) -> str:
     """
     out = []
     for r in rows:
+        def _num(v, default=0.0):
+            """None 安全的数值格式化：dict.get(k, 0) 只对**缺键**生效，
+            值为 None 时照样返回 None → None.__format__ 抛 TypeError。
+            ★ 2026-11-08 实测：suggestion.score=None 的 2 行让 sync_ima 崩了 3 天
+            （btc-liq-map-collector 每轮 exit 1，本地数据安全但 IMA 归档全断）。"""
+            return default if v is None else v
+
         def _side(lst: List[Dict]) -> str:
             if not lst:
                 return "—"
-            return " · ".join(f"{c['price']:.0f}/{c['strength_pct']:.0f}/{c['dist_pct']:+.1f}"
-                              for c in lst)
+            return " · ".join(
+                f"{_num(c.get('price')):.0f}/{_num(c.get('strength_pct')):.0f}"
+                f"/{_num(c.get('dist_pct')):+.1f}"
+                for c in lst)
         sug = r.get("suggestion") or {}
         cov = r.get("coverage_pct") or []
-        cov_s = f"{cov[0]:+.1f}%~{cov[1]:+.1f}%" if len(cov) == 2 else "—"
+        cov_s = (f"{_num(cov[0]):+.1f}%~{_num(cov[1]):+.1f}%"
+                 if len(cov) == 2 else "—")
         out.append(
-            f"| {r.get('ts_iso', '')} | {r.get('px', 0):,.1f} | {_side(r.get('above') or [])} | "
-            f"{_side(r.get('below') or [])} | {sug.get('score', 0):+.2f} | {sug.get('label', '—')} | "
-            f"{cov_s} | {r.get('source', '')} |")
+            f"| {r.get('ts_iso') or ''} | {_num(r.get('px')):,.1f} | {_side(r.get('above') or [])} | "
+            f"{_side(r.get('below') or [])} | {_num(sug.get('score')):+.2f} | "
+            f"{sug.get('label') or '—'} | "
+            f"{cov_s} | {r.get('source') or ''} |")
     return "\n".join(out)
 
 
