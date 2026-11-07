@@ -113,6 +113,12 @@ JOURNAL = Path("/root/data/journal.jsonl")
 if JOURNAL.exists():
     recs = [json.loads(l) for l in JOURNAL.read_text(encoding="utf-8").splitlines() if l.strip()]
     filled = [r for r in recs if _is_filled_trade(r) and r.get("net_usd") is not None]
+    # ★ 2026-11-06：守恒断言两边必须**同口径**——日历已剔除「幽灵成交」
+    #   （从未真正进场 的 hammer 交易，见 cost_basis_view.is_ghost_fill）。
+    #   自检这边也必须剔除，否则会因「日历真值 vs 账本账面」差整条差额而误报失败
+    #   ——那不是 bug，是自检口径没跟着改。
+    #   实测差 78.05U（生产 5 笔幽灵成交账面合计），天数 24 vs 25。
+    filled = [r for r in filled if not _cbv.is_ghost_fill(r)]
     # ★ 2026-11-04：日历与账本都用**可信净值**（fill_basis 优先，账面兜底）。
     #   hammer 市价追价成交的记录账面 net_usd 按计划 entry 记（口径陈旧），
     #   日历已改用真实成交价口径 → 守恒断言两边必须同口径。

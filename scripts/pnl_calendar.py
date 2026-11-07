@@ -164,6 +164,11 @@ def compute_pnl_calendar(trades: List[Dict], days: int = 90) -> Dict:
         #        「有 exit_px + outcome 不在 never-filled 集合」兜底。
         if not _is_filled_trade(t):
             continue
+        # ★ 2026-11-06：剔「幽灵成交」——从未真正发生过的 hammer 交易。
+        #   这些单 filled=True、有 exit_px、有 net_usd，看起来跟真交易一模一样，
+        #   但它们从未进场（hammer 触发线从未被触及），算进日历 = 凭空造亏损日。
+        if _cbv.is_ghost_fill(t):
+            continue
         # ★ 2026-10-27：还原真实出场时刻（exit_ts 可能被 risk_guard 污染）
         exit_ts, _basis = resolve_exit_ts(t)
         if exit_ts_is_suspect(t):

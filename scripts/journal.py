@@ -278,25 +278,83 @@ def cancel_preview(signal_id: str, reason: str = "USER_CANCEL") -> bool:
     return hit
 
 
+def _hammer_watcher_alive(max_age_sec: int = 120) -> bool:
+    """hammer watcher 线程是否还活着（读心跳文件）。
+
+    ★ 2026-11-05 加：promoter 跳过 hammer 信号后，如果 watcher 线程死了，
+    这些信号会永远卡在 preview_pending → 挡住同方向新信号（持仓守卫）。
+    所以 promoter 在"窗口已过且 watcher 失联"时要兜底作废。
+    心跳文件路径按 DATA_DIR 走 —— 训练环境 DATA_DIR=/root/data/training，
+    与 watch/hammer_watcher.py 的 HEARTBEAT_PATH 一致。
+    """
+    try:
+        hb_path = os.path.join(DATA_DIR, "hammer_watcher_heartbeat.json")
+        if not os.path.exists(hb_path):
+            return False
+        with open(hb_path, encoding="utf-8") as f:
+            hb = json.load(f)
+        if not hb.get("alive"):
+            return False
+        return (time.time() - int(hb.get("ts") or 0)) <= max_age_sec
+    except Exception:
+        return False
+
+
 def promote_due_previews(contract: str = "BTC_USDT") -> List[str]:
     """
     把所有 preview_until_ts 已过期的 preview_pending 信号自动推进到 pending。
     返回被推进的 signal_id 列表。
+
+    ★ 2026-11-05 修（hammer 幽灵成交）：**hammer 信号必须跳过**。
+      根因（实测 11 笔幽灵成交，生产 5 + 训练 6，账面 -173.34U）：
+        hammer 信号的 preview 窗口语义 = "等反弹确认的监测窗"，
+        归 **HammerWatcher** 独占：
+          · ticker ≥ hammer_L × 1.003 → 市价成交（_fill_method=market_on_watcher）
+          · 窗口到期没到触发线 → 标 cancelled / HAMMER_EXPIRED（**没这单**）
+        但 promoter 是通用 preview→pending 流程（1h 主信号 / 15m 形态用），
+        它在**同一秒**把 hammer 信号也 promote 成 pending → 抢在 watcher 的
+        过期作废之前 → watcher 后面只认 status=="preview_pending"，
+        于是这条信号永远等不到过期作废 → 落进 position_tracker 的**限价单**路径：
+        回放 1m K 线看到 low ≤ entry 就"成交"（成交价 = 计划限价，
+        甚至用**信号之前**那根 bar 的时间戳）→ 凭空多一笔亏损单。
+        证据：11 笔里 fill_ts < promoted_ts（成交早于 promote，物理不可能），
+        且窗口内 ticker 从未达到 hammer_L × 1.003（Gate 官方 1m K 线核对）。
+      修法：promoter 跳过 meta.hammer_managed 的信号 → watcher 独占其生命周期。
+      （配套防御：position_tracker 也不再给未成交的 hammer 信号做限价补成交。）
     """
     recs = _read()
     now = int(time.time())
     promoted: List[str] = []
+    cancelled: List[str] = []
     for r in recs:
         if (r.get("contract") == contract
                 and r.get("status") == "preview_pending"
                 and r.get("preview_until_ts")
                 and now >= int(r["preview_until_ts"])):
+            # ★ hammer 信号归 HammerWatcher 独占（见 docstring）
+            if (r.get("meta") or {}).get("hammer_managed"):
+                # 窗口已过 → 该作废（没成交）。但**由 watcher 作废**，
+                # 因为 watcher 同时负责秒级市价成交的判定。
+                # 只有 watcher 死了（心跳不新鲜）才由这里兜底作废，
+                # 否则这条信号会永远卡在 preview_pending →
+                # 挡住后续同方向新信号（持仓守卫把 preview_pending 也算持仓）。
+                if _hammer_watcher_alive():
+                    continue
+                r["status"] = "cancelled"
+                r["outcome"] = "HAMMER_EXPIRED"
+                r["exit_ts"] = now
+                r["note"] = (r.get("note") or "") + (
+                    " | hammer watcher 失联，监测窗过期兜底作废（未成交）")
+                cancelled.append(str(r.get("id") or ""))
+                continue
             r["status"] = "pending"
             r["promoted_ts"] = now
             r["note"] = (r.get("note") or "") + " | auto-promoted after preview"
-            promoted.append(r.get("id"))
-    if promoted:
+            promoted.append(str(r.get("id") or ""))
+    if promoted or cancelled:
         _write(recs)
+    if cancelled:
+        print(f"[journal] hammer watcher 失联，兜底作废 {len(cancelled)} 条过期信号: {cancelled}")
     return promoted
 
 

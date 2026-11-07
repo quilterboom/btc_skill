@@ -76,6 +76,113 @@ def is_stale(rec: Dict[str, Any]) -> bool:
     return bool(isinstance(rec, dict) and rec.get("net_usd_fill_basis") is not None)
 
 
+def is_ghost_fill(rec: Dict[str, Any]) -> bool:
+    """★ 该记录是不是「幽灵成交」（从未真正发生过的 hammer 交易）。
+
+    **前提（必须先满足）**：这条信号归 **HammerWatcher** 独占生命周期
+    （`meta.hammer_managed` 为真，或 `signal_source == left_side_oversold_bounce`）。
+    非 hammer 信号**一律不算**——同一个签名在别的信号源上有别的成因。
+
+    ⚠️ **不要把「fill_ts < promoted_ts」单独当铁证**（2026-11-06 实测反例）：
+    `BTC_USDT-1791692114-long`（15m_pattern）同样是 fill_ts 早于 promoted_ts，
+    但它是**真单**——events 里 outcome 事件记 TP2_DONE +37.16（真值），
+    账本记 +89.43 是出场被 risk_guard 重写造成的虚高，属于
+    strategy_truth 的 `rewritten_exit` 类别，不是幽灵成交。
+    把它误标成幽灵 = 把一笔真交易从统计里剔掉 = 新的假数据。
+
+    **签名（命中前提后，按可靠性排序）**：
+
+    1. `fill_ts < promoted_ts` —— 成交发生在信号被推进之前。对 hammer 信号
+       而言物理不可能（成交只可能来自 watcher 在 preview_pending 期间的秒级
+       市价，而 promote 发生在 preview 窗口到期之后）。
+    2. `meta.hammer_managed` 且 `_fill_method != "market_on_watcher"` 却有
+       `fill_px` —— hammer 的成交只能来自 watcher 的秒级市价（触发线
+       `hammer_L × 1.003`）；别的路径补出来的 fill_px 是「计划限价」，
+       不是真实成交价。**本签名单独即可判定**，且能覆盖 fill_ts 缺失的变体。
+
+    **为什么要有这个函数**：2026-11-06 复盘发现，11-05 22:45 生产唯一一笔
+    「已结算亏损 -24.09U」就是幽灵成交（hammer 触发线 79190 从未被 1m K 线
+    触及，最高只到 79108；成交价 79094.3 == 计划 entry；fill_ts 早于
+    promoted_ts）。它让日报/看板凭空多出一笔亏损。
+
+    **处置纪律**：**不改 `net_usd`**（改了就把 bug 固化进账本），只是
+    「从统计里剔除 + 标 data_quality」。真值重建不出来就留空等 liusir 拍板。
+
+    用法：
+        if cost_basis_view.is_ghost_fill(rec):
+            continue
+    """
+    if not isinstance(rec, dict):
+        return False
+    meta = rec.get("meta") or {}
+    # ── 前提：必须归 HammerWatcher 独占（排除 15m_pattern 等其它信号源）
+    is_hammer = bool(meta.get("hammer_managed")) or \
+        rec.get("signal_source") == "left_side_oversold_bounce"
+    if not is_hammer:
+        return False
+    # ── 签名 2：非 watcher 成交却有 fill_px（单独即可判定）
+    if rec.get("_fill_method") != "market_on_watcher" and rec.get("fill_px") is not None:
+        return True
+    # ── 签名 1：成交早于推进（对 hammer 信号是物理不可能）
+    ft, pt_ = rec.get("fill_ts"), rec.get("promoted_ts")
+    if ft and pt_:
+        try:
+            return int(ft) < int(pt_)
+        except (TypeError, ValueError):
+            return False
+    return False
+
+
+NOTIONAL_USD = 5000.0   # 名义 = 保证金 50U × 杠杆 100x（与 position_tracker 同源）
+QUANT_MULT = 0.0001    # 1 张 = 0.0001 BTC
+
+
+def cost_basis_of(rec: Dict[str, Any]) -> Optional[float]:
+    """★ 这笔单**真实付出**的成本价（fill_px 优先，entry 兜底）。
+
+    与 `position_tracker._cost_basis` 同一语义，但放在零依赖公共模块里，
+    让 daily_report / web 都能用，不用 import position_tracker（有副作用）。
+
+    - 限价成交：fill_px == entry → 两者相同，无差别
+    - hammer 秒级市价（_fill_method=market_on_watcher）：fill_px 才是真实成交价，
+      entry 只是「打算在哪进」——用它算收益 = 账面虚高
+    """
+    if not isinstance(rec, dict):
+        return None
+    fp = rec.get("fill_px")
+    if fp is not None:
+        try:
+            v = float(fp)
+        except (TypeError, ValueError):
+            v = 0.0
+        if v > 0:
+            return v
+    try:
+        e = float(rec.get("entry") or 0)
+    except (TypeError, ValueError):
+        return None
+    return e if e > 0 else None
+
+
+def canonical_contracts(cost_px: float, notional_usd: float = NOTIONAL_USD) -> float:
+    """★ 名义口径的仓位数（**不除杠杆**）。
+
+    口径：`contracts = notional_usd / (price × QUANT_MULT)`。
+    杠杆只决定保证金（50U），不决定名义——名义已经是 5000U。
+
+    ⚠️ **别写成 `notional / leverage / (price × QUANT_MULT)`**：
+    那是把名义又除了一次杠杆 = 仓位小 100 倍（实测 2026-11-07：
+    daily_report 老师 TP 对照用这个写法，75885.7 入场只算出 6.6 张
+    而非 659 张 → 老师 TP 盈亏被压缩 100 倍 → 卡片结论方向都反了）。
+
+    交叉验证：`teacher_trades.jsonl` 里老师真实单的 size_contracts
+    与本公式一致（#18: 78000 入场 → 641 张，公式算 641）。
+    """
+    if not cost_px or cost_px <= 0:
+        return 0.0
+    return notional_usd / (cost_px * QUANT_MULT)
+
+
 def basis_triplet(records) -> Dict[str, float]:
     """批量三段式：{book, true, diff, stale_n}。
 

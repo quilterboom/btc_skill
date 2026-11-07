@@ -322,6 +322,28 @@ def _settle_one(sig: Dict, bars: List[List]) -> Optional[Dict]:
 
         # 2) 是否挂到单
         if not sig.get("filled", False):
+            # ★ 2026-11-05 修（hammer 幽灵成交 · 配套防御）：
+            #   hammer 信号的成交**只归 HammerWatcher**（秒级市价，_fill_method=
+            #   market_on_watcher）。走到这里还没 filled = 监测窗已过期、反弹没确认
+            #   → **本来就不该有这单**，不能按限价单补成交。
+            #   原 bug：promoter 抢先 promote → 落到这条限价路径 → 回放 1m K 线
+            #   看到 low ≤ entry 就"成交"（成交价=计划限价，fill_ts 还用信号之前
+            #   那根 bar 的时间戳）→ 凭空造出亏损单（实测 11 笔，账面 -173.34U）。
+            #   两条防线：① promoter 跳过 hammer（journal.promote_due_previews）
+            #            ② 这里不补成交（双保险，防任何其它路径把 hammer 送进来）
+            #
+            #   注意：hammer 的 entry = hammer 高点，市场常态就在它下方，
+            #   等涨回来才是信号 → 不能用"离 entry 太远"（800 点）那条通用规则
+            #   去判它。直接按"没成交"作废：outcome=MISSED（净利 0，
+            #   strategy_truth / pnl_calendar 都把 MISSED 当"从未成交"剔除）。
+            if (sig.get("meta") or {}).get("hammer_managed") and \
+                    sig.get("_fill_method") != "market_on_watcher":
+                return {
+                    "pos_state": "MISSED", "outcome": "MISSED",
+                    "exit_ts": ts, "exit_px": round(c, 1),
+                    "net_usd": 0.0, "category": "skip",
+                    "note": "hammer 监测窗过期未确认反弹（无秒级市价成交）→ 未进场",
+                }
             # 2026-10-06 liusir 规则：未进场的挂单，如果当前价已离 entry 太远
             #  → 标 MISSED（避免长期挂死单占 journal 空间）
             # 用 K 线 mid 估算当前价：(h+l)/2

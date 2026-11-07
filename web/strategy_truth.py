@@ -239,6 +239,14 @@ def truth_records(journal_path: Path = DATA_DIR / "journal.jsonl") -> tuple:
     windows = _batch_windows(pool)
     keep: list = []
     for r in pool:
+        # ★ 2026-11-06：剔「幽灵成交」——从未真正发生过的 hammer 交易。
+        #   hammer 信号的成交只归 HammerWatcher（秒级市价，触发线 hammer_L×1.003）；
+        #   被通用 promoter 抢跑 promote 过的信号会掉进限价单路径被「补」出一笔
+        #   从未发生的成交（实测 12 笔：生产 5 + 训练 7，账面 -199.71U）。
+        #   账本 net_usd 不改（审计线索），只是不计入统计 + 列表标「数据存疑」。
+        if _cbv.is_ghost_fill(r):
+            excluded.append({"id": r.get("id"), "reason": "ghost_fill"})
+            continue
         win = windows.get(r.get("id"))
         if _is_rewritten_exit(r, win):
             excluded.append({"id": r.get("id"), "reason": "rewritten_exit"})
