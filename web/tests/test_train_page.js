@@ -69,8 +69,11 @@ function check(name, ok, extra = "") {
   check("sec-train-strategy 是全宽 .grid + .card", !!q("#sec-train-strategy.grid > .card"));
   check("sec-train-analysis 是 .data-grid", !!q("#sec-train-analysis.data-grid"));
   check("sec-train-analysis 有 sec-hd 标题", !!q("#sec-train-analysis .sec-hd"));
-  check("sec-train-analysis 有 3 张 .data-card", qa("#sec-train-analysis > .data-card").length === 3,
+  // ★ 2026-11-08：加了「交易收益」卡 → 5 张（策略矩阵/错误归因/生产亏损原因/最近10笔/交易收益）
+  //   （原断言写死 3，但 11-03 加「生产亏损原因」后已经是 4 —— 一直没跟上，本次一并修正）
+  check("sec-train-analysis 有 5 张 .data-card", qa("#sec-train-analysis > .data-card").length === 5,
     `实际 ${qa("#sec-train-analysis > .data-card").length}`);
+  check("交易收益卡在训练数据分析区（#train-pnl-periods）", !!q("#train-pnl-periods"));
   check("老的 split-grid 双栏已移除（panel-train-strategy）", !q("#panel-train-strategy"));
   check("老的 panel-train-effect 已移除", !q("#panel-train-effect"));
   check("辅助区 train-aux 是折叠 details", !!q("details.train-aux#train-aux"));

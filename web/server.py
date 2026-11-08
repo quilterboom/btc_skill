@@ -15,6 +15,7 @@ BTC 策略运行状态面板（3003）
 """
 from __future__ import annotations
 import os, re, sys, json, time, glob, subprocess
+from datetime import datetime, timedelta
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Optional, Tuple
@@ -745,6 +746,9 @@ def build_status() -> dict:
         "btc_meta": _btc_meta(),
         "strategy": _journal_state(),
         "winrate": _winrate(),
+        # ★ 2026-11-08 liusir：「把交易收益分为周，月，年还有一个总计」
+        #   口径与 winrate 卡同源（strategy_truth + 真实成本基准 + 真实出场日归集）
+        "pnl_periods": _pnl_periods("prod"),
         # ★ 2026-10-26 新增：分代明细（旧代不再污染当前代判断，但保留可见）
         # 2026-10-17 liusir: 借鉴 LuxAlgo/trade-journal
         "edge_score": _edge_score(),
@@ -773,12 +777,101 @@ def _edge_score() -> dict:
         return {"error": str(e)}
 
 
+def _pnl_periods(env: str = "prod") -> dict:
+    """交易收益按 周 / 月 / 年 / 总计 分桶（2026-11-08）。
+
+    ★ 口径与「胜率卡」完全同源，绝不自己另算一遍（btc-position-ops 口径收敛纪律）：
+      记录集 = strategy_truth（journal 真相口径：已结算可信单，剔双胞胎 /
+               幽灵成交 / 出场被重写 / 测试单）
+      净值   = cost_basis_view.effective_net（fill_basis 优先，账面兜底）
+      归桶日 = **真实出场日**（resolve_exit_ts），不是信号日 ts
+               —— 盈亏在出场时产生，跟 P&L 日历 / 边缘分同源，跨日单算到出场那天。
+
+    周期取自然日历（本周 = 周一 00:00 起，本月 = 1 号 00:00 起，本年 = 1 月 1 日起），
+    不用滚动窗口 —— 「周/月/年」在中文语境里默认是自然周期；每个桶带上实际区间，
+    前端展示区间 = 用户不用猜口径。
+    """
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+        from pnl_calendar import resolve_exit_ts
+        truth = _strategy_truth(env)
+        recs = truth["records"]
+
+        # 出场日 + 净值（只保留能算出净值的已结算单）
+        dated = []
+        for r in recs:
+            net = _eff_net(r)
+            if net is None:
+                continue
+            ts, _basis = resolve_exit_ts(r)
+            if not ts:
+                ts = r.get("ts") or 0
+            if not ts:
+                continue
+            dated.append((datetime.fromtimestamp(ts), net))
+
+        now = datetime.now()
+        today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        week_start = today - timedelta(days=today.weekday())      # 周一 00:00
+        month_start = today.replace(day=1)                        # 本月 1 号 00:00
+        year_start = today.replace(month=1, day=1)                # 本年 1 月 1 日
+
+        def _bucket(lo=None):
+            sel = [(d, n) for d, n in dated if (lo is None or d >= lo)]
+            n_trades = len(sel)
+            wins = sum(1 for _d, n in sel if n > 0)
+            return {
+                "net_usd": round(sum(n for _d, n in sel), 2),
+                "n_trades": n_trades,
+                "wins": wins,
+                "losses": sum(1 for _d, n in sel if n < 0),
+                "winrate_pct": round(wins / n_trades * 100, 1) if n_trades else None,
+            }
+
+        all_dates = [d for d, _n in dated]
+        periods = []
+        for key, label, lo, scope in (
+            ("week", "本周", week_start, "周一至今"),
+            ("month", "本月", month_start, "1 号至今"),
+            ("year", "本年", year_start, "年初至今"),
+            ("total", "总计", None, "全部历史"),
+        ):
+            if lo is None:   # 总计：区间 = 真实历史跨度
+                start = min(all_dates) if all_dates else None
+                end = max(all_dates) if all_dates else None
+            else:
+                start, end = lo, now
+            periods.append({
+                "key": key, "label": label, "scope": scope,
+                "from": start.strftime("%Y-%m-%d") if start else None,
+                "to": end.strftime("%Y-%m-%d") if end else None,
+                **_bucket(lo),
+            })
+
+        return {
+            "periods": periods,
+            "attribution": "exit_day",
+            "basis": "账本可信口径（剔双胞胎/幽灵成交/出场被重写）· 净值取真实成本基准",
+            "n_excluded": len(truth["excluded"]),
+            "n_settled": len(recs),
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
 def _pnl_calendar() -> dict:
-    """P&L 日历（每日盈亏 + 红/绿/平 + 最大单日）"""
+    """P&L 日历（每日盈亏 + 红/绿/平 + 最大单日）
+
+    ★ 2026-11-08 口径收敛：喂进来的记录从「原始 journal」换成 **strategy_truth
+      可信记录**。原来直接读原始 journal → 双胞胎（重复计）+ 出场被重写
+      （净值虚高 +268U）都进了日历，30 天合计 +182.27U，而账本可信 30 天是
+      -89.12U —— 同一屏上日历大数和胜率卡「累计净盈亏」对不上 = 卡片自己跟
+      自己打架（比单一口径错更难解释）。收敛后「日历合计 == 账本可信合计」成立。
+    """
     try:
         sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
         from pnl_calendar import compute_pnl_calendar
-        recs = _read_jsonl(DATA_DIR / "journal.jsonl")
+        recs = _strategy_truth()["records"]
         return compute_pnl_calendar(recs, days=30)
     except Exception as e:
         return {"error": str(e)}
@@ -893,6 +986,9 @@ def build_status_training() -> dict:
             "settled": settled_count,
             "net_usd": round(net_usd, 2),
         },
+        # ★ 2026-11-08 liusir：交易收益分周/月/年/总计（训练环境同款，
+        #   与上方 settler_counters 不同口径 —— 走账本可信口径剔幽灵成交）
+        "pnl_periods": _pnl_periods("training"),
         "waves": _wave_analysis_training(),
         # 2026-10-17 加：训练版缺 btc 实时价，导致训练持仓卡片"最新价"显示的是
         # signal 触发时的 last 价 (12+ 小时前)，不是当前 BTC 价格

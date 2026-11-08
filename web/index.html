@@ -750,6 +750,28 @@
     .es-row .bar { flex: 1; height: 4px; max-width: 80px; background: #f1f5f9; border-radius: 2px; overflow: hidden; }
     .es-row .bar > i { display: block; height: 100%; background: var(--green); border-radius: 2px; }
 
+    /* ===== 2026-11-08 交易收益：周 / 月 / 年 / 总计 周期分解表 ===== */
+    .pp-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+    .pp-table thead th {
+      background: var(--tc-bg-head); color: var(--tc-text-sub); font-weight: 500;
+      text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--tc-border); white-space: nowrap;
+    }
+    .pp-table thead th.pp-right { text-align: right; }
+    .pp-table td {
+      padding: 7px 8px; border-bottom: 1px solid #f0f0f0;
+      font-variant-numeric: tabular-nums;
+    }
+    .pp-table tbody tr:last-child td { border-bottom: none; }
+    .pp-table .pp-lbl { font-weight: 600; white-space: nowrap; }
+    .pp-table .pp-range { color: var(--muted); font-size: 11px; white-space: nowrap; }
+    .pp-table .pp-val { text-align: right; font-weight: 700; font-size: 14px; white-space: nowrap; }
+    .pp-table .pp-val.pos  { color: var(--green); }
+    .pp-table .pp-val.neg  { color: var(--red); }
+    .pp-table .pp-val.flat { color: var(--muted); }
+    .pp-table .pp-n, .pp-table .pp-wr { text-align: right; color: var(--text); }
+    /* 总计行：加粗 + 上分隔线 */
+    .pp-table tr.pp-total td { border-top: 2px solid var(--tc-border-2); background: #fafcff; font-weight: 600; }
+
     /* P&L 日历：左总结 / 右条形图 */
     .pnl-board { display: flex; flex-direction: column; gap: 12px; flex: 1; }
     .pnl-board-top { display: flex; align-items: baseline; gap: 18px; flex-wrap: wrap; }
@@ -1740,6 +1762,13 @@
       <h3>P&amp;L 日历 <small>30 天</small></h3>
       <div id="pnl-calendar">加载中…</div>
     </div>
+    <!-- 2026-11-08 liusir：「把交易收益分为周，月，年还有一个总计」
+         口径与胜率卡同源（账本可信记录 + 真实成本基准 + 按出场日归集），
+         所以本卡的「总计」== 胜率卡的「累计净盈亏」，不会两个数打架。 -->
+    <div class="data-card">
+      <h3>交易收益 <small>周 / 月 / 年 / 总计</small></h3>
+      <div id="pnl-periods">加载中…</div>
+    </div>
     <div class="data-card">
       <h3>错误归因 <small>近期</small></h3>
       <div id="mistakes-summary">加载中…</div>
@@ -1818,6 +1847,11 @@
     <div class="data-card">
       <h3>最近 10 笔 <small>训练明细</small></h3>
       <div id="train-recent-trades">加载中…</div>
+    </div>
+    <!-- 2026-11-08 liusir：交易收益分周/月/年/总计（与生产版同款同口径） -->
+    <div class="data-card">
+      <h3>交易收益 <small>周 / 月 / 年 / 总计</small></h3>
+      <div id="train-pnl-periods">加载中…</div>
     </div>
   </div>
 
@@ -2255,6 +2289,8 @@ function renderTraining(d) {
   if (d.strategy_matrix) renderStrategyMatrix(d.strategy_matrix, "train-strategy-matrix");
   if (d.recent_training_trades) renderRecentTrades(d.recent_training_trades, "train-recent-trades");
   if (d.mistakes) renderLossCauses(d.mistakes, "train-mistakes");
+  // 2026-11-08 liusir：交易收益分周/月/年/总计（与生产版同款同口径）
+  if (d.pnl_periods) renderPnlPeriods(d.pnl_periods, "train-pnl-periods");
   // 2026-11-03：生产亏损原因 = 训练策略调整的输入（生产账本只读）
   if (d.loss_causes_input) renderProdLossCauses(d.loss_causes_input, "train-prod-loss-causes");
 
@@ -2476,6 +2512,8 @@ function render(d) {
   // 2026-10-17 借鉴 trade-journal：Edge Score + P&L 日历 + 错误归因
   renderEdgeScore(d.edge_score);
   renderPnlCalendar(d.pnl_calendar);
+  // 2026-11-08 liusir：交易收益分周/月/年/总计（与胜率卡同口径，总计 == 累计净盈亏）
+  renderPnlPeriods(d.pnl_periods);
   renderMistakes(d.mistakes);
   // 2026-10-17 借鉴 HyperView：5 objective 周趋势
   renderMetricsTrend();
@@ -2607,6 +2645,48 @@ function renderPnlCalendar(cal, elId = "pnl-calendar") {
     });
     bar.addEventListener("mouseleave", () => { tip.hidden = true; });
   });
+}
+
+// ★ 2026-11-08 liusir：「把交易收益分为周，月，年还有一个总计」
+//   4 行表：本周 / 本月 / 本年 / 总计，每行 净盈亏 + 笔数 + 胜率 + 区间。
+//   口径与胜率卡同源（strategy_truth 可信记录 + effective_net 净值 + 真实出场日归集），
+//   所以「总计」行和胜率卡的「累计净盈亏」必然一致，同一屏不会出现两个数打架。
+//   指标全中文（净盈亏 / 笔数 / 胜率），不出现 WR/NET 之类英文缩写。
+function renderPnlPeriods(pp, elId = "pnl-periods") {
+  const el = document.getElementById(elId);
+  if (!el) return;
+  if (!pp || pp.error || !pp.periods || pp.periods.length === 0) {
+    el.innerHTML = `<div class="empty">${pp && pp.error ? pp.error : "暂无收益数据"}</div>`;
+    return;
+  }
+  const rows = pp.periods.map(p => {
+    const n = p.n_trades ?? 0;
+    const v = p.net_usd ?? 0;
+    const cls = v > 0 ? "pos" : v < 0 ? "neg" : "flat";
+    // 0 笔 → 净盈亏显示「—」而不是 +0.00U（0 样本 ≠ 没赚没亏，避免假的「平局」）
+    const valTxt = n === 0 ? "—" : fmtUsd(v);
+    const wrTxt = p.winrate_pct == null ? "—" : p.winrate_pct.toFixed(1) + "%";
+    const range = p.from ? `${p.from} ~ ${p.to}` : "—";
+    return `
+      <tr class="${p.key === "total" ? "pp-total" : ""}">
+        <td class="pp-lbl">${p.label}</td>
+        <td class="pp-range">${range}<span class="meta" style="margin-left:6px">${p.scope || ""}</span></td>
+        <td class="pp-val ${n === 0 ? "flat" : cls}">${valTxt}</td>
+        <td class="pp-n">${n}</td>
+        <td class="pp-wr">${wrTxt}</td>
+      </tr>`;
+  }).join("");
+  el.innerHTML = `
+    <table class="pp-table">
+      <thead><tr>
+        <th>周期</th><th>区间</th>
+        <th class="pp-right">净盈亏</th><th class="pp-right">笔数</th><th class="pp-right">胜率</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <div class="meta" style="margin-top:8px">
+      按真实出场日归集 · 账本可信口径${pp.n_excluded ? ` · 已剔除 ${pp.n_excluded} 笔数据存疑` : ""}
+    </div>`;
 }
 
 function renderMistakes(ms, elId = "mistakes-summary") {
