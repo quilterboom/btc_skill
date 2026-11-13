@@ -131,6 +131,7 @@ def backfill(path: Path, apply: bool) -> dict:
 
     changed = []
     rows = []
+    no_diff = []
     for rec in recs:
         if not _is_hammer_market_fill(rec):
             continue
@@ -171,6 +172,20 @@ def backfill(path: Path, apply: bool) -> dict:
         if not apply:
             continue
 
+        # ★ 2026-11-13 修：**差额为 0 的单不写任何字段**。
+        #   差额 = 0 说明「按真实成交价」和「按计划 entry」算出来的净值**完全相同**
+        #   → 账本本来就是按真实成本记的（结算时代码已用 fill_px），**不是陈旧口径**。
+        #   老写法给它们也盖「口径陈旧」章的三个后果：
+        #     ① data_quality 谎称「按计划 entry 记账」（与事实相反）
+        #     ② pnl_basis_stale(v1) 把 20 笔非陈旧单标成陈旧（审计线索被污染）
+        #     ③ 展示层 is_stale() 为真 → 日报卡片打出「-2.04U (账面 -2.04U)」
+        #        —— 同一个数印两遍，纯噪音（违反「恒等于 0 的指标不用正负表达」通则）
+        #   实测 2026-11-13：生产 6 笔 + 训练 14 笔差额全为 0.00U，只有训练
+        #   BTC_USDT-1793765732-long 真正陈旧（账面 +86.51 → 真实 +50.43，差 -36.08U）。
+        if diff is None or abs(float(diff)) < 0.005:
+            no_diff.append(rec.get("id"))
+            continue
+
         # ── 回填（只加字段，不改写既有值）──
         rec["net_usd_fill_basis"] = res["net_usd"]
         rec["gross_usd_fill_basis"] = res["gross_usd"]
@@ -204,7 +219,8 @@ def backfill(path: Path, apply: bool) -> dict:
         tmp.replace(path)
 
     return {"path": str(path), "n": len(rows), "rows": rows,
-            "changed": changed, "applied": apply}
+            "changed": changed, "applied": apply,
+            "no_diff": no_diff}
 
 
 def main():
